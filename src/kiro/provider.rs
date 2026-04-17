@@ -4,6 +4,7 @@
 //! 支持流式和非流式请求
 //! 支持多凭据故障转移和重试
 
+use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, RwLock};
 use reqwest::Client;
 use reqwest::header::{AUTHORIZATION, CONNECTION, CONTENT_TYPE, HOST, HeaderMap, HeaderValue};
@@ -37,6 +38,12 @@ const MAX_RETRIES_PER_CREDENTIAL: usize = 2;
 
 /// 总重试次数硬上限（避免无限重试）
 const MAX_TOTAL_RETRIES: usize = 3;
+
+/// 429 冷却默认时长（无 Retry-After 时使用 CooldownManager 的默认递增策略）
+const DEFAULT_RATE_LIMIT_COOLDOWN_SECS: u64 = 60;
+
+/// 429 冷却最大时长上限（避免异常 Retry-After 把单号挂死太久）
+const MAX_RATE_LIMIT_COOLDOWN_SECS: u64 = 300;
 
 /// Kiro API Provider
 ///
@@ -411,6 +418,7 @@ impl KiroProvider {
             };
 
             let status = response.status();
+            let retry_after = Self::parse_retry_after(response.headers());
 
             // 成功响应
             if status.is_success() {
@@ -513,8 +521,29 @@ impl KiroProvider {
                 continue;
             }
 
+            if status.as_u16() == 429 {
+                if Self::is_model_temporarily_unavailable(&body)
+                    && self.token_manager.report_model_unavailable()
+                {
+                    anyhow::bail!(
+                        "MCP 请求失败（模型暂时不可用，已触发熔断）: {} {}",
+                        status,
+                        body
+                    );
+                }
+
+                let cooldown = self.handle_rate_limited_response(ctx.id, &body, retry_after);
+                tracing::warn!(
+                    credential_id = %ctx.id,
+                    cooldown_secs = %cooldown.as_secs(),
+                    "MCP 请求触发 429，当前凭据进入冷却并尝试切换其他凭据"
+                );
+                last_error = Some(anyhow::anyhow!("MCP 请求失败: {} {}", status, body));
+                continue;
+            }
+
             // 瞬态错误
-            if matches!(status.as_u16(), 408 | 429) || status.is_server_error() {
+            if matches!(status.as_u16(), 408) || status.is_server_error() {
                 tracing::warn!(
                     "MCP 请求失败（上游瞬态错误，尝试 {}/{}）: {} {}",
                     attempt + 1,
@@ -645,6 +674,7 @@ impl KiroProvider {
             };
 
             let status = response.status();
+            let retry_after = Self::parse_retry_after(response.headers());
 
             // 成功响应
             if status.is_success() {
@@ -796,9 +826,37 @@ impl KiroProvider {
                 continue;
             }
 
-            // 429/408/5xx - 瞬态上游错误：重试但不禁用或切换凭据
-            // （避免 429 high traffic / 502 high load 等瞬态错误把所有凭据锁死）
-            if matches!(status.as_u16(), 408 | 429) || status.is_server_error() {
+            if status.as_u16() == 429 {
+                if Self::is_model_temporarily_unavailable(&body)
+                    && self.token_manager.report_model_unavailable()
+                {
+                    anyhow::bail!(
+                        "{} API 请求失败（模型暂时不可用，已触发熔断）: {} {}",
+                        api_type,
+                        status,
+                        body
+                    );
+                }
+
+                let cooldown = self.handle_rate_limited_response(ctx.id, &body, retry_after);
+                tracing::warn!(
+                    credential_id = %ctx.id,
+                    cooldown_secs = %cooldown.as_secs(),
+                    "{} API 请求触发 429，当前凭据进入冷却并尝试切换其他凭据",
+                    api_type
+                );
+                last_error = Some(anyhow::anyhow!(
+                    "{} API 请求失败: {} {}",
+                    api_type,
+                    status,
+                    body
+                ));
+                continue;
+            }
+
+            // 408/5xx - 瞬态上游错误：重试但不禁用或切换凭据
+            // （避免 502 high load 等瞬态错误把所有凭据锁死）
+            if matches!(status.as_u16(), 408) || status.is_server_error() {
                 tracing::warn!(
                     "API 请求失败（上游瞬态错误，尝试 {}/{}）: {} {}",
                     attempt + 1,
@@ -806,6 +864,18 @@ impl KiroProvider {
                     status,
                     body
                 );
+
+                if Self::is_model_temporarily_unavailable(&body)
+                    && self.token_manager.report_model_unavailable()
+                {
+                    anyhow::bail!(
+                        "{} API 请求失败（模型暂时不可用，已触发熔断）: {} {}",
+                        api_type,
+                        status,
+                        body
+                    );
+                }
+
                 last_error = Some(anyhow::anyhow!(
                     "{} API 请求失败: {} {}",
                     api_type,
@@ -933,6 +1003,86 @@ impl KiroProvider {
         let jitter_max = (backoff / 4).max(1);
         let jitter = fastrand::u64(0..=jitter_max);
         Duration::from_millis(backoff.saturating_add(jitter))
+    }
+
+    fn handle_rate_limited_response(
+        &self,
+        credential_id: u64,
+        body: &str,
+        retry_after: Option<Duration>,
+    ) -> Duration {
+        let cooldown = self.token_manager.set_credential_cooldown_with_duration(
+            credential_id,
+            crate::kiro::cooldown::CooldownReason::RateLimitExceeded,
+            retry_after,
+        );
+
+        tracing::warn!(
+            credential_id = %credential_id,
+            retry_after_secs = ?retry_after.map(|d| d.as_secs()),
+            cooldown_secs = %cooldown.as_secs(),
+            rate_limit_response = %Self::is_rate_limit_response(body),
+            "凭据触发 429 限流，已设置冷却"
+        );
+
+        cooldown
+    }
+
+    fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
+        let raw = headers.get("retry-after")?.to_str().ok()?.trim();
+        if raw.is_empty() {
+            return None;
+        }
+
+        if let Ok(seconds) = raw.parse::<u64>() {
+            return Some(Self::clamp_rate_limit_cooldown(Duration::from_secs(
+                seconds,
+            )));
+        }
+
+        let retry_at = DateTime::parse_from_rfc2822(raw).ok()?.with_timezone(&Utc);
+        let now = Utc::now();
+        let wait = retry_at.signed_duration_since(now).to_std().ok()?;
+        Some(Self::clamp_rate_limit_cooldown(wait))
+    }
+
+    fn clamp_rate_limit_cooldown(duration: Duration) -> Duration {
+        duration.clamp(
+            Duration::from_secs(DEFAULT_RATE_LIMIT_COOLDOWN_SECS),
+            Duration::from_secs(MAX_RATE_LIMIT_COOLDOWN_SECS),
+        )
+    }
+
+    fn is_rate_limit_response(body: &str) -> bool {
+        let lower = body.to_ascii_lowercase();
+        if lower.contains("rate limit")
+            || lower.contains("too many requests")
+            || lower.contains("high traffic")
+            || lower.contains("request limit")
+        {
+            return true;
+        }
+
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+            return false;
+        };
+
+        let reason_matches = |s: &str| {
+            let upper = s.to_ascii_uppercase();
+            upper.contains("RATE_LIMIT")
+                || upper.contains("TOO_MANY_REQUESTS")
+                || upper.contains("REQUEST_LIMIT")
+                || upper.contains("HIGH_TRAFFIC")
+        };
+
+        value
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .is_some_and(reason_matches)
+            || value
+                .pointer("/error/reason")
+                .and_then(|v| v.as_str())
+                .is_some_and(reason_matches)
     }
 
     fn is_monthly_request_limit(body: &str) -> bool {
@@ -1160,6 +1310,7 @@ impl KiroProvider {
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
+    use crate::kiro::cooldown::CooldownReason;
     use crate::kiro::model::credentials::KiroCredentials;
     use crate::kiro::token_manager::CallContext;
     use crate::model::config::Config;
@@ -1277,6 +1428,117 @@ mod tests {
         let headers = provider.build_mcp_headers(&ctx).unwrap();
 
         assert!(headers.get("x-amzn-kiro-profile-arn").is_none());
+    }
+
+    #[test]
+    fn test_parse_retry_after_seconds() {
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", HeaderValue::from_static("120"));
+
+        let wait = KiroProvider::parse_retry_after(&headers).unwrap();
+        assert_eq!(wait, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn test_parse_retry_after_http_date() {
+        let mut headers = HeaderMap::new();
+        let future = (Utc::now() + chrono::Duration::seconds(90)).to_rfc2822();
+        headers.insert("retry-after", HeaderValue::from_str(&future).unwrap());
+
+        let wait = KiroProvider::parse_retry_after(&headers).unwrap();
+        assert!(wait >= Duration::from_secs(60));
+        assert!(wait <= Duration::from_secs(120));
+    }
+
+    #[test]
+    fn test_parse_retry_after_invalid() {
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", HeaderValue::from_static("not-a-date"));
+
+        assert!(KiroProvider::parse_retry_after(&headers).is_none());
+    }
+
+    #[test]
+    fn test_parse_retry_after_clamps_range() {
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", HeaderValue::from_static("5"));
+        assert_eq!(
+            KiroProvider::parse_retry_after(&headers).unwrap(),
+            Duration::from_secs(60)
+        );
+
+        headers.insert("retry-after", HeaderValue::from_static("600"));
+        assert_eq!(
+            KiroProvider::parse_retry_after(&headers).unwrap(),
+            Duration::from_secs(300)
+        );
+    }
+
+    #[test]
+    fn test_is_rate_limit_response_detects_reason() {
+        let body = r#"{"message":"Too many requests","reason":"RATE_LIMIT_EXCEEDED"}"#;
+        assert!(KiroProvider::is_rate_limit_response(body));
+    }
+
+    #[test]
+    fn test_is_rate_limit_response_detects_nested_reason() {
+        let body = r#"{"error":{"reason":"REQUEST_LIMIT_5_MINUTES"}}"#;
+        assert!(KiroProvider::is_rate_limit_response(body));
+    }
+
+    #[test]
+    fn test_is_rate_limit_response_false() {
+        let body = r#"{"message":"Forbidden","reason":"AUTH_FAILED"}"#;
+        assert!(!KiroProvider::is_rate_limit_response(body));
+    }
+
+    #[test]
+    fn test_handle_rate_limited_response_sets_cooldown() {
+        let config = Config::default();
+        let credentials = KiroCredentials::default();
+        let provider = create_test_provider(config, credentials);
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", HeaderValue::from_static("120"));
+
+        let cooldown = provider.handle_rate_limited_response(
+            1,
+            "Too many requests",
+            KiroProvider::parse_retry_after(&headers),
+        );
+        assert_eq!(cooldown, Duration::from_secs(120));
+
+        let (reason, remaining) = provider
+            .token_manager()
+            .cooldown_manager()
+            .check_cooldown(1)
+            .unwrap();
+        assert_eq!(reason, CooldownReason::RateLimitExceeded);
+        assert!(remaining <= Duration::from_secs(120));
+        assert!(remaining > Duration::from_secs(100));
+
+        let snapshot = provider.token_manager().snapshot();
+        assert_eq!(snapshot.entries[0].failure_count, 0);
+        assert!(!snapshot.entries[0].disabled);
+        assert!(snapshot.entries[0].last_used_at.is_some());
+    }
+
+    #[test]
+    fn test_handle_rate_limited_response_without_retry_after_uses_default_cooldown() {
+        let config = Config::default();
+        let credentials = KiroCredentials::default();
+        let provider = create_test_provider(config, credentials);
+
+        let cooldown = provider.handle_rate_limited_response(1, "Too many requests", None);
+        assert_eq!(cooldown, Duration::from_secs(60));
+
+        let (reason, remaining) = provider
+            .token_manager()
+            .cooldown_manager()
+            .check_cooldown(1)
+            .unwrap();
+        assert_eq!(reason, CooldownReason::RateLimitExceeded);
+        assert!(remaining <= Duration::from_secs(60));
+        assert!(remaining > Duration::from_secs(50));
     }
 
     #[test]

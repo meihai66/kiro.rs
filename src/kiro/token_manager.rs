@@ -2755,6 +2755,25 @@ impl MultiTokenManager {
         self.cooldown_manager.set_cooldown(id, reason)
     }
 
+    /// 设置凭据冷却（支持自定义时长）
+    #[allow(dead_code)]
+    pub fn set_credential_cooldown_with_duration(
+        &self,
+        id: u64,
+        reason: CooldownReason,
+        duration: Option<std::time::Duration>,
+    ) -> std::time::Duration {
+        {
+            let mut entries = self.entries.lock();
+            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                entry.last_used_at = Some(Utc::now().to_rfc3339());
+            }
+        }
+        self.save_stats_debounced();
+        self.cooldown_manager
+            .set_cooldown_with_duration(id, reason, duration)
+    }
+
     /// 清除凭据冷却
     #[allow(dead_code)]
     pub fn clear_credential_cooldown(&self, id: u64) -> bool {
@@ -3266,6 +3285,133 @@ mod tests {
         // 关键断言：不会抛出“所有凭据均已禁用（1/2）”，而是等待后成功返回。
         let ctx = manager.acquire_context().await.unwrap();
         assert_eq!(ctx.id, 1);
+    }
+
+    #[test]
+    fn test_set_credential_cooldown_with_duration_does_not_increment_failure_count() {
+        let config = Config::default();
+        let manager =
+            MultiTokenManager::new(config, vec![KiroCredentials::default()], None, None, false)
+                .unwrap();
+
+        let cooldown = manager.set_credential_cooldown_with_duration(
+            1,
+            CooldownReason::RateLimitExceeded,
+            Some(std::time::Duration::from_secs(120)),
+        );
+        assert_eq!(cooldown, std::time::Duration::from_secs(120));
+
+        let snapshot = manager.snapshot();
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].failure_count, 0);
+        assert!(!snapshot.entries[0].disabled);
+        assert!(snapshot.entries[0].last_used_at.is_some());
+
+        let (reason, remaining) = manager.cooldown_manager().check_cooldown(1).unwrap();
+        assert_eq!(reason, CooldownReason::RateLimitExceeded);
+        assert!(remaining <= std::time::Duration::from_secs(120));
+        assert!(remaining > std::time::Duration::from_secs(100));
+    }
+
+    #[tokio::test]
+    async fn test_multi_token_manager_acquire_context_skips_rate_limited_credential() {
+        let config = Config::default();
+        let mut cred1 = KiroCredentials::default();
+        cred1.access_token = Some("t1".to_string());
+        cred1.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+        cred1.priority = 0;
+
+        let mut cred2 = KiroCredentials::default();
+        cred2.access_token = Some("t2".to_string());
+        cred2.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+        cred2.priority = 0;
+
+        let manager =
+            MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
+
+        manager.set_credential_cooldown_with_duration(
+            1,
+            CooldownReason::RateLimitExceeded,
+            Some(std::time::Duration::from_millis(200)),
+        );
+
+        let ctx = manager.acquire_context().await.unwrap();
+        assert_eq!(ctx.id, 2);
+    }
+
+    #[tokio::test]
+    async fn test_multi_token_manager_acquire_context_waits_until_rate_limit_cooldown_expires() {
+        let config = Config::default();
+        let mut cred = KiroCredentials::default();
+        cred.access_token = Some("t1".to_string());
+        cred.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+
+        let manager = MultiTokenManager::new(config, vec![cred], None, None, false).unwrap();
+
+        manager.set_credential_cooldown_with_duration(
+            1,
+            CooldownReason::RateLimitExceeded,
+            Some(std::time::Duration::from_millis(150)),
+        );
+
+        let started = std::time::Instant::now();
+        let ctx = manager.acquire_context().await.unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(ctx.id, 1);
+        assert!(elapsed >= std::time::Duration::from_millis(120));
+    }
+
+    #[tokio::test]
+    async fn test_multi_token_manager_acquire_context_for_user_keeps_affinity_when_bound_credential_rate_limited()
+     {
+        let mut config = Config::default();
+        config.credential_rpm = Some(60_000);
+
+        let mut cred1 = KiroCredentials::default();
+        cred1.access_token = Some("t1".to_string());
+        cred1.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+        cred1.priority = 0;
+
+        let mut cred2 = KiroCredentials::default();
+        cred2.access_token = Some("t2".to_string());
+        cred2.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+        cred2.priority = 0;
+
+        let manager =
+            MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
+
+        let first = manager
+            .acquire_context_for_user(Some("user-a"))
+            .await
+            .unwrap();
+        assert_eq!(first.id, 1);
+
+        manager.set_credential_cooldown_with_duration(
+            1,
+            CooldownReason::RateLimitExceeded,
+            Some(std::time::Duration::from_millis(200)),
+        );
+
+        let diverted = manager
+            .acquire_context_for_user(Some("user-a"))
+            .await
+            .unwrap();
+        assert_eq!(diverted.id, 2);
+
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let while_cooling = manager
+            .acquire_context_for_user(Some("user-a"))
+            .await
+            .unwrap();
+        assert_eq!(while_cooling.id, 2);
+
+        tokio::time::sleep(std::time::Duration::from_millis(220)).await;
+        let rebound = manager
+            .acquire_context_for_user(Some("user-a"))
+            .await
+            .unwrap();
+        assert_eq!(rebound.id, 1);
     }
 
     // ============ 凭据级 Region 优先级测试 ============
