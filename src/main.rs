@@ -133,6 +133,10 @@ async fn main() {
 
     // 创建共享的压缩配置（供 Anthropic 路由和 Admin API 共用，支持热更新）
     let compression_config = Arc::new(RwLock::new(config.read().compression.clone()));
+    let prompt_cache_runtime = Arc::new(RwLock::new(anthropic::PromptCacheRuntime::new(
+        config.read().prompt_cache_ttl_seconds,
+        config.read().prompt_cache_accounting_enabled,
+    )));
 
     // 构建 Anthropic API 路由（从第一个凭据获取 profile_arn）
     let anthropic_app = anthropic::create_router_with_provider(
@@ -140,8 +144,7 @@ async fn main() {
         Some(kiro_provider.clone()),
         first_credentials.profile_arn.clone(),
         compression_config.clone(),
-        config.read().prompt_cache_ttl_seconds,
-        config.read().prompt_cache_accounting_enabled,
+        prompt_cache_runtime.clone(),
     );
 
     // 构建 Admin API 路由（如果配置了非空的 admin_api_key）
@@ -165,6 +168,7 @@ async fn main() {
                     Some(kiro_provider.clone()),
                     config.clone(),
                     compression_config.clone(),
+                    prompt_cache_runtime.clone(),
                 );
                 let admin_state = admin::AdminState::new(admin_key, admin_service);
                 let admin_app = admin::create_admin_router(admin_state);

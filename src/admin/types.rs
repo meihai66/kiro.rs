@@ -375,6 +375,10 @@ pub struct GlobalConfigResponse {
     pub region: String,
     /// 单凭据目标请求速率（RPM），None 表示无限制
     pub credential_rpm: Option<u32>,
+    /// Prompt Cache TTL（秒）
+    pub prompt_cache_ttl_seconds: u64,
+    /// 是否启用本地 Prompt Cache usage 记账
+    pub prompt_cache_accounting_enabled: bool,
     /// 压缩配置
     pub compression: CompressionConfigResponse,
 }
@@ -404,6 +408,10 @@ pub struct UpdateGlobalConfigRequest {
     pub region: Option<String>,
     /// 单凭据目标请求速率（RPM，可选）
     pub credential_rpm: Option<Option<u32>>,
+    /// Prompt Cache TTL（秒，可选，仅支持 300 或 3600）
+    pub prompt_cache_ttl_seconds: Option<u64>,
+    /// 是否启用本地 Prompt Cache usage 记账（可选）
+    pub prompt_cache_accounting_enabled: Option<bool>,
     /// 压缩配置（可选）
     pub compression: Option<UpdateCompressionConfigRequest>,
 }

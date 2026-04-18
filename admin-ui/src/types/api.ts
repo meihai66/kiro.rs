@@ -348,6 +348,8 @@ export interface CompressionConfigResponse {
 export interface GlobalConfigResponse {
   region: string
   credentialRpm: number | null
+  promptCacheTtlSeconds: number
+  promptCacheAccountingEnabled: boolean
   compression: CompressionConfigResponse
 }
 
@@ -368,5 +370,7 @@ export interface UpdateCompressionConfigRequest {
 export interface UpdateGlobalConfigRequest {
   region?: string
   credentialRpm?: number | null
+  promptCacheTtlSeconds?: number
+  promptCacheAccountingEnabled?: boolean
   compression?: UpdateCompressionConfigRequest
 }

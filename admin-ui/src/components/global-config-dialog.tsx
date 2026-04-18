@@ -31,6 +31,8 @@ export function GlobalConfigDialog({ open, onOpenChange }: GlobalConfigDialogPro
   // 基本设置
   const [region, setRegion] = useState('')
   const [credentialRpm, setCredentialRpm] = useState('')
+  const [promptCacheTtlSeconds, setPromptCacheTtlSeconds] = useState('300')
+  const [promptCacheAccountingEnabled, setPromptCacheAccountingEnabled] = useState(true)
 
   // 代理设置
   const [proxyUrl, setProxyUrl] = useState('')
@@ -57,6 +59,8 @@ export function GlobalConfigDialog({ open, onOpenChange }: GlobalConfigDialogPro
     if (open && globalConfig) {
       setRegion(globalConfig.region || '')
       setCredentialRpm(globalConfig.credentialRpm?.toString() || '')
+      setPromptCacheTtlSeconds(globalConfig.promptCacheTtlSeconds.toString())
+      setPromptCacheAccountingEnabled(globalConfig.promptCacheAccountingEnabled)
       const c = globalConfig.compression
       setCEnabled(c.enabled)
       setCWhitespace(c.whitespaceCompression)
@@ -91,6 +95,17 @@ export function GlobalConfigDialog({ open, onOpenChange }: GlobalConfigDialogPro
     const newRpm = credentialRpm.trim() ? parseInt(credentialRpm.trim(), 10) : null
     if (newRpm !== (globalConfig?.credentialRpm ?? null)) {
       globalPayload.credentialRpm = newRpm
+      hasGlobalChanges = true
+    }
+
+    const newPromptCacheTtlSeconds = parseInt(promptCacheTtlSeconds, 10)
+    if (globalConfig && newPromptCacheTtlSeconds !== globalConfig.promptCacheTtlSeconds) {
+      globalPayload.promptCacheTtlSeconds = newPromptCacheTtlSeconds
+      hasGlobalChanges = true
+    }
+
+    if (globalConfig && promptCacheAccountingEnabled !== globalConfig.promptCacheAccountingEnabled) {
+      globalPayload.promptCacheAccountingEnabled = promptCacheAccountingEnabled
       hasGlobalChanges = true
     }
 
@@ -185,6 +200,27 @@ export function GlobalConfigDialog({ open, onOpenChange }: GlobalConfigDialogPro
                 <Input id="gcRegion" placeholder="us-east-1" value={region} onChange={(e) => setRegion(e.target.value)} disabled={isPending} />
               </div>
               {numInput('gcRpm', 'Credential RPM', credentialRpm, setCredentialRpm, '单凭据每分钟请求数上限，0 或留空使用默认策略')}
+              <div className="space-y-1">
+                <label htmlFor="gcPromptCacheTtl" className="text-sm font-medium">Prompt Cache TTL</label>
+                <select
+                  id="gcPromptCacheTtl"
+                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  value={promptCacheTtlSeconds}
+                  onChange={(e) => setPromptCacheTtlSeconds(e.target.value)}
+                  disabled={isPending}
+                >
+                  <option value="300">5 分钟</option>
+                  <option value="3600">1 小时</option>
+                </select>
+                <p className="text-xs text-muted-foreground">仅支持 5 分钟和 1 小时两档，保存后立即生效</p>
+              </div>
+              <div className="flex items-center justify-between">
+                <div className="space-y-1">
+                  <label className="text-sm font-medium">Prompt Cache 记账</label>
+                  <p className="text-xs text-muted-foreground">关闭后立即停止输出和扣减本地 cache token</p>
+                </div>
+                <Switch checked={promptCacheAccountingEnabled} onCheckedChange={setPromptCacheAccountingEnabled} disabled={isPending} />
+              </div>
             </div>
 
             {/* 代理设置 */}

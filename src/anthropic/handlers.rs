@@ -831,6 +831,7 @@ pub async fn post_messages(
 ) -> Response {
     // 读取压缩配置快照（读锁 + clone，避免持锁跨 await）
     let compression_config = state.compression_config.read().clone();
+    let prompt_cache = state.prompt_cache_snapshot();
 
     // 检测模型名是否包含 "thinking" 后缀，若包含则覆写 thinking 配置
     override_thinking_from_model_name(&mut payload);
@@ -873,16 +874,20 @@ pub async fn post_messages(
     };
 
     // 检查是否为纯 WebSearch 请求（仅 web_search 单工具 / tool_choice 强制 / 前缀匹配）
-    let websearch_cache_profile = state
-        .prompt_cache_accounting_enabled
-        .then(|| build_cache_profile(&state.cache_tracker, &payload, estimated_input_tokens));
+    let websearch_cache_profile = prompt_cache.accounting_enabled.then(|| {
+        build_cache_profile(
+            prompt_cache.tracker.as_ref(),
+            &payload,
+            estimated_input_tokens,
+        )
+    });
     if websearch::should_handle_websearch_request(&payload) {
         tracing::info!("检测到纯 WebSearch 请求，路由到本地 WebSearch 处理");
         return websearch::handle_websearch_request(
             provider,
             &payload,
-            if state.prompt_cache_accounting_enabled {
-                Some(&state.cache_tracker)
+            if prompt_cache.accounting_enabled {
+                Some(&prompt_cache.tracker)
             } else {
                 None
             },
@@ -904,19 +909,24 @@ pub async fn post_messages(
         tracing::info!(stripped, "已剔除空 text content block");
     }
 
-    let cache_profile = state
-        .prompt_cache_accounting_enabled
-        .then(|| build_cache_profile(&state.cache_tracker, &payload, estimated_input_tokens));
+    let cache_profile = prompt_cache.accounting_enabled.then(|| {
+        build_cache_profile(
+            prompt_cache.tracker.as_ref(),
+            &payload,
+            estimated_input_tokens,
+        )
+    });
     let provisional_cache_context = cache_profile
         .as_ref()
-        .map(|profile| provisional_cache_usage(&state.cache_tracker, profile))
+        .map(|profile| provisional_cache_usage(prompt_cache.tracker.as_ref(), profile))
         .unwrap_or_default();
 
     tracing::info!(
         provisional_cache_creation_input_tokens =
             provisional_cache_context.cache_creation_input_tokens,
         provisional_cache_read_input_tokens = provisional_cache_context.cache_read_input_tokens,
-        cache_accounting_enabled = state.prompt_cache_accounting_enabled,
+        cache_accounting_enabled = prompt_cache.accounting_enabled,
+        prompt_cache_ttl_seconds = prompt_cache.ttl_seconds,
         "Computed provisional cache usage for /v1/messages"
     );
 
@@ -1068,9 +1078,9 @@ pub async fn post_messages(
     if payload.stream {
         // 流式响应
         let stream_request = StreamRequestContext {
-            cache_tracker: state
-                .prompt_cache_accounting_enabled
-                .then_some(&state.cache_tracker),
+            cache_tracker: prompt_cache
+                .accounting_enabled
+                .then_some(&prompt_cache.tracker),
             cache_profile: cache_profile.as_ref(),
             request_body: &request_body,
             model: &payload.model,
@@ -1088,9 +1098,9 @@ pub async fn post_messages(
             input_tokens: estimated_input_tokens,
             tool_name_map,
             user_id: user_id.as_deref(),
-            cache_tracker: state
-                .prompt_cache_accounting_enabled
-                .then_some(&state.cache_tracker),
+            cache_tracker: prompt_cache
+                .accounting_enabled
+                .then_some(&prompt_cache.tracker),
             cache_profile: cache_profile.as_ref(),
         };
         handle_non_stream_request(provider, non_stream_request).await

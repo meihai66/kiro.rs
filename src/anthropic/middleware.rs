@@ -1,6 +1,7 @@
 //! Anthropic API 中间件
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     body::Body,
@@ -18,6 +19,50 @@ use crate::model::config::CompressionConfig;
 use super::cache_tracker::CacheTracker;
 use super::types::ErrorResponse;
 
+#[derive(Clone)]
+pub(crate) struct PromptCacheSnapshot {
+    pub accounting_enabled: bool,
+    pub ttl_seconds: u64,
+    pub tracker: Arc<CacheTracker>,
+}
+
+pub struct PromptCacheRuntime {
+    accounting_enabled: bool,
+    ttl_seconds: u64,
+    tracker: Arc<CacheTracker>,
+}
+
+impl PromptCacheRuntime {
+    pub fn new(ttl_seconds: u64, accounting_enabled: bool) -> Self {
+        Self {
+            accounting_enabled,
+            ttl_seconds,
+            tracker: Arc::new(CacheTracker::new(Duration::from_secs(ttl_seconds))),
+        }
+    }
+
+    pub fn snapshot(&self) -> PromptCacheSnapshot {
+        PromptCacheSnapshot {
+            accounting_enabled: self.accounting_enabled,
+            ttl_seconds: self.ttl_seconds,
+            tracker: self.tracker.clone(),
+        }
+    }
+
+    pub fn update(&mut self, ttl_seconds: Option<u64>, accounting_enabled: Option<bool>) {
+        if let Some(value) = accounting_enabled {
+            self.accounting_enabled = value;
+        }
+
+        if let Some(value) = ttl_seconds
+            && self.ttl_seconds != value
+        {
+            self.ttl_seconds = value;
+            self.tracker = Arc::new(CacheTracker::new(Duration::from_secs(value)));
+        }
+    }
+}
+
 /// 应用共享状态
 #[derive(Clone)]
 pub struct AppState {
@@ -30,28 +75,22 @@ pub struct AppState {
     pub profile_arn: Option<String>,
     /// 输入压缩配置（共享引用，支持热更新）
     pub compression_config: Arc<RwLock<CompressionConfig>>,
-    /// 是否启用本地 Prompt Cache usage 记账
-    pub prompt_cache_accounting_enabled: bool,
-    /// 缓存追踪器（用于本地模拟 Prompt Caching）
-    pub cache_tracker: Arc<CacheTracker>,
+    /// Prompt Cache 运行时配置（共享引用，支持热更新）
+    pub prompt_cache_runtime: Arc<RwLock<PromptCacheRuntime>>,
 }
 
 impl AppState {
     /// 创建新的应用状态
     pub fn new(
         api_key: impl Into<String>,
-        prompt_cache_ttl_seconds: u64,
-        prompt_cache_accounting_enabled: bool,
+        prompt_cache_runtime: Arc<RwLock<PromptCacheRuntime>>,
     ) -> Self {
         Self {
             api_key: api_key.into(),
             kiro_provider: None,
             profile_arn: None,
             compression_config: Arc::new(RwLock::new(CompressionConfig::default())),
-            prompt_cache_accounting_enabled,
-            cache_tracker: Arc::new(CacheTracker::new(std::time::Duration::from_secs(
-                prompt_cache_ttl_seconds,
-            ))),
+            prompt_cache_runtime,
         }
     }
 
@@ -71,6 +110,10 @@ impl AppState {
     pub fn with_compression_config(mut self, config: Arc<RwLock<CompressionConfig>>) -> Self {
         self.compression_config = config;
         self
+    }
+
+    pub fn prompt_cache_snapshot(&self) -> PromptCacheSnapshot {
+        self.prompt_cache_runtime.read().snapshot()
     }
 }
 

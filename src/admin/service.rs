@@ -8,6 +8,7 @@ use chrono::Utc;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
+use crate::anthropic::PromptCacheRuntime;
 use crate::common::utf8::floor_char_boundary;
 use crate::http_client::ProxyConfig;
 use crate::kiro::model::credentials::KiroCredentials;
@@ -44,6 +45,7 @@ pub struct AdminService {
     kiro_provider: Option<Arc<KiroProvider>>,
     config: Arc<RwLock<Config>>,
     compression_config: Arc<RwLock<CompressionConfig>>,
+    prompt_cache_runtime: Arc<RwLock<PromptCacheRuntime>>,
     balance_cache: Mutex<HashMap<u64, CachedBalance>>,
     cache_path: Option<PathBuf>,
 }
@@ -54,6 +56,7 @@ impl AdminService {
         kiro_provider: Option<Arc<KiroProvider>>,
         config: Arc<RwLock<Config>>,
         compression_config: Arc<RwLock<CompressionConfig>>,
+        prompt_cache_runtime: Arc<RwLock<PromptCacheRuntime>>,
     ) -> Self {
         let cache_path = token_manager
             .cache_dir()
@@ -70,6 +73,7 @@ impl AdminService {
             kiro_provider,
             config,
             compression_config,
+            prompt_cache_runtime,
             balance_cache: Mutex::new(balance_cache),
             cache_path,
         }
@@ -740,6 +744,8 @@ impl AdminService {
         super::types::GlobalConfigResponse {
             region: config.region.clone(),
             credential_rpm: config.credential_rpm,
+            prompt_cache_ttl_seconds: config.prompt_cache_ttl_seconds,
+            prompt_cache_accounting_enabled: config.prompt_cache_accounting_enabled,
             compression: super::types::CompressionConfigResponse {
                 enabled: c.enabled,
                 whitespace_compression: c.whitespace_compression,
@@ -779,6 +785,19 @@ impl AdminService {
                 config.credential_rpm = rpm;
             }
 
+            if let Some(ttl_seconds) = req.prompt_cache_ttl_seconds {
+                if !matches!(ttl_seconds, 300 | 3600) {
+                    return Err(AdminServiceError::InvalidRequest(
+                        "Prompt Cache TTL 仅支持 300（5分钟）或 3600（1小时）".to_string(),
+                    ));
+                }
+                config.prompt_cache_ttl_seconds = ttl_seconds;
+            }
+
+            if let Some(enabled) = req.prompt_cache_accounting_enabled {
+                config.prompt_cache_accounting_enabled = enabled;
+            }
+
             if let Some(c) = &req.compression {
                 Self::apply_compression_fields(&mut config.compression, c);
             }
@@ -800,6 +819,14 @@ impl AdminService {
         if req.credential_rpm.is_some() {
             self.token_manager
                 .update_credential_rpm(config.credential_rpm);
+        }
+
+        // 热更新 Prompt Cache 运行时配置
+        if req.prompt_cache_ttl_seconds.is_some() || req.prompt_cache_accounting_enabled.is_some() {
+            self.prompt_cache_runtime.write().update(
+                req.prompt_cache_ttl_seconds,
+                req.prompt_cache_accounting_enabled,
+            );
         }
 
         // 热更新压缩配置到运行时 Arc<RwLock<CompressionConfig>>
