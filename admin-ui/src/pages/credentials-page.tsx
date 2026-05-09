@@ -94,7 +94,8 @@ function UsageBar({
   const safe = Math.max(0, Math.min(100, pct))
   const fillCls =
     tone === 'red'
-      ? 'bg-gradient-to-r from-red-500 to-red-600'
+      ? // 满额红色：用 rose-400→red-500（更柔和不刺眼）+ /85 整体降亮度
+        'bg-gradient-to-r from-rose-400 to-red-500 opacity-85 dark:opacity-90'
       : tone === 'yellow'
         ? 'bg-gradient-to-r from-yellow-400 to-orange-500'
         : 'bg-gradient-to-r from-emerald-500 to-teal-500'
