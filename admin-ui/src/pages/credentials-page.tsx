@@ -71,6 +71,16 @@ import type {
   ProxyTestResult,
 } from '@/types/api'
 
+/** 把数字按 K/M 单位格式化：1100 → 1.1k；12_500 → 12.5k；2_000_000 → 2.0M */
+function formatK(n: number): string {
+  const abs = Math.abs(n)
+  if (abs >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (abs >= 1_000) return `${(n / 1_000).toFixed(1)}k`
+  // < 1000：整数取整、小数保留 1 位
+  if (Number.isInteger(n)) return String(n)
+  return n.toFixed(1)
+}
+
 function formatLastUsed(lastUsedAt: string | null): string {
   if (!lastUsedAt) return '从未'
   const date = new Date(lastUsedAt)
@@ -332,10 +342,10 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
             className={`text-xs font-mono whitespace-nowrap ${color}`}
             title={`已用 ${totalUsed.toFixed(2)}（含超额 ${overage.toFixed(2)}），合计 ${pct.toFixed(1)}%`}
           >
-            {totalUsed.toFixed(1)} / {limit.toFixed(0)}
+            {formatK(totalUsed)} / {formatK(limit)}
             {overage > 0 && (
               <span className="ml-1 text-[10px] font-semibold text-red-600">
-                超 +{overage.toFixed(1)}
+                超 +{formatK(overage)}
               </span>
             )}
           </span>
