@@ -307,6 +307,25 @@ impl AdminService {
             .map_err(|e| AdminServiceError::InternalError(e.to_string()))
     }
 
+    /// 清空所有统计数据：
+    /// - api_keys 表 success_count / fail_count 归零
+    /// - 每个凭据 success_count / rate_limit_count 归零
+    /// 不动：last_used_at、RPM 历史、错误日志、连续失败计数。
+    pub fn reset_all_stats(&self) -> Result<u64, AdminServiceError> {
+        let store = self.store.as_ref().ok_or_else(|| {
+            AdminServiceError::InvalidRequest("清空统计需要 SQLite store".into())
+        })?;
+        let api_keys_reset = store
+            .reset_all_request_counts()
+            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        self.token_manager.reset_all_credential_stats();
+        // 同步重新加载 ApiKeyManager 缓存（in-memory 计数）
+        if let Some(mgr) = &self.api_key_manager {
+            let _ = mgr.reload();
+        }
+        Ok(api_keys_reset)
+    }
+
     /// 全局摘要：启动时间 + 运行时长 + 总请求次数
     pub fn stats_summary(&self) -> Result<serde_json::Value, AdminServiceError> {
         let store = self.store.as_ref().ok_or_else(|| {

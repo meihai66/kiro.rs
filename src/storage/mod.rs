@@ -448,6 +448,17 @@ impl Store {
         Ok((row.0 as u64, row.1 as u64))
     }
 
+    /// 重置所有 api_keys 的 success_count / fail_count。
+    /// 用于"清空统计"按钮——不动 RPM 历史和错误日志。
+    pub fn reset_all_request_counts(&self) -> Result<u64> {
+        let conn = self.conn()?;
+        let n = conn.execute(
+            "UPDATE api_keys SET success_count = 0, fail_count = 0",
+            [],
+        )?;
+        Ok(n as u64)
+    }
+
     /// 原子计数：调用成功 / 失败 + last_used_at
     pub fn record_api_key_outcome(&self, id: i64, ok: bool) -> Result<()> {
         let conn = self.conn()?;

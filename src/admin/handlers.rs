@@ -266,6 +266,19 @@ pub async fn get_stats_summary(State(state): State<AdminState>) -> impl IntoResp
     }
 }
 
+/// POST /api/admin/stats/reset
+/// 清空 api_keys success_count/fail_count + 每凭据 success_count/rate_limit_count
+pub async fn reset_all_stats(State(state): State<AdminState>) -> impl IntoResponse {
+    match state.service.reset_all_stats() {
+        Ok(n) => Json(SuccessResponse::new(format!(
+            "已清空统计（重置了 {} 个 API Key 的累计计数）",
+            n
+        )))
+        .into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
 /// GET /api/admin/stats/rpm-history?hours=24
 /// 所有凭据汇总的 RPM 历史（用于全局仪表盘）
 pub async fn get_rpm_history_aggregate(

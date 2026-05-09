@@ -24,6 +24,7 @@ pub struct AdminState {
 }
 
 impl AdminState {
+    #[allow(dead_code)]
     pub fn new(admin_api_key: impl Into<String>, service: AdminService) -> Self {
         Self {
             admin_api_key: admin_api_key.into(),

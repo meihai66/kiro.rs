@@ -2829,6 +2829,22 @@ impl MultiTokenManager {
     }
 
     /// 重置凭据失败计数并重新启用（Admin API）
+    /// 清空所有凭据的累计统计（不影响连续失败计数 / 禁用状态 / 邮箱等真值）：
+    /// - success_count → 0
+    /// - rate_limit_count → 0
+    /// - last_used_at 保留（真实事件时间戳）
+    pub fn reset_all_credential_stats(&self) {
+        {
+            let mut entries = self.entries.lock();
+            for entry in entries.iter_mut() {
+                entry.success_count = 0;
+                entry.rate_limit_count.store(0, Ordering::Relaxed);
+            }
+        }
+        // 立即落盘，避免重启又恢复成旧值
+        self.save_stats();
+    }
+
     pub fn reset_and_enable(&self, id: u64) -> anyhow::Result<()> {
         {
             let mut entries = self.entries.lock();

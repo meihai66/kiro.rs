@@ -1,17 +1,21 @@
 import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { toast } from 'sonner'
+import { Loader2, RotateCcw } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { useCredentials } from '@/hooks/use-credentials'
+import { useCredentials, useResetAllStats } from '@/hooks/use-credentials'
 import { getProxies } from '@/api/proxies'
 import { getRpmHistoryAggregate, getStatsSummary } from '@/api/credentials'
+import { extractErrorMessage } from '@/lib/utils'
 
 const HOURS_OPTIONS = [1, 6, 24, 72, 168] as const
 
 export function StatsPage() {
   const [hours, setHours] = useState<number>(24)
   const { data: creds } = useCredentials()
+  const resetMut = useResetAllStats()
   const { data: pool } = useQuery({
     queryKey: ['proxies'],
     queryFn: getProxies,
@@ -130,18 +134,47 @@ export function StatsPage() {
     <>
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-2xl font-semibold">统计</h1>
-        <div className="flex items-center gap-1">
-          {HOURS_OPTIONS.map((h) => (
-            <Button
-              key={h}
-              size="sm"
-              variant={hours === h ? 'secondary' : 'ghost'}
-              className="h-8"
-              onClick={() => setHours(h)}
-            >
-              {h < 24 ? `${h}h` : `${h / 24}d`}
-            </Button>
-          ))}
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1">
+            {HOURS_OPTIONS.map((h) => (
+              <Button
+                key={h}
+                size="sm"
+                variant={hours === h ? 'secondary' : 'ghost'}
+                className="h-8"
+                onClick={() => setHours(h)}
+              >
+                {h < 24 ? `${h}h` : `${h / 24}d`}
+              </Button>
+            ))}
+          </div>
+          <Button
+            size="sm"
+            variant="destructive"
+            className="h-8"
+            disabled={resetMut.isPending}
+            title="清空所有 API Key 累计请求计数 + 每凭据 success/429 计数。不清 RPM 历史和错误日志"
+            onClick={() => {
+              if (
+                !confirm(
+                  '确认清空统计数据？\n\n会重置：\n• 总请求次数 / 成功 / 失败\n• 每凭据成功次数、429 累计\n\n不会动：连续失败计数、最后调用时间、RPM 历史、错误日志。'
+                )
+              )
+                return
+              resetMut.mutate(undefined, {
+                onSuccess: (r) => toast.success(r.message),
+                onError: (e) =>
+                  toast.error('清空失败：' + extractErrorMessage(e)),
+              })
+            }}
+          >
+            {resetMut.isPending ? (
+              <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+            ) : (
+              <RotateCcw className="h-3.5 w-3.5 mr-1" />
+            )}
+            清空统计
+          </Button>
         </div>
       </div>
 
