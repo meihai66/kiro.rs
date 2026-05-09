@@ -29,5 +29,6 @@ mod truncation;
 pub mod types;
 mod websearch;
 
+pub use converter::convert_request;
 pub use middleware::PromptCacheRuntime;
 pub use router::create_router_with_provider;

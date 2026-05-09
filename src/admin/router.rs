@@ -14,7 +14,7 @@ use super::{
         get_error_log, get_global_config, get_proxy_config, get_rpm_history,
         get_rpm_history_aggregate, get_stats_summary, import_proxies, import_token_json,
         list_api_keys, list_credential_models, list_error_logs, list_proxies, list_proxy_alerts,
-        reset_all_stats, reset_failure_count, rotate_proxies_now,
+        reset_all_stats, reset_failure_count, rotate_proxies_now, test_chat,
         set_credential_allow_overuse, set_credential_disabled, set_credential_email,
         set_credential_endpoint, set_credential_priority, set_credential_region,
         set_credential_rpm, set_overage_preference, test_proxy, unbind_credential_proxy,
@@ -66,6 +66,7 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/stats/rpm-history", get(get_rpm_history_aggregate))
         .route("/stats/summary", get(get_stats_summary))
         .route("/stats/reset", post(reset_all_stats))
+        .route("/test-chat", post(test_chat))
         .route(
             "/credentials/{id}/overage-preference",
             post(set_overage_preference),

@@ -273,3 +273,13 @@ export async function getStatsSummary(): Promise<StatsSummaryResponse> {
   const { data } = await api.get<StatsSummaryResponse>('/stats/summary')
   return data
 }
+
+// 对话测试：admin 凭据触发一次最小请求
+export async function testChat(req: import('@/types/api').TestChatRequest) {
+  const { data } = await api.post<import('@/types/api').TestChatResponse>(
+    '/test-chat',
+    req,
+    { timeout: 120_000 }
+  )
+  return data
+}

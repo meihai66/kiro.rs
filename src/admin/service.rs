@@ -307,6 +307,110 @@ impl AdminService {
             .map_err(|e| AdminServiceError::InternalError(e.to_string()))
     }
 
+    /// 对话测试：内部组一个 Anthropic 请求 → 转 Kiro → 走 KiroProvider → 取文本。
+    /// 用于设置页/凭据页的"对话测试"按钮，绕过 client API key 鉴权。
+    pub async fn test_chat(
+        &self,
+        req: super::types::TestChatRequest,
+    ) -> Result<super::types::TestChatResponse, AdminServiceError> {
+        let provider = self
+            .kiro_provider
+            .as_ref()
+            .ok_or_else(|| {
+                AdminServiceError::InvalidRequest("KiroProvider 未初始化".to_string())
+            })?
+            .clone();
+
+        let model = req.model.trim();
+        if model.is_empty() {
+            return Err(AdminServiceError::InvalidRequest("model 不能为空".into()));
+        }
+        let message = if req.message.trim().is_empty() {
+            "hi".to_string()
+        } else {
+            req.message
+        };
+
+        // 估算 input tokens（仅展示；真实计费在上游）
+        let input_tokens = crate::token::count_all_tokens(
+            model.to_string(),
+            None,
+            vec![crate::anthropic::types::Message {
+                role: "user".to_string(),
+                content: serde_json::Value::String(message.clone()),
+            }],
+            None,
+        ) as i32;
+
+        // 构建并转换请求
+        let payload = crate::anthropic::types::MessagesRequest {
+            model: model.to_string(),
+            max_tokens: 1024,
+            messages: vec![crate::anthropic::types::Message {
+                role: "user".to_string(),
+                content: serde_json::Value::String(message),
+            }],
+            stream: false,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            thinking: None,
+            output_config: None,
+            metadata: None,
+        };
+        let compression = self.compression_config.read().clone();
+        let conversion = crate::anthropic::convert_request(&payload, &compression)
+            .map_err(|e| AdminServiceError::InvalidRequest(format!("请求转换失败: {}", e)))?;
+        let kiro_request = crate::kiro::model::requests::kiro::KiroRequest {
+            conversation_state: conversion.conversation_state,
+            profile_arn: None,
+        };
+        let body = serde_json::to_string(&kiro_request)
+            .map_err(|e| AdminServiceError::InternalError(format!("序列化失败: {}", e)))?;
+
+        // 如果指定了 credential_id，临时改优先级方式不便；这里走默认调度，
+        // 让上层根据需要再扩展（"指定凭据"可以在前端先做禁用其他号再点测试）。
+        let _ = req.credential_id; // 暂未使用
+
+        let started = std::time::Instant::now();
+        let result = provider
+            .call_api(&body, None)
+            .await
+            .map_err(|e| AdminServiceError::InternalError(format!("上游调用失败: {}", e)))?;
+
+        // 解析响应（Event Stream → 取所有 assistantResponseEvent.content）
+        let bytes = result
+            .response
+            .bytes()
+            .await
+            .map_err(|e| AdminServiceError::InternalError(format!("读响应失败: {}", e)))?;
+        let mut decoder = crate::kiro::parser::decoder::EventStreamDecoder::new();
+        if let Err(e) = decoder.feed(&bytes) {
+            tracing::warn!(error = %e, "test-chat 缓冲区错误");
+        }
+        let mut text = String::new();
+        for frame_res in decoder.decode_iter() {
+            if let Ok(frame) = frame_res
+                && let Ok(event) = crate::kiro::model::events::Event::from_frame(frame)
+                && let crate::kiro::model::events::Event::AssistantResponse(resp) = event
+            {
+                text.push_str(&resp.content);
+            }
+        }
+
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let content_arr = vec![serde_json::json!({"type": "text", "text": &text})];
+        let output_tokens = crate::token::estimate_output_tokens(&content_arr);
+
+        Ok(super::types::TestChatResponse {
+            credential_id: result.credential_id,
+            text,
+            elapsed_ms,
+            input_tokens,
+            output_tokens,
+        })
+    }
+
     /// 清空所有统计数据：
     /// - api_keys 表 success_count / fail_count 归零
     /// - 每个凭据 success_count / rate_limit_count 归零

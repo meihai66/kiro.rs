@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { CheckCircle2, Loader2, Plus, Upload, Wallet } from 'lucide-react'
+import { CheckCircle2, Loader2, MessageSquare, Plus, Upload, Wallet } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { ColumnDef, RowSelectionState } from '@tanstack/react-table'
 import { toast } from 'sonner'
@@ -14,6 +14,7 @@ import { BindProxyDialog } from '@/components/bind-proxy-dialog'
 import { CredentialCard } from '@/components/credential-card'
 import { DataTable } from '@/components/data-table'
 import { ImportTokenJsonDialog } from '@/components/import-token-json-dialog'
+import { TestChatDialog } from '@/components/test-chat-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -54,6 +55,7 @@ type BatchAction =
   | 'delete'
 import {
   useCachedBalances,
+  useGlobalConfig,
   useCredentials,
   useDeleteCredential,
   useForceRefreshToken,
@@ -90,6 +92,8 @@ interface CellContext {
   proxyMap: Map<string, ProxyEntryItem>
   proxyTestResults: Map<string, ProxyTestResult>
   testingProxyIds: Set<string>
+  /** 全局 credentialRpm（凭据级未覆盖时作为"上限"展示） */
+  globalCredentialRpm: number | null
   onViewBalance: (id: number, force: boolean) => void
   onForceRefresh: (id: number) => void
   onBindProxy: (id: number) => void
@@ -431,22 +435,31 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
       header: 'RPM',
       cell: ({ row }) => {
         const c = row.original
-        const cap = c.credentialRpm ?? null
+        const credCap = c.credentialRpm ?? null
+        const globalCap = ctx.globalCredentialRpm
+        // 上限展示：凭据级覆盖优先，其次全局，否则 —
+        const cap = credCap ?? globalCap ?? null
+        const capSource = credCap != null ? '凭据级' : globalCap ? '全局' : '未设置'
         return (
           <span
             className="font-mono text-xs whitespace-nowrap"
             title={
               cap
-                ? `当前实时 RPM=${c.rpm}；本号上限 ${cap}/min（凭据级覆盖）`
-                : `当前实时 RPM=${c.rpm}；本号沿用全局策略`
+                ? `实时 RPM ${c.rpm}；上限 ${cap}/min（${capSource}）`
+                : `实时 RPM ${c.rpm}；未设上限`
             }
           >
             {c.rpm}
-            {cap !== null && (
-              <span className="ml-1 text-[10px] text-muted-foreground">
-                /{cap}
-              </span>
-            )}
+            <span
+              className={
+                'ml-0.5 text-[10px] ' +
+                (credCap != null
+                  ? 'text-emerald-600 dark:text-emerald-400 font-semibold'
+                  : 'text-muted-foreground')
+              }
+            >
+              /{cap ?? '—'}
+            </span>
           </span>
         )
       },
@@ -546,6 +559,8 @@ export function CredentialsPage() {
   const queryClient = useQueryClient()
   const { data, isLoading, error, refetch } = useCredentials()
   const { data: cachedBalancesData } = useCachedBalances()
+  const { data: globalConfig } = useGlobalConfig()
+  const globalCredentialRpm = globalConfig?.credentialRpm ?? null
   const { mutate: deleteCredential } = useDeleteCredential()
   const { mutate: forceRefreshToken } = useForceRefreshToken()
   const { mutate: setDisabledMut } = useSetDisabled()
@@ -583,6 +598,7 @@ export function CredentialsPage() {
   }
   const [addOpen, setAddOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
+  const [testChatOpen, setTestChatOpen] = useState(false)
   const [verifyOpen, setVerifyOpen] = useState(false)
   const [bindProxyId, setBindProxyId] = useState<number | null>(null)
   const [detailCred, setDetailCred] = useState<CredentialStatusItem | null>(
@@ -868,6 +884,7 @@ export function CredentialsPage() {
         proxyMap,
         proxyTestResults,
         testingProxyIds,
+        globalCredentialRpm,
         onViewBalance: handleViewBalance,
         onForceRefresh: handleForceRefresh,
         onBindProxy: (id) => setBindProxyId(id),
@@ -887,6 +904,7 @@ export function CredentialsPage() {
       proxyMap,
       proxyTestResults,
       testingProxyIds,
+      globalCredentialRpm,
       overageMutation.isPending,
     ]
   )
@@ -1184,6 +1202,15 @@ export function CredentialsPage() {
           </Badge>
         </div>
         <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setTestChatOpen(true)}
+            title="走 admin 凭据触发一次最小对话测试"
+          >
+            <MessageSquare className="h-4 w-4 mr-2" />
+            对话测试
+          </Button>
           <Button variant="outline" size="sm" onClick={handleQueryBalances}>
             <Wallet className="h-4 w-4 mr-2" />
             查询余额
@@ -1513,6 +1540,7 @@ export function CredentialsPage() {
 
       <AddCredentialDialog open={addOpen} onOpenChange={setAddOpen} />
       <ImportTokenJsonDialog open={importOpen} onOpenChange={setImportOpen} />
+      <TestChatDialog open={testChatOpen} onOpenChange={setTestChatOpen} />
       <BatchVerifyDialog
         open={verifyOpen}
         onOpenChange={setVerifyOpen}

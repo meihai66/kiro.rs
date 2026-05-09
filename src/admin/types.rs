@@ -697,6 +697,36 @@ impl AdminErrorResponse {
     }
 }
 
+// ============ 对话测试 ============
+
+/// 对话测试请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestChatRequest {
+    /// Anthropic 模型名（如 claude-opus-4-7）
+    pub model: String,
+    /// 用户输入文本（默认 "hi"，由前端处理）
+    pub message: String,
+    /// 可选：限定使用某个凭据 ID（不传则走正常调度）
+    #[serde(default)]
+    pub credential_id: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestChatResponse {
+    /// 实际服务此请求的凭据 ID
+    pub credential_id: u64,
+    /// 模型回复文本（合并 assistantResponseEvent）
+    pub text: String,
+    /// 上游耗时（毫秒）
+    pub elapsed_ms: u64,
+    /// 估算输入 tokens
+    pub input_tokens: i32,
+    /// 估算输出 tokens
+    pub output_tokens: i32,
+}
+
 // ============ 错误日志 ============
 
 /// 列表项（不含大字段，用于日志页表格）

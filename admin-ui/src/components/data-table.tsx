@@ -108,7 +108,10 @@ export function DataTable<TData>({
   })
 
   // 数据缩短时，把 pageIndex 拉回到合法范围内（避免显示"第 N / N 页"且空白）
+  // 关键：data.length === 0 时不要 reset——首次挂载/refetch 短暂为空时
+  // 会把从 sessionStorage 恢复出来的页码错打回 0
   useEffect(() => {
+    if (data.length === 0) return
     const pageCount = Math.max(1, table.getPageCount())
     if (pagination.pageIndex >= pageCount) {
       setPagination((p) => ({ ...p, pageIndex: pageCount - 1 }))
@@ -194,29 +197,14 @@ export function DataTable<TData>({
             </span>
           )}
         </div>
-        <div className="flex items-center gap-2">
-          <span>
-            第 {table.getState().pagination.pageIndex + 1} /{' '}
-            {Math.max(table.getPageCount(), 1)} 页
-          </span>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => table.previousPage()}
-            disabled={!table.getCanPreviousPage()}
-          >
-            上一页
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => table.nextPage()}
-            disabled={!table.getCanNextPage()}
-          >
-            下一页
-          </Button>
+        <div className="flex items-center gap-1">
+          <PageNumbers
+            pageIndex={table.getState().pagination.pageIndex}
+            pageCount={Math.max(table.getPageCount(), 1)}
+            onChange={(idx) => table.setPageIndex(idx)}
+          />
           <select
-            className="h-8 rounded border bg-background px-2 text-xs"
+            className="ml-2 h-8 rounded border bg-background px-2 text-xs"
             value={table.getState().pagination.pageSize}
             onChange={(e) => table.setPageSize(Number(e.target.value))}
           >
@@ -228,6 +216,78 @@ export function DataTable<TData>({
           </select>
         </div>
       </div>
+    </div>
+  )
+}
+
+/**
+ * 页码导航：「< 1 2 3 4 5 ... N >」 形式。
+ * 当前页之外用 ghost 按钮，当前页用 secondary 高亮。
+ * 总页数 ≤ 7 全部铺开；多于 7 时按"首尾 + 当前 ±2 + 省略号"折叠。
+ */
+function PageNumbers({
+  pageIndex,
+  pageCount,
+  onChange,
+}: {
+  pageIndex: number
+  pageCount: number
+  onChange: (idx: number) => void
+}) {
+  const cur = pageIndex + 1
+  const last = pageCount
+  const items: Array<number | 'gap'> = []
+  if (pageCount <= 7) {
+    for (let i = 1; i <= last; i++) items.push(i)
+  } else {
+    items.push(1)
+    if (cur - 2 > 2) items.push('gap')
+    const start = Math.max(2, cur - 2)
+    const end = Math.min(last - 1, cur + 2)
+    for (let i = start; i <= end; i++) items.push(i)
+    if (cur + 2 < last - 1) items.push('gap')
+    items.push(last)
+  }
+  return (
+    <div className="flex items-center gap-1">
+      <Button
+        variant="ghost"
+        size="sm"
+        className="h-8 w-8 p-0"
+        onClick={() => onChange(Math.max(0, pageIndex - 1))}
+        disabled={pageIndex === 0}
+      >
+        ‹
+      </Button>
+      {items.map((it, i) =>
+        it === 'gap' ? (
+          <span
+            key={`gap-${i}`}
+            className="px-1 text-xs text-muted-foreground select-none"
+          >
+            …
+          </span>
+        ) : (
+          <Button
+            key={it}
+            variant={it === cur ? 'secondary' : 'ghost'}
+            size="sm"
+            className="h-8 min-w-8 px-2 text-xs"
+            onClick={() => onChange(it - 1)}
+          >
+            {it}
+          </Button>
+        )
+      )}
+      <Button
+        variant="ghost"
+        size="sm"
+        className="h-8 w-8 p-0"
+        onClick={() => onChange(Math.min(pageCount - 1, pageIndex + 1))}
+        disabled={pageIndex >= pageCount - 1}
+      >
+        ›
+      </Button>
     </div>
   )
 }

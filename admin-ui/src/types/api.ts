@@ -684,3 +684,19 @@ export interface ClearErrorLogsRequest {
 export interface ClearErrorLogsResponse {
   deleted: number
 }
+
+// ===== 对话测试 =====
+
+export interface TestChatRequest {
+  model: string
+  message: string
+  credentialId?: number
+}
+
+export interface TestChatResponse {
+  credentialId: number
+  text: string
+  elapsedMs: number
+  inputTokens: number
+  outputTokens: number
+}

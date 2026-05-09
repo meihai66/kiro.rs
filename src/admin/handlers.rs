@@ -279,6 +279,18 @@ pub async fn reset_all_stats(State(state): State<AdminState>) -> impl IntoRespon
     }
 }
 
+/// POST /api/admin/test-chat
+/// 用 admin 凭据触发一次最小对话测试，返回模型回复文本和耗时。
+pub async fn test_chat(
+    State(state): State<AdminState>,
+    Json(req): Json<super::types::TestChatRequest>,
+) -> impl IntoResponse {
+    match state.service.test_chat(req).await {
+        Ok(resp) => Json(resp).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
 /// GET /api/admin/stats/rpm-history?hours=24
 /// 所有凭据汇总的 RPM 历史（用于全局仪表盘）
 pub async fn get_rpm_history_aggregate(
