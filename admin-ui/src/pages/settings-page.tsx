@@ -59,6 +59,9 @@ export function SettingsPage() {
   const [maxTotalRetries, setMaxTotalRetries] = useState('3')
   const [allCoolingBailSecs, setAllCoolingBailSecs] = useState('2')
 
+  // 导入凭据默认禁用
+  const [importDisabledByDefault, setImportDisabledByDefault] = useState(true)
+
   // 余额自动刷新
   const [balanceAutoRefreshSecs, setBalanceAutoRefreshSecs] = useState('0')
 
@@ -108,6 +111,7 @@ export function SettingsPage() {
       setAllCoolingBailSecs(
         String(globalConfig.allCredentialsCooldownBailThresholdSecs ?? 2)
       )
+      setImportDisabledByDefault(globalConfig.importDisabledByDefault ?? true)
       setBalanceAutoRefreshSecs(String(globalConfig.balanceAutoRefreshSecs ?? 0))
       setRateLimitCooldownMin(String(globalConfig.rateLimitCooldownMinSecs ?? 60))
       setRateLimitCooldownMax(String(globalConfig.rateLimitCooldownMaxSecs ?? 300))
@@ -231,6 +235,14 @@ export function SettingsPage() {
       (globalConfig?.allCredentialsCooldownBailThresholdSecs ?? 2)
     ) {
       globalPayload.allCredentialsCooldownBailThresholdSecs = newCoolingBailSecs
+      hasGlobalChanges = true
+    }
+
+    if (
+      importDisabledByDefault !==
+      (globalConfig?.importDisabledByDefault ?? true)
+    ) {
+      globalPayload.importDisabledByDefault = importDisabledByDefault
       hasGlobalChanges = true
     }
 
@@ -443,6 +455,19 @@ export function SettingsPage() {
                   <option value="ide">ide</option>
                   <option value="cli">cli</option>
                 </select>
+              </div>
+              <div className="flex items-center justify-between">
+                <div>
+                  <label className="text-sm font-medium">导入默认禁用</label>
+                  <p className="text-xs text-muted-foreground">
+                    新添加 / 批量导入的凭据先置 disabled，验证后手动启用，避免未验证的号直接进调度
+                  </p>
+                </div>
+                <Switch
+                  checked={importDisabledByDefault}
+                  onCheckedChange={setImportDisabledByDefault}
+                  disabled={isPending}
+                />
               </div>
             </CardContent>
           </Card>

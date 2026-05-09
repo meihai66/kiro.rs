@@ -136,6 +136,11 @@ pub struct Config {
     #[serde(default)]
     pub auto_disable_usage_threshold_pct: u32,
 
+    /// 新导入的凭据是否默认禁用（需手动启用才能参与调度）。
+    /// 默认 true——避免新号未验证就直接进调度池踩雷。
+    #[serde(default = "default_true")]
+    pub import_disabled_by_default: bool,
+
     /// 余额自动刷新目标周期（秒）；0 = 禁用。
     /// 后台滚动刷新每个凭据，平均每 N 秒打一次上游 getUsageLimits。
     /// 推荐 600~900（10-15 分钟）。
@@ -446,6 +451,7 @@ impl Default for Config {
             max_total_retries: default_max_total_retries(),
             all_credentials_cooldown_bail_threshold_secs:
                 default_all_credentials_cooldown_bail_threshold_secs(),
+            import_disabled_by_default: true,
             balance_auto_refresh_secs: 0,
             rate_limit_cooldown_min_secs: default_rate_limit_cooldown_min_secs(),
             rate_limit_cooldown_max_secs: default_rate_limit_cooldown_max_secs(),

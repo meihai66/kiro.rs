@@ -1128,9 +1128,21 @@ impl AdminService {
             tracing::warn!("添加凭据后获取订阅等级失败（不影响凭据添加）: {}", e);
         }
 
+        // 配置开启时：新凭据默认置 disabled，需手动启用才参与调度
+        let import_disabled = self.config.read().import_disabled_by_default;
+        let force_disabled = import_disabled && !should_disable_after_create;
+        if force_disabled {
+            let _ = self.token_manager.set_disabled(credential_id, true);
+        }
+
         let message = if should_disable_after_create {
             format!(
                 "凭据添加成功（ID: {}），未自动绑定代理，已置 disabled=true，请手动绑定代理后再启用",
+                credential_id
+            )
+        } else if force_disabled {
+            format!(
+                "凭据添加成功（ID: {}），按「导入默认禁用」配置已置 disabled=true，验证后请手动启用",
                 credential_id
             )
         } else {
@@ -1596,6 +1608,14 @@ impl AdminService {
                         }
                     }
                 }
+                // 配置开启时：新凭据默认置 disabled，避免未验证就进调度
+                if reason.is_none()
+                    && self.config.read().import_disabled_by_default
+                {
+                    let _ = self.token_manager.set_disabled(credential_id, true);
+                    reason =
+                        Some("按「导入默认禁用」配置已置 disabled，验证后请手动启用".to_string());
+                }
                 ImportItemResult {
                     index,
                     fingerprint,
@@ -1799,6 +1819,7 @@ impl AdminService {
             max_total_retries: config.max_total_retries,
             all_credentials_cooldown_bail_threshold_secs: config
                 .all_credentials_cooldown_bail_threshold_secs,
+            import_disabled_by_default: config.import_disabled_by_default,
             balance_auto_refresh_secs: config.balance_auto_refresh_secs,
             rate_limit_cooldown_min_secs: config.rate_limit_cooldown_min_secs,
             rate_limit_cooldown_max_secs: config.rate_limit_cooldown_max_secs,
@@ -1927,6 +1948,10 @@ impl AdminService {
                     ));
                 }
                 config.all_credentials_cooldown_bail_threshold_secs = v;
+            }
+
+            if let Some(v) = req.import_disabled_by_default {
+                config.import_disabled_by_default = v;
             }
 
             if let Some(v) = req.balance_auto_refresh_secs {
@@ -2736,6 +2761,7 @@ mod tests {
             max_retries_per_credential: None,
             max_total_retries: None,
             all_credentials_cooldown_bail_threshold_secs: None,
+            import_disabled_by_default: None,
             balance_auto_refresh_secs: None,
             rate_limit_cooldown_min_secs: None,
             rate_limit_cooldown_max_secs: None,
@@ -2774,6 +2800,7 @@ mod tests {
             max_retries_per_credential: None,
             max_total_retries: None,
             all_credentials_cooldown_bail_threshold_secs: None,
+            import_disabled_by_default: None,
             balance_auto_refresh_secs: None,
             rate_limit_cooldown_min_secs: None,
             rate_limit_cooldown_max_secs: None,
@@ -2811,6 +2838,7 @@ mod tests {
             max_retries_per_credential: None,
             max_total_retries: None,
             all_credentials_cooldown_bail_threshold_secs: None,
+            import_disabled_by_default: None,
             balance_auto_refresh_secs: None,
             rate_limit_cooldown_min_secs: None,
             rate_limit_cooldown_max_secs: None,
@@ -2848,6 +2876,7 @@ mod tests {
             max_retries_per_credential: None,
             max_total_retries: None,
             all_credentials_cooldown_bail_threshold_secs: None,
+            import_disabled_by_default: None,
             balance_auto_refresh_secs: None,
             rate_limit_cooldown_min_secs: None,
             rate_limit_cooldown_max_secs: None,
@@ -2882,6 +2911,7 @@ mod tests {
             max_retries_per_credential: None,
             max_total_retries: None,
             all_credentials_cooldown_bail_threshold_secs: None,
+            import_disabled_by_default: None,
             balance_auto_refresh_secs: None,
             rate_limit_cooldown_min_secs: None,
             rate_limit_cooldown_max_secs: None,
