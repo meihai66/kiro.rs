@@ -1720,11 +1720,24 @@ async fn handle_non_stream_request(
     // 构建响应内容
     let mut content: Vec<serde_json::Value> = Vec::new();
 
+    // 上游有时会把推理内容用 <thinking>...</thinking> 包在文本里返回（非原生 thinking 块）。
+    // 流式路径已通过 SseEvent 拆分；非流式这里也按相同逻辑提取，避免标签字面量泄到客户端。
+    // cherry-pick 上游 5bd6a38。
     if !text_content.is_empty() {
-        content.push(json!({
-            "type": "text",
-            "text": text_content
-        }));
+        let (thinking, remaining) =
+            super::stream::extract_thinking_from_complete_text(&text_content);
+        if let Some(thinking_text) = thinking {
+            content.push(json!({
+                "type": "thinking",
+                "thinking": thinking_text,
+            }));
+        }
+        if !remaining.is_empty() {
+            content.push(json!({
+                "type": "text",
+                "text": remaining,
+            }));
+        }
     }
 
     content.extend(tool_uses);
