@@ -41,4 +41,8 @@ pub struct IdcRefreshResponse {
     // pub token_type: Option<String>,
     #[serde(default)]
     pub expires_in: Option<i64>,
+    /// IdC SSO 偶尔会返回 profile_arn，存在时同步到凭据上。
+    /// （我们仍然不主动 ListAvailableProfiles 给 IdC——发送 profileArn 头会 403）
+    #[serde(default)]
+    pub profile_arn: Option<String>,
 }

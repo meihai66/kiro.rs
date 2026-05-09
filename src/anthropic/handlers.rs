@@ -1189,11 +1189,13 @@ pub async fn post_messages(
         );
     }
 
-    // 构建 Kiro 请求
+    // 构建 Kiro 请求（profile_arn 留空，由 provider 层根据每次实际选中的凭据
+    // 通过 endpoint.transform_api_body 动态注入；启动期 state.profile_arn 仅作
+    // 兜底，多凭据切号时不能用作请求体里的固定值——cherry-pick 53df562）
     let tool_name_map = conversion_result.tool_name_map;
     let mut kiro_request = KiroRequest {
         conversation_state: conversion_result.conversation_state,
-        profile_arn: state.profile_arn.clone(),
+        profile_arn: None,
     };
 
     let mut request_body = match serde_json::to_string(&kiro_request) {

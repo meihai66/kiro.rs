@@ -429,9 +429,12 @@ async fn refresh_idc_token(
         tracing::info!("IdC Token 刷新成功（无过期时间）");
     }
 
-    // 注意：IDC 凭据（auth_method = "idc" 或 "builder-id"）不需要 profileArn
-    // 参考 CLIProxyAPIPlus：AWS SSO OIDC 用户发送 profileArn 反而会导致 403 错误
-    // 因此这里不再尝试获取 profileArn，保持为 None 即可
+    // IdC 通常不返回 profile_arn（参考 CLIProxyAPIPlus：AWS SSO OIDC 用户发送
+    // profileArn 反而会导致 403），但少数 SSO 场景上游会回传一个权威值。
+    // 上游若返回则同步覆盖，避免多凭据切号后还在用旧 ARN（cherry-pick 70b8593）。
+    if let Some(profile_arn) = data.profile_arn {
+        new_credentials.profile_arn = Some(profile_arn);
+    }
 
     Ok(new_credentials)
 }
