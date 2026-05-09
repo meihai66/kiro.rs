@@ -30,6 +30,14 @@ impl AdminState {
             service: Arc::new(service),
         }
     }
+
+    /// 已有 Arc 的版本（用于 main.rs 在创建 AdminState 之前先 spawn 后台任务）
+    pub fn from_arc(admin_api_key: impl Into<String>, service: Arc<AdminService>) -> Self {
+        Self {
+            admin_api_key: admin_api_key.into(),
+            service,
+        }
+    }
 }
 
 /// Admin API 认证中间件

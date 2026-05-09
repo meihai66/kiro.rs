@@ -835,6 +835,8 @@ pub struct GlobalConfigResponse {
     pub max_total_retries: u32,
     /// "所有凭据均处于冷却"时立即返回 429 的等待阈值（秒）；0 表示永不快速 bail
     pub all_credentials_cooldown_bail_threshold_secs: u64,
+    /// 余额自动刷新目标周期（秒）；0 = 禁用
+    pub balance_auto_refresh_secs: u32,
     /// 错误日志开关
     pub error_log_enabled: bool,
     /// 错误日志最大保留条数（0=不限）
@@ -890,6 +892,8 @@ pub struct UpdateGlobalConfigRequest {
     pub max_total_retries: Option<u32>,
     /// "所有凭据均处于冷却"时立即返回 429 的等待阈值（秒，可选；0=禁用快速 bail）
     pub all_credentials_cooldown_bail_threshold_secs: Option<u64>,
+    /// 余额自动刷新目标周期（秒，可选；0=禁用）
+    pub balance_auto_refresh_secs: Option<u32>,
     /// 错误日志开关
     pub error_log_enabled: Option<bool>,
     /// 错误日志最大保留条数

@@ -443,7 +443,70 @@ async fn main() {
                 if let Some(mgr) = api_key_manager.clone() {
                     admin_service = admin_service.with_api_key_manager(mgr);
                 }
-                let admin_state = admin::AdminState::new(admin_key, admin_service);
+                let admin_service = Arc::new(admin_service);
+
+                // 余额自动刷新后台任务
+                {
+                    let svc = admin_service.clone();
+                    let tm = token_manager.clone();
+                    let cfg = config.clone();
+                    tokio::spawn(async move {
+                        // 30s 一个 tick；每个 tick 找出"年龄 > target"的凭据，
+                        // 顺序刷新最多 batch_max 个，每次间隔 0.3s 避免上游瞬时峰值。
+                        let mut ticker = tokio::time::interval(Duration::from_secs(30));
+                        ticker.tick().await; // 跳过首个 tick（启动时让其他任务先 settle）
+                        loop {
+                            ticker.tick().await;
+                            let target_secs = cfg.read().balance_auto_refresh_secs as u64;
+                            if target_secs == 0 {
+                                continue; // 关闭则什么都不做
+                            }
+                            // 候选：未禁用、不在冷却、年龄 >= target
+                            let snapshot = tm.snapshot();
+                            let mut candidates: Vec<(u64, u64)> = snapshot
+                                .entries
+                                .into_iter()
+                                .filter(|e| !e.disabled && e.cooldown_remaining_secs.is_none())
+                                .filter_map(|e| {
+                                    let age = svc.balance_cache_age_secs(e.id).unwrap_or(u64::MAX);
+                                    if age >= target_secs {
+                                        Some((e.id, age))
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            // 最旧的先刷
+                            candidates.sort_by(|a, b| b.1.cmp(&a.1));
+                            // 每 tick 最多刷 ceil(N * 30 / target)，避免长时间持续打上游
+                            let n_total = candidates.len();
+                            if n_total == 0 {
+                                continue;
+                            }
+                            let batch_max = ((n_total as u64 * 30 / target_secs).max(1)
+                                .min(n_total as u64))
+                                as usize;
+                            tracing::debug!(
+                                target_secs,
+                                candidates = n_total,
+                                batch_max,
+                                "余额自动刷新 tick"
+                            );
+                            for (id, _) in candidates.into_iter().take(batch_max) {
+                                if let Err(e) = svc.refresh_balance(id).await {
+                                    tracing::debug!(
+                                        credential_id = id,
+                                        "余额自动刷新失败（忽略，后续 tick 重试）: {}",
+                                        e
+                                    );
+                                }
+                                tokio::time::sleep(Duration::from_millis(300)).await;
+                            }
+                        }
+                    });
+                }
+
+                let admin_state = admin::AdminState::from_arc(admin_key, admin_service);
                 let admin_app = admin::create_admin_router(admin_state);
 
                 // 创建 Admin UI 路由

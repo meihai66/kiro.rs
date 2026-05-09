@@ -594,6 +594,7 @@ export interface GlobalConfigResponse {
   maxRetriesPerCredential: number
   maxTotalRetries: number
   allCredentialsCooldownBailThresholdSecs: number
+  balanceAutoRefreshSecs: number
   errorLogEnabled: boolean
   errorLogMaxCount: number
   errorLogMaxAgeDays: number
@@ -627,6 +628,7 @@ export interface UpdateGlobalConfigRequest {
   maxRetriesPerCredential?: number
   maxTotalRetries?: number
   allCredentialsCooldownBailThresholdSecs?: number
+  balanceAutoRefreshSecs?: number
   errorLogEnabled?: boolean
   errorLogMaxCount?: number
   errorLogMaxAgeDays?: number

@@ -136,6 +136,12 @@ pub struct Config {
     #[serde(default)]
     pub auto_disable_usage_threshold_pct: u32,
 
+    /// 余额自动刷新目标周期（秒）；0 = 禁用。
+    /// 后台滚动刷新每个凭据，平均每 N 秒打一次上游 getUsageLimits。
+    /// 推荐 600~900（10-15 分钟）。
+    #[serde(default)]
+    pub balance_auto_refresh_secs: u32,
+
     /// 错误日志总开关（关闭后不写库；接口仍可读历史日志）
     #[serde(default = "default_true")]
     pub error_log_enabled: bool,
@@ -411,6 +417,7 @@ impl Default for Config {
             max_total_retries: default_max_total_retries(),
             all_credentials_cooldown_bail_threshold_secs:
                 default_all_credentials_cooldown_bail_threshold_secs(),
+            balance_auto_refresh_secs: 0,
             error_log_enabled: true,
             error_log_max_count: default_error_log_max_count(),
             error_log_max_age_days: default_error_log_max_age_days(),

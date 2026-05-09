@@ -728,6 +728,34 @@ impl AdminService {
         Ok(balance)
     }
 
+    /// 强制从上游刷新余额，绕过 5min AdminService 缓存。
+    /// 用于后台周期刷新任务；前端"查余额"仍走 get_balance（带 5min 缓存）。
+    pub async fn refresh_balance(&self, id: u64) -> Result<BalanceResponse, AdminServiceError> {
+        let balance = self.fetch_balance(id).await?;
+        // 同时更新 AdminService 内存缓存，让 get_cached_balances 立即看到新值
+        {
+            let mut cache = self.balance_cache.lock();
+            cache.insert(
+                id,
+                CachedBalance {
+                    cached_at: Utc::now().timestamp() as f64,
+                    data: balance.clone(),
+                },
+            );
+        }
+        self.save_balance_cache();
+        Ok(balance)
+    }
+
+    /// 取出当前缓存的余额年龄（秒），用于后台任务判断是否需要刷新。
+    /// 返回 None 表示没缓存（视为"特别旧"）。
+    pub fn balance_cache_age_secs(&self, id: u64) -> Option<u64> {
+        let cache = self.balance_cache.lock();
+        let cached = cache.get(&id)?;
+        let now = Utc::now().timestamp() as f64;
+        Some(((now - cached.cached_at).max(0.0)) as u64)
+    }
+
     /// 从上游获取余额（无缓存）
     async fn fetch_balance(&self, id: u64) -> Result<BalanceResponse, AdminServiceError> {
         let usage = self
@@ -1638,6 +1666,7 @@ impl AdminService {
             max_total_retries: config.max_total_retries,
             all_credentials_cooldown_bail_threshold_secs: config
                 .all_credentials_cooldown_bail_threshold_secs,
+            balance_auto_refresh_secs: config.balance_auto_refresh_secs,
             error_log_enabled: config.error_log_enabled,
             error_log_max_count: config.error_log_max_count,
             error_log_max_age_days: config.error_log_max_age_days,
@@ -1762,6 +1791,15 @@ impl AdminService {
                     ));
                 }
                 config.all_credentials_cooldown_bail_threshold_secs = v;
+            }
+
+            if let Some(v) = req.balance_auto_refresh_secs {
+                if v != 0 && (v < 60 || v > 86_400) {
+                    return Err(AdminServiceError::InvalidRequest(
+                        "余额自动刷新周期应为 0（禁用）或 60~86400 秒".into(),
+                    ));
+                }
+                config.balance_auto_refresh_secs = v;
             }
 
             if let Some(v) = req.error_log_enabled {
@@ -2537,6 +2575,7 @@ mod tests {
             max_retries_per_credential: None,
             max_total_retries: None,
             all_credentials_cooldown_bail_threshold_secs: None,
+            balance_auto_refresh_secs: None,
             error_log_enabled: None,
             error_log_max_count: None,
             error_log_max_age_days: None,
@@ -2571,6 +2610,7 @@ mod tests {
             max_retries_per_credential: None,
             max_total_retries: None,
             all_credentials_cooldown_bail_threshold_secs: None,
+            balance_auto_refresh_secs: None,
             error_log_enabled: None,
             error_log_max_count: None,
             error_log_max_age_days: None,
@@ -2604,6 +2644,7 @@ mod tests {
             max_retries_per_credential: None,
             max_total_retries: None,
             all_credentials_cooldown_bail_threshold_secs: None,
+            balance_auto_refresh_secs: None,
             error_log_enabled: None,
             error_log_max_count: None,
             error_log_max_age_days: None,
@@ -2637,6 +2678,7 @@ mod tests {
             max_retries_per_credential: None,
             max_total_retries: None,
             all_credentials_cooldown_bail_threshold_secs: None,
+            balance_auto_refresh_secs: None,
             error_log_enabled: None,
             error_log_max_count: None,
             error_log_max_age_days: None,
@@ -2667,6 +2709,7 @@ mod tests {
             max_retries_per_credential: None,
             max_total_retries: None,
             all_credentials_cooldown_bail_threshold_secs: None,
+            balance_auto_refresh_secs: None,
             error_log_enabled: None,
             error_log_max_count: None,
             error_log_max_age_days: None,

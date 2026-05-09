@@ -59,6 +59,9 @@ export function SettingsPage() {
   const [maxTotalRetries, setMaxTotalRetries] = useState('3')
   const [allCoolingBailSecs, setAllCoolingBailSecs] = useState('2')
 
+  // 余额自动刷新
+  const [balanceAutoRefreshSecs, setBalanceAutoRefreshSecs] = useState('0')
+
   // 错误日志
   const [errorLogEnabled, setErrorLogEnabled] = useState(true)
   const [errorLogMaxCount, setErrorLogMaxCount] = useState('50000')
@@ -100,6 +103,7 @@ export function SettingsPage() {
       setAllCoolingBailSecs(
         String(globalConfig.allCredentialsCooldownBailThresholdSecs ?? 2)
       )
+      setBalanceAutoRefreshSecs(String(globalConfig.balanceAutoRefreshSecs ?? 0))
       setErrorLogEnabled(globalConfig.errorLogEnabled ?? true)
       setErrorLogMaxCount(String(globalConfig.errorLogMaxCount ?? 50000))
       setErrorLogMaxAgeDays(String(globalConfig.errorLogMaxAgeDays ?? 7))
@@ -217,6 +221,15 @@ export function SettingsPage() {
       (globalConfig?.allCredentialsCooldownBailThresholdSecs ?? 2)
     ) {
       globalPayload.allCredentialsCooldownBailThresholdSecs = newCoolingBailSecs
+      hasGlobalChanges = true
+    }
+
+    const newBalanceAutoRefreshSecs = Math.max(
+      0,
+      parseInt(balanceAutoRefreshSecs, 10) || 0
+    )
+    if (newBalanceAutoRefreshSecs !== (globalConfig?.balanceAutoRefreshSecs ?? 0)) {
+      globalPayload.balanceAutoRefreshSecs = newBalanceAutoRefreshSecs
       hasGlobalChanges = true
     }
 
@@ -441,6 +454,36 @@ export function SettingsPage() {
                   '默认 2；最短可用等待 ≤ 该值则短睡再试，> 则立即 429'
                 )}
               </div>
+            </CardContent>
+          </Card>
+
+          {/* 余额自动刷新 */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">余额自动刷新</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              <p className="text-xs text-muted-foreground">
+                后台每 30 秒滚动刷新最旧的凭据余额；按下面的目标周期把所有凭据均匀打散。
+                <br />
+                跳过：已禁用 / 在冷却 / 上次刷新还没到周期的凭据。
+                设为 <code>0</code> 关闭后台任务（手动"查余额"不受影响）。
+                推荐 600~900（10~15 分钟）。
+              </p>
+              <div className="flex items-center gap-2 max-w-xs">
+                <Input
+                  type="number"
+                  min={0}
+                  max={86400}
+                  value={balanceAutoRefreshSecs}
+                  onChange={(e) => setBalanceAutoRefreshSecs(e.target.value)}
+                  disabled={isPending}
+                />
+                <span className="text-sm">秒</span>
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                有效范围：0（关闭）或 60~86400 秒
+              </p>
             </CardContent>
           </Card>
 
