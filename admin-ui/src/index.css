@@ -2,6 +2,14 @@
 
 /* 自定义主题配置 */
 @theme {
+  --font-sans:
+    'Inter', 'Noto Sans SC', -apple-system, BlinkMacSystemFont,
+    'Segoe UI', 'Helvetica Neue', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
+  --font-mono:
+    'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Monaco, Consolas,
+    'Liberation Mono', 'Courier New', monospace;
+
   --color-border: hsl(var(--border));
   --color-input: hsl(var(--input));
   --color-ring: hsl(var(--ring));
@@ -86,5 +94,28 @@
 body {
   background-color: hsl(var(--background));
   color: hsl(var(--foreground));
-  font-feature-settings: "rlig" 1, "calt" 1;
+  font-family: var(--font-sans);
+  /* rlig+calt：连字与上下文替代；ss01/ss02：Inter 风格化数字 1/0；
+     cv11：Inter 单层 a (更现代锐利)；tnum：表格里数字等宽对齐 */
+  font-feature-settings: 'rlig' 1, 'calt' 1, 'cv11' 1, 'ss01' 1, 'ss02' 1;
+  /* 抗锯齿：Webkit/Firefox 双开，避免 Windows ClearType 默认的"糊" */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* 等宽场景统一走 JetBrains Mono；数字保持 tabular（表格列对齐） */
+code,
+kbd,
+pre,
+samp,
+.font-mono {
+  font-family: var(--font-mono);
+  font-feature-settings: 'tnum' 1, 'zero' 1;
+  font-variant-ligatures: none;
+}
+
+/* 表格里所有数字默认 tabular-nums，避免列里 "9" 比 "1" 窄导致跳动 */
+table {
+  font-variant-numeric: tabular-nums;
 }
