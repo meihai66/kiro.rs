@@ -108,6 +108,12 @@ pub struct KiroCredentials {
     /// 用于在多凭据共用全局策略时，对个别号单独放宽或收紧节流。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rpm: Option<u32>,
+
+    /// 最近一次已知的上游 overageStatus（"ENABLED" / "DISABLED"）。
+    /// 落库后重启不丢，避免每次开页面都得先点"查余额"才能看到正确开关状态。
+    /// 由 set_overage_preference 成功路径或 getUsageLimits 响应回填。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_overage_status: Option<String>,
 }
 
 fn is_false_bool(v: &bool) -> bool {
@@ -365,6 +371,7 @@ mod tests {
             disabled: false,
             allow_overuse: false,
             rpm: None,
+            last_overage_status: None,
             runtime_only: false,
         };
 
@@ -485,6 +492,7 @@ mod tests {
             disabled: false,
             allow_overuse: false,
             rpm: None,
+            last_overage_status: None,
             runtime_only: false,
         };
 
@@ -517,6 +525,7 @@ mod tests {
             disabled: false,
             allow_overuse: false,
             rpm: None,
+            last_overage_status: None,
             runtime_only: false,
         };
 
@@ -635,6 +644,7 @@ mod tests {
             disabled: false,
             allow_overuse: false,
             rpm: None,
+            last_overage_status: None,
             runtime_only: false,
         };
 

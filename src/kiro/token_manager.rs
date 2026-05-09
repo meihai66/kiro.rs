@@ -611,8 +611,6 @@ struct CredentialEntry {
     last_used_at: Option<String>,
     /// refreshToken 的 SHA-256 哈希缓存（避免 snapshot 重复计算）
     refresh_token_hash: Option<String>,
-    /// 最近一次已知的 overageStatus（"ENABLED" / "DISABLED"），仅运行时缓存
-    last_overage_status: Option<String>,
     /// 当前并发请求数（实时）
     in_flight: Arc<AtomicU32>,
     /// 最近 60 秒 RPM 跟踪器（实时）
@@ -983,7 +981,6 @@ impl MultiTokenManager {
                     success_count: 0,
                     last_used_at: None,
                     refresh_token_hash,
-                    last_overage_status: None,
                     in_flight: Arc::new(AtomicU32::new(0)),
                     rpm: RpmTracker::new(),
                     rate_limit_count: Arc::new(AtomicU32::new(0)),
@@ -2674,7 +2671,7 @@ impl MultiTokenManager {
                         api_region: e.credentials.api_region.clone(),
                         endpoint: e.credentials.endpoint.clone(),
                         proxy_slot_id: e.credentials.proxy_slot_id.clone(),
-                        overage_status: e.last_overage_status.clone(),
+                        overage_status: e.credentials.last_overage_status.clone(),
                         in_flight: e.in_flight.load(Ordering::Relaxed),
                         rpm: e.rpm.rpm_60s(),
                         rate_limit_count: e.rate_limit_count.load(Ordering::Relaxed),
@@ -2980,8 +2977,14 @@ impl MultiTokenManager {
                 {
                     let mut entries = self.entries.lock();
                     if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-                        entry.last_overage_status = Some(normalized.clone());
+                        entry.credentials.last_overage_status = Some(normalized.clone());
                     }
+                }
+                if let Err(e) = self.persist_credentials() {
+                    tracing::warn!(
+                        "overage_status 更新后持久化失败（不影响本次请求）: {}",
+                        e
+                    );
                 }
                 Ok(normalized)
             }
@@ -3140,11 +3143,15 @@ impl MultiTokenManager {
                                 Some(subscription_title.to_string());
                             should_persist = true;
                         }
-                        // 同步 overage_status（运行时缓存，不落盘）
+                        // 同步 overage_status（落库，重启不丢）
                         if let Some(s) = usage.overage_status() {
                             let normalized = s.trim().to_ascii_uppercase();
-                            if !normalized.is_empty() {
-                                entry.last_overage_status = Some(normalized);
+                            if !normalized.is_empty()
+                                && entry.credentials.last_overage_status.as_deref()
+                                    != Some(normalized.as_str())
+                            {
+                                entry.credentials.last_overage_status = Some(normalized);
+                                should_persist = true;
                             }
                         }
                         // 自动回填邮箱：当上游返回 email 且本地为空时持久化
@@ -3279,7 +3286,6 @@ impl MultiTokenManager {
                 success_count: 0,
                 last_used_at: None,
                 refresh_token_hash: entry_secret_hash,
-                last_overage_status: None,
                 in_flight: Arc::new(AtomicU32::new(0)),
                 rpm: RpmTracker::new(),
                 rate_limit_count: Arc::new(AtomicU32::new(0)),

@@ -738,9 +738,11 @@ impl AdminService {
 
         let current_usage = usage.current_usage();
         let usage_limit = usage.usage_limit();
-        let remaining = (usage_limit - current_usage).max(0.0);
+        // 不再 clamp，让超额体现为 remaining < 0；前端据此显示"超 +N"
+        let remaining = usage_limit - current_usage;
         let usage_percentage = if usage_limit > 0.0 {
-            (current_usage / usage_limit * 100.0).min(100.0)
+            // 不再 clamp 100%，超额显示真实百分比
+            current_usage / usage_limit * 100.0
         } else {
             0.0
         };
@@ -913,6 +915,7 @@ impl AdminService {
             disabled: false,
             allow_overuse: false,
             rpm: None,
+            last_overage_status: None,
             runtime_only: false,
         };
 
@@ -1363,6 +1366,7 @@ impl AdminService {
             disabled: false,
             allow_overuse: false,
             rpm: None,
+            last_overage_status: None,
             runtime_only: false,
         };
 

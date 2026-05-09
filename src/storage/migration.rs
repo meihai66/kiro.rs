@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS credentials (
     proxy_slot_id       TEXT,
     disabled            INTEGER NOT NULL DEFAULT 0,
     allow_overuse       INTEGER NOT NULL DEFAULT 0,
-    rpm                 INTEGER
+    rpm                 INTEGER,
+    last_overage_status TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_credentials_priority ON credentials(priority);
@@ -116,6 +117,7 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA_SQL).context("初始化 SQLite schema 失败")?;
     add_column_if_missing(conn, "credentials", "allow_overuse", "INTEGER NOT NULL DEFAULT 0")?;
     add_column_if_missing(conn, "credentials", "rpm", "INTEGER")?;
+    add_column_if_missing(conn, "credentials", "last_overage_status", "TEXT")?;
     Ok(())
 }
 

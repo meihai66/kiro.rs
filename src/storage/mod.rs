@@ -78,7 +78,8 @@ impl Store {
         let mut stmt = conn.prepare(
             "SELECT id, access_token, refresh_token, kiro_api_key, profile_arn, expires_at, \
              auth_method, client_id, client_secret, priority, region, api_region, machine_id, \
-             endpoint, email, subscription_title, proxy_slot_id, disabled, allow_overuse, rpm \
+             endpoint, email, subscription_title, proxy_slot_id, disabled, allow_overuse, rpm, \
+             last_overage_status \
              FROM credentials ORDER BY priority ASC, id ASC",
         )?;
         let rows = stmt.query_map([], row_to_credentials)?;
@@ -761,6 +762,7 @@ fn row_to_credentials(row: &rusqlite::Row<'_>) -> rusqlite::Result<KiroCredentia
     let disabled: i64 = row.get(17)?;
     let allow_overuse: i64 = row.get(18)?;
     let rpm_raw: Option<i64> = row.get(19).ok();
+    let last_overage_status: Option<String> = row.get(20).ok().flatten();
     Ok(KiroCredentials {
         runtime_only: false,
         id: Some(id as u64),
@@ -791,6 +793,7 @@ fn row_to_credentials(row: &rusqlite::Row<'_>) -> rusqlite::Result<KiroCredentia
                 Some(v as u32)
             }
         }),
+        last_overage_status,
     })
 }
 
@@ -823,8 +826,8 @@ fn insert_credential(tx: &rusqlite::Transaction<'_>, c: &KiroCredentials) -> Res
     tx.execute(
         "INSERT INTO credentials(id, access_token, refresh_token, kiro_api_key, profile_arn, expires_at, \
          auth_method, client_id, client_secret, priority, region, api_region, machine_id, endpoint, \
-         email, subscription_title, proxy_slot_id, disabled, allow_overuse, rpm) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+         email, subscription_title, proxy_slot_id, disabled, allow_overuse, rpm, last_overage_status) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
         params![
             id as i64,
             c.access_token,
@@ -846,6 +849,7 @@ fn insert_credential(tx: &rusqlite::Transaction<'_>, c: &KiroCredentials) -> Res
             if c.disabled { 1 } else { 0 } as i64,
             if c.allow_overuse { 1 } else { 0 } as i64,
             c.rpm.map(|v| v as i64),
+            c.last_overage_status.as_deref(),
         ],
     )?;
     Ok(())
@@ -857,8 +861,8 @@ fn upsert_credential_inner(conn: &Conn, c: &KiroCredentials) -> Result<()> {
     conn.execute(
         "INSERT INTO credentials(id, access_token, refresh_token, kiro_api_key, profile_arn, expires_at, \
          auth_method, client_id, client_secret, priority, region, api_region, machine_id, endpoint, \
-         email, subscription_title, proxy_slot_id, disabled, allow_overuse, rpm) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20) \
+         email, subscription_title, proxy_slot_id, disabled, allow_overuse, rpm, last_overage_status) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21) \
          ON CONFLICT(id) DO UPDATE SET \
             access_token=excluded.access_token, refresh_token=excluded.refresh_token, \
             kiro_api_key=excluded.kiro_api_key, profile_arn=excluded.profile_arn, \
@@ -867,7 +871,8 @@ fn upsert_credential_inner(conn: &Conn, c: &KiroCredentials) -> Result<()> {
             priority=excluded.priority, region=excluded.region, api_region=excluded.api_region, \
             machine_id=excluded.machine_id, endpoint=excluded.endpoint, email=excluded.email, \
             subscription_title=excluded.subscription_title, proxy_slot_id=excluded.proxy_slot_id, \
-            disabled=excluded.disabled, allow_overuse=excluded.allow_overuse, rpm=excluded.rpm",
+            disabled=excluded.disabled, allow_overuse=excluded.allow_overuse, rpm=excluded.rpm, \
+            last_overage_status=excluded.last_overage_status",
         params![
             id as i64,
             c.access_token,
@@ -889,6 +894,7 @@ fn upsert_credential_inner(conn: &Conn, c: &KiroCredentials) -> Result<()> {
             if c.disabled { 1 } else { 0 } as i64,
             if c.allow_overuse { 1 } else { 0 } as i64,
             c.rpm.map(|v| v as i64),
+            c.last_overage_status.as_deref(),
         ],
     )?;
     Ok(())

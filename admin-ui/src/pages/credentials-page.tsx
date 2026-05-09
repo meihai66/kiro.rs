@@ -496,10 +496,10 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
               onClick={() => ctx.onToggleOverage(c)}
               title={
                 c.overageStatus === 'ENABLED'
-                  ? '账号超额：开（点击关闭）'
+                  ? '账号超额已开启，点击关闭'
                   : c.overageStatus === 'DISABLED'
-                    ? '账号超额：关（点击开启）'
-                    : '账号超额状态未知（点击切换）'
+                    ? '账号超额已关闭，点击开启'
+                    : '账号超额状态未知（先点击查余额获取，或点击此按钮切换）'
               }
               className={
                 'inline-flex h-7 items-center justify-center rounded-md px-2 text-xs font-medium text-white whitespace-nowrap transition-colors ' +
@@ -510,7 +510,11 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
                     : 'bg-muted-foreground/60 hover:bg-muted-foreground/80')
               }
             >
-              超额{c.overageStatus === 'ENABLED' ? '关' : '开'}
+              {c.overageStatus === 'ENABLED'
+                ? '超额开'
+                : c.overageStatus === 'DISABLED'
+                  ? '超额关'
+                  : '超额?'}
             </button>
             <Button
               size="sm"
