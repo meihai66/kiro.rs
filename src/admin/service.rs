@@ -1800,6 +1800,9 @@ impl AdminService {
             all_credentials_cooldown_bail_threshold_secs: config
                 .all_credentials_cooldown_bail_threshold_secs,
             balance_auto_refresh_secs: config.balance_auto_refresh_secs,
+            rate_limit_cooldown_min_secs: config.rate_limit_cooldown_min_secs,
+            rate_limit_cooldown_max_secs: config.rate_limit_cooldown_max_secs,
+            capacity_pressure_cooldown_secs: config.capacity_pressure_cooldown_secs,
             error_log_enabled: config.error_log_enabled,
             error_log_max_count: config.error_log_max_count,
             error_log_max_age_days: config.error_log_max_age_days,
@@ -1933,6 +1936,31 @@ impl AdminService {
                     ));
                 }
                 config.balance_auto_refresh_secs = v;
+            }
+
+            if let Some(v) = req.rate_limit_cooldown_min_secs {
+                if v < 1 || v > 3600 {
+                    return Err(AdminServiceError::InvalidRequest(
+                        "限流最短冷却应在 1~3600 秒".into(),
+                    ));
+                }
+                config.rate_limit_cooldown_min_secs = v;
+            }
+            if let Some(v) = req.rate_limit_cooldown_max_secs {
+                if v < 1 || v > 86_400 {
+                    return Err(AdminServiceError::InvalidRequest(
+                        "限流最长冷却应在 1~86400 秒".into(),
+                    ));
+                }
+                config.rate_limit_cooldown_max_secs = v;
+            }
+            if let Some(v) = req.capacity_pressure_cooldown_secs {
+                if v < 1 || v > 600 {
+                    return Err(AdminServiceError::InvalidRequest(
+                        "容量瓶颈冷却应在 1~600 秒".into(),
+                    ));
+                }
+                config.capacity_pressure_cooldown_secs = v;
             }
 
             if let Some(v) = req.error_log_enabled {
@@ -2709,6 +2737,9 @@ mod tests {
             max_total_retries: None,
             all_credentials_cooldown_bail_threshold_secs: None,
             balance_auto_refresh_secs: None,
+            rate_limit_cooldown_min_secs: None,
+            rate_limit_cooldown_max_secs: None,
+            capacity_pressure_cooldown_secs: None,
             error_log_enabled: None,
             error_log_max_count: None,
             error_log_max_age_days: None,
@@ -2744,6 +2775,9 @@ mod tests {
             max_total_retries: None,
             all_credentials_cooldown_bail_threshold_secs: None,
             balance_auto_refresh_secs: None,
+            rate_limit_cooldown_min_secs: None,
+            rate_limit_cooldown_max_secs: None,
+            capacity_pressure_cooldown_secs: None,
             error_log_enabled: None,
             error_log_max_count: None,
             error_log_max_age_days: None,
@@ -2778,6 +2812,9 @@ mod tests {
             max_total_retries: None,
             all_credentials_cooldown_bail_threshold_secs: None,
             balance_auto_refresh_secs: None,
+            rate_limit_cooldown_min_secs: None,
+            rate_limit_cooldown_max_secs: None,
+            capacity_pressure_cooldown_secs: None,
             error_log_enabled: None,
             error_log_max_count: None,
             error_log_max_age_days: None,
@@ -2812,6 +2849,9 @@ mod tests {
             max_total_retries: None,
             all_credentials_cooldown_bail_threshold_secs: None,
             balance_auto_refresh_secs: None,
+            rate_limit_cooldown_min_secs: None,
+            rate_limit_cooldown_max_secs: None,
+            capacity_pressure_cooldown_secs: None,
             error_log_enabled: None,
             error_log_max_count: None,
             error_log_max_age_days: None,
@@ -2843,6 +2883,9 @@ mod tests {
             max_total_retries: None,
             all_credentials_cooldown_bail_threshold_secs: None,
             balance_auto_refresh_secs: None,
+            rate_limit_cooldown_min_secs: None,
+            rate_limit_cooldown_max_secs: None,
+            capacity_pressure_cooldown_secs: None,
             error_log_enabled: None,
             error_log_max_count: None,
             error_log_max_age_days: None,

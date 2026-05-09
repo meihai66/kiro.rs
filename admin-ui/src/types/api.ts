@@ -595,6 +595,9 @@ export interface GlobalConfigResponse {
   maxTotalRetries: number
   allCredentialsCooldownBailThresholdSecs: number
   balanceAutoRefreshSecs: number
+  rateLimitCooldownMinSecs: number
+  rateLimitCooldownMaxSecs: number
+  capacityPressureCooldownSecs: number
   errorLogEnabled: boolean
   errorLogMaxCount: number
   errorLogMaxAgeDays: number
@@ -629,6 +632,9 @@ export interface UpdateGlobalConfigRequest {
   maxTotalRetries?: number
   allCredentialsCooldownBailThresholdSecs?: number
   balanceAutoRefreshSecs?: number
+  rateLimitCooldownMinSecs?: number
+  rateLimitCooldownMaxSecs?: number
+  capacityPressureCooldownSecs?: number
   errorLogEnabled?: boolean
   errorLogMaxCount?: number
   errorLogMaxAgeDays?: number

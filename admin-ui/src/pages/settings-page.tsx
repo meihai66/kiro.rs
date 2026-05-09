@@ -62,6 +62,11 @@ export function SettingsPage() {
   // 余额自动刷新
   const [balanceAutoRefreshSecs, setBalanceAutoRefreshSecs] = useState('0')
 
+  // 限流冷却
+  const [rateLimitCooldownMin, setRateLimitCooldownMin] = useState('60')
+  const [rateLimitCooldownMax, setRateLimitCooldownMax] = useState('300')
+  const [capacityPressureCooldown, setCapacityPressureCooldown] = useState('8')
+
   // 错误日志
   const [errorLogEnabled, setErrorLogEnabled] = useState(true)
   const [errorLogMaxCount, setErrorLogMaxCount] = useState('50000')
@@ -104,6 +109,11 @@ export function SettingsPage() {
         String(globalConfig.allCredentialsCooldownBailThresholdSecs ?? 2)
       )
       setBalanceAutoRefreshSecs(String(globalConfig.balanceAutoRefreshSecs ?? 0))
+      setRateLimitCooldownMin(String(globalConfig.rateLimitCooldownMinSecs ?? 60))
+      setRateLimitCooldownMax(String(globalConfig.rateLimitCooldownMaxSecs ?? 300))
+      setCapacityPressureCooldown(
+        String(globalConfig.capacityPressureCooldownSecs ?? 8)
+      )
       setErrorLogEnabled(globalConfig.errorLogEnabled ?? true)
       setErrorLogMaxCount(String(globalConfig.errorLogMaxCount ?? 50000))
       setErrorLogMaxAgeDays(String(globalConfig.errorLogMaxAgeDays ?? 7))
@@ -230,6 +240,22 @@ export function SettingsPage() {
     )
     if (newBalanceAutoRefreshSecs !== (globalConfig?.balanceAutoRefreshSecs ?? 0)) {
       globalPayload.balanceAutoRefreshSecs = newBalanceAutoRefreshSecs
+      hasGlobalChanges = true
+    }
+
+    const newRlMin = Math.max(1, parseInt(rateLimitCooldownMin, 10) || 60)
+    if (newRlMin !== (globalConfig?.rateLimitCooldownMinSecs ?? 60)) {
+      globalPayload.rateLimitCooldownMinSecs = newRlMin
+      hasGlobalChanges = true
+    }
+    const newRlMax = Math.max(1, parseInt(rateLimitCooldownMax, 10) || 300)
+    if (newRlMax !== (globalConfig?.rateLimitCooldownMaxSecs ?? 300)) {
+      globalPayload.rateLimitCooldownMaxSecs = newRlMax
+      hasGlobalChanges = true
+    }
+    const newCapCool = Math.max(1, parseInt(capacityPressureCooldown, 10) || 8)
+    if (newCapCool !== (globalConfig?.capacityPressureCooldownSecs ?? 8)) {
+      globalPayload.capacityPressureCooldownSecs = newCapCool
       hasGlobalChanges = true
     }
 
@@ -452,6 +478,47 @@ export function SettingsPage() {
                   allCoolingBailSecs,
                   setAllCoolingBailSecs,
                   '默认 2；最短可用等待 ≤ 该值则短睡再试，> 则立即 429'
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* 限流冷却 */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">限流冷却（429）</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <p className="text-xs text-muted-foreground">
+                凭据收到上游 429 时进入冷却。下面三个值分别控制：
+                <br />
+                <strong>最短/最长</strong>：把上游 Retry-After clamp 到此区间；
+                上游不带 Retry-After 时直接用最短值。
+                <br />
+                <strong>容量瓶颈</strong>：检测到 INSUFFICIENT_MODEL_CAPACITY /
+                "high traffic"（不是单号被限流，是上游瞬时容量不够）时使用的短冷却。
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                {numInput(
+                  'rlMin',
+                  '最短冷却（秒）',
+                  rateLimitCooldownMin,
+                  setRateLimitCooldownMin,
+                  '默认 60，范围 1~3600'
+                )}
+                {numInput(
+                  'rlMax',
+                  '最长冷却（秒）',
+                  rateLimitCooldownMax,
+                  setRateLimitCooldownMax,
+                  '默认 300，范围 1~86400'
+                )}
+                {numInput(
+                  'capCool',
+                  '容量瓶颈冷却（秒）',
+                  capacityPressureCooldown,
+                  setCapacityPressureCooldown,
+                  '默认 8，范围 1~600'
                 )}
               </div>
             </CardContent>

@@ -867,6 +867,12 @@ pub struct GlobalConfigResponse {
     pub all_credentials_cooldown_bail_threshold_secs: u64,
     /// 余额自动刷新目标周期（秒）；0 = 禁用
     pub balance_auto_refresh_secs: u32,
+    /// 触发 429 限流时的最短冷却（秒）
+    pub rate_limit_cooldown_min_secs: u64,
+    /// 触发 429 限流时的最长冷却（秒）
+    pub rate_limit_cooldown_max_secs: u64,
+    /// 容量瓶颈型 429 的冷却（秒）
+    pub capacity_pressure_cooldown_secs: u64,
     /// 错误日志开关
     pub error_log_enabled: bool,
     /// 错误日志最大保留条数（0=不限）
@@ -924,6 +930,12 @@ pub struct UpdateGlobalConfigRequest {
     pub all_credentials_cooldown_bail_threshold_secs: Option<u64>,
     /// 余额自动刷新目标周期（秒，可选；0=禁用）
     pub balance_auto_refresh_secs: Option<u32>,
+    /// 触发 429 限流时的最短冷却（秒，可选）
+    pub rate_limit_cooldown_min_secs: Option<u64>,
+    /// 触发 429 限流时的最长冷却（秒，可选）
+    pub rate_limit_cooldown_max_secs: Option<u64>,
+    /// 容量瓶颈型 429 的冷却（秒，可选）
+    pub capacity_pressure_cooldown_secs: Option<u64>,
     /// 错误日志开关
     pub error_log_enabled: Option<bool>,
     /// 错误日志最大保留条数

@@ -42,14 +42,15 @@ const DEFAULT_MAX_RETRIES_PER_CREDENTIAL: usize = 2;
 /// 总重试次数硬上限默认值（避免无限重试；可通过 Config.max_total_retries 覆盖）
 const DEFAULT_MAX_TOTAL_RETRIES: usize = 3;
 
-/// 429 冷却默认时长（无 Retry-After 时使用 CooldownManager 的默认递增策略）
+/// 429 冷却默认时长（无 Retry-After 时；可被 Config.rate_limit_cooldown_min_secs 覆盖）
 const DEFAULT_RATE_LIMIT_COOLDOWN_SECS: u64 = 60;
 
-/// 429 冷却最大时长上限（避免异常 Retry-After 把单号挂死太久）
+/// 429 冷却最大时长上限（可被 Config.rate_limit_cooldown_max_secs 覆盖）
 const MAX_RATE_LIMIT_COOLDOWN_SECS: u64 = 300;
 
 /// 上游容量类 429（INSUFFICIENT_MODEL_CAPACITY / high traffic）的短冷却下限。
 /// 这种 429 是上游侧瞬时扩容问题，不是凭据被限流，长冷却会反复换号导致全军覆没。
+/// 可被 Config.capacity_pressure_cooldown_secs 覆盖。
 const CAPACITY_RATE_LIMIT_COOLDOWN_SECS: u64 = 8;
 
 /// Kiro API Provider
@@ -415,7 +416,7 @@ impl KiroProvider {
             };
 
             let status = response.status();
-            let retry_after = Self::parse_retry_after(response.headers());
+            let retry_after = self.parse_retry_after(response.headers());
 
             // 成功响应
             if status.is_success() {
@@ -728,7 +729,7 @@ impl KiroProvider {
             };
 
             let status = response.status();
-            let retry_after = Self::parse_retry_after(response.headers());
+            let retry_after = self.parse_retry_after(response.headers());
 
             // 成功响应
             if status.is_success() {
@@ -1048,11 +1049,16 @@ impl KiroProvider {
         // 避免把所有凭据按 60s 标准冷却轮一遍后误报"所有凭据均处于冷却"。
         let is_capacity_pressure = Self::is_insufficient_model_capacity(body);
 
+        let cfg = self.token_manager.config();
+        let capacity_secs = if cfg.capacity_pressure_cooldown_secs == 0 {
+            CAPACITY_RATE_LIMIT_COOLDOWN_SECS
+        } else {
+            cfg.capacity_pressure_cooldown_secs
+        };
+
         let custom_duration = if is_capacity_pressure {
             // 优先尊重上游 Retry-After；否则使用容量短冷却下限
-            Some(retry_after.unwrap_or_else(|| {
-                Duration::from_secs(CAPACITY_RATE_LIMIT_COOLDOWN_SECS)
-            }))
+            Some(retry_after.unwrap_or_else(|| Duration::from_secs(capacity_secs)))
         } else {
             retry_after
         };
@@ -1103,29 +1109,37 @@ impl KiroProvider {
                 .is_some_and(reason_matches)
     }
 
-    fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
+    fn parse_retry_after(&self, headers: &HeaderMap) -> Option<Duration> {
         let raw = headers.get("retry-after")?.to_str().ok()?.trim();
         if raw.is_empty() {
             return None;
         }
 
         if let Ok(seconds) = raw.parse::<u64>() {
-            return Some(Self::clamp_rate_limit_cooldown(Duration::from_secs(
-                seconds,
-            )));
+            return Some(self.clamp_rate_limit_cooldown(Duration::from_secs(seconds)));
         }
 
         let retry_at = DateTime::parse_from_rfc2822(raw).ok()?.with_timezone(&Utc);
         let now = Utc::now();
         let wait = retry_at.signed_duration_since(now).to_std().ok()?;
-        Some(Self::clamp_rate_limit_cooldown(wait))
+        Some(self.clamp_rate_limit_cooldown(wait))
     }
 
-    fn clamp_rate_limit_cooldown(duration: Duration) -> Duration {
-        duration.clamp(
-            Duration::from_secs(DEFAULT_RATE_LIMIT_COOLDOWN_SECS),
-            Duration::from_secs(MAX_RATE_LIMIT_COOLDOWN_SECS),
-        )
+    fn clamp_rate_limit_cooldown(&self, duration: Duration) -> Duration {
+        let cfg = self.token_manager.config();
+        let min = if cfg.rate_limit_cooldown_min_secs == 0 {
+            DEFAULT_RATE_LIMIT_COOLDOWN_SECS
+        } else {
+            cfg.rate_limit_cooldown_min_secs
+        };
+        let max = if cfg.rate_limit_cooldown_max_secs == 0 {
+            MAX_RATE_LIMIT_COOLDOWN_SECS
+        } else {
+            cfg.rate_limit_cooldown_max_secs
+        };
+        // 防止用户配反：min > max 时退化为 [min, min]
+        let max = max.max(min);
+        duration.clamp(Duration::from_secs(min), Duration::from_secs(max))
     }
 
     fn is_rate_limit_response(body: &str) -> bool {
@@ -1589,45 +1603,63 @@ mod tests {
 
     #[test]
     fn test_parse_retry_after_seconds() {
+        let provider = create_test_provider(Config::default(), KiroCredentials::default());
         let mut headers = HeaderMap::new();
         headers.insert("retry-after", HeaderValue::from_static("120"));
 
-        let wait = KiroProvider::parse_retry_after(&headers).unwrap();
+        let wait = provider.parse_retry_after(&headers).unwrap();
         assert_eq!(wait, Duration::from_secs(120));
     }
 
     #[test]
     fn test_parse_retry_after_http_date() {
+        let provider = create_test_provider(Config::default(), KiroCredentials::default());
         let mut headers = HeaderMap::new();
         let future = (Utc::now() + chrono::Duration::seconds(90)).to_rfc2822();
         headers.insert("retry-after", HeaderValue::from_str(&future).unwrap());
 
-        let wait = KiroProvider::parse_retry_after(&headers).unwrap();
+        let wait = provider.parse_retry_after(&headers).unwrap();
         assert!(wait >= Duration::from_secs(60));
         assert!(wait <= Duration::from_secs(120));
     }
 
     #[test]
     fn test_parse_retry_after_invalid() {
+        let provider = create_test_provider(Config::default(), KiroCredentials::default());
         let mut headers = HeaderMap::new();
         headers.insert("retry-after", HeaderValue::from_static("not-a-date"));
 
-        assert!(KiroProvider::parse_retry_after(&headers).is_none());
+        assert!(provider.parse_retry_after(&headers).is_none());
     }
 
     #[test]
     fn test_parse_retry_after_clamps_range() {
+        let provider = create_test_provider(Config::default(), KiroCredentials::default());
         let mut headers = HeaderMap::new();
         headers.insert("retry-after", HeaderValue::from_static("5"));
         assert_eq!(
-            KiroProvider::parse_retry_after(&headers).unwrap(),
+            provider.parse_retry_after(&headers).unwrap(),
             Duration::from_secs(60)
         );
 
         headers.insert("retry-after", HeaderValue::from_static("600"));
         assert_eq!(
-            KiroProvider::parse_retry_after(&headers).unwrap(),
+            provider.parse_retry_after(&headers).unwrap(),
             Duration::from_secs(300)
+        );
+    }
+
+    #[test]
+    fn test_parse_retry_after_respects_config_min() {
+        let mut config = Config::default();
+        config.rate_limit_cooldown_min_secs = 10;
+        config.rate_limit_cooldown_max_secs = 600;
+        let provider = create_test_provider(config, KiroCredentials::default());
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", HeaderValue::from_static("5"));
+        assert_eq!(
+            provider.parse_retry_after(&headers).unwrap(),
+            Duration::from_secs(10)
         );
     }
 
@@ -1660,7 +1692,7 @@ mod tests {
         let cooldown = provider.handle_rate_limited_response(
             1,
             "Too many requests",
-            KiroProvider::parse_retry_after(&headers),
+            provider.parse_retry_after(&headers),
         );
         assert_eq!(cooldown, Duration::from_secs(120));
 

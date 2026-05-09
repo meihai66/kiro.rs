@@ -142,6 +142,23 @@ pub struct Config {
     #[serde(default)]
     pub balance_auto_refresh_secs: u32,
 
+    /// 触发 429 限流时的最短冷却（秒）。
+    /// 上游若返回 Retry-After 会优先使用，但不会低于此值；
+    /// 上游未带 Retry-After 时直接用此值。默认 60。
+    #[serde(default = "default_rate_limit_cooldown_min_secs")]
+    pub rate_limit_cooldown_min_secs: u64,
+
+    /// 触发 429 限流时的最长冷却（秒）。
+    /// 用于把异常的 Retry-After（比如几小时）clamp 下来，避免单号被挂死。默认 300。
+    #[serde(default = "default_rate_limit_cooldown_max_secs")]
+    pub rate_limit_cooldown_max_secs: u64,
+
+    /// 容量瓶颈型 429（INSUFFICIENT_MODEL_CAPACITY / high traffic）的冷却（秒）。
+    /// 这类不是单号被限流，是上游瞬时容量不够；用短冷却避免把所有号一并 60s 锁死。
+    /// 默认 8。
+    #[serde(default = "default_capacity_pressure_cooldown_secs")]
+    pub capacity_pressure_cooldown_secs: u64,
+
     /// 错误日志总开关（关闭后不写库；接口仍可读历史日志）
     #[serde(default = "default_true")]
     pub error_log_enabled: bool,
@@ -175,6 +192,18 @@ pub struct Config {
     /// 配置文件路径（运行时元数据，不写入 JSON）
     #[serde(skip)]
     config_path: Option<PathBuf>,
+}
+
+fn default_rate_limit_cooldown_min_secs() -> u64 {
+    60
+}
+
+fn default_rate_limit_cooldown_max_secs() -> u64 {
+    300
+}
+
+fn default_capacity_pressure_cooldown_secs() -> u64 {
+    8
 }
 
 fn default_error_log_max_count() -> u32 {
@@ -418,6 +447,9 @@ impl Default for Config {
             all_credentials_cooldown_bail_threshold_secs:
                 default_all_credentials_cooldown_bail_threshold_secs(),
             balance_auto_refresh_secs: 0,
+            rate_limit_cooldown_min_secs: default_rate_limit_cooldown_min_secs(),
+            rate_limit_cooldown_max_secs: default_rate_limit_cooldown_max_secs(),
+            capacity_pressure_cooldown_secs: default_capacity_pressure_cooldown_secs(),
             error_log_enabled: true,
             error_log_max_count: default_error_log_max_count(),
             error_log_max_age_days: default_error_log_max_age_days(),
