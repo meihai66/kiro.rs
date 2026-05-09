@@ -9,7 +9,6 @@ import {
   TrendingUp,
   Upload,
   Wallet,
-  Zap,
 } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { ColumnDef, RowSelectionState } from '@tanstack/react-table'
@@ -242,46 +241,6 @@ function PriorityChip({ priority }: { priority: number }) {
     >
       {priority}
     </span>
-  )
-}
-
-/** 顶部紧凑状态条单元（图标 + label + 大数字 + 备注） */
-function StatCell({
-  icon: Icon,
-  label,
-  value,
-  hint,
-  tone = 'default',
-}: {
-  icon: React.ComponentType<{ className?: string }>
-  label: string
-  value: string | number
-  hint?: string
-  tone?: 'default' | 'ok' | 'warn'
-}) {
-  const valueCls =
-    tone === 'ok'
-      ? 'text-emerald-600 dark:text-emerald-400'
-      : tone === 'warn'
-        ? 'text-yellow-600 dark:text-yellow-400'
-        : 'text-foreground'
-  return (
-    <div className="flex items-center gap-2.5 px-3 py-1.5 first:pl-0 last:pr-0">
-      <Icon className="h-4 w-4 text-muted-foreground shrink-0" />
-      <div className="flex flex-col leading-tight">
-        <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
-          {label}
-        </span>
-        <span className={`text-sm font-semibold font-mono ${valueCls}`}>
-          {value}
-          {hint && (
-            <span className="ml-1 text-[10px] font-normal text-muted-foreground">
-              {hint}
-            </span>
-          )}
-        </span>
-      </div>
-    </div>
   )
 }
 
@@ -1529,13 +1488,66 @@ export function CredentialsPage() {
   return (
     <>
       {/* 顶栏 */}
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-3">
-          <h1 className="text-2xl font-semibold">凭据管理</h1>
+      <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
+        <div className="flex items-center gap-2 flex-wrap">
+          <h1 className="text-2xl font-semibold mr-1">凭据管理</h1>
           <Badge variant="secondary">总数 {data?.total ?? 0}</Badge>
           <Badge className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-400">
             可用 {data?.available ?? 0}
           </Badge>
+          <Badge
+            className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
+            title={
+              statsSummary && statsSummary.totalRequests > 0
+                ? `成功率 ${((statsSummary.totalSuccess / statsSummary.totalRequests) * 100).toFixed(1)}%`
+                : undefined
+            }
+          >
+            成功 {statsSummary?.totalSuccess ?? 0}
+          </Badge>
+          <Badge
+            className={
+              (statsSummary?.totalFail ?? 0) > 0
+                ? 'bg-rose-500/15 text-rose-700 dark:text-rose-400'
+                : 'bg-muted text-muted-foreground'
+            }
+          >
+            失败 {statsSummary?.totalFail ?? 0}
+          </Badge>
+          {/* 内联实时指标 pill —— 紧凑、与 badge 同一行，避免多占一行 */}
+          <span
+            className="inline-flex items-center gap-1 rounded-md border bg-card px-2 py-0.5 text-xs font-mono"
+            title="服务运行时长"
+          >
+            <Clock className="h-3 w-3 text-muted-foreground" />
+            {statsSummary ? formatUptime(statsSummary.uptimeSecs) : '—'}
+          </span>
+          <span
+            className="inline-flex items-center gap-1 rounded-md border bg-card px-2 py-0.5 text-xs font-mono"
+            title="累计请求数"
+          >
+            <TrendingUp className="h-3 w-3 text-muted-foreground" />
+            {statsSummary?.totalRequests ?? 0}
+          </span>
+          <span
+            className={
+              'inline-flex items-center gap-1 rounded-md border bg-card px-2 py-0.5 text-xs font-mono ' +
+              (totalInFlight > 0
+                ? 'text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
+                : '')
+            }
+            title="当前并发请求数"
+          >
+            <Activity className="h-3 w-3 text-muted-foreground" />
+            {totalInFlight}
+          </span>
+          <span
+            className="inline-flex items-center gap-1 rounded-md border bg-card px-2 py-0.5 text-xs font-mono"
+            title="实时 RPM 总和"
+          >
+            <Gauge className="h-3 w-3 text-muted-foreground" />
+            {totalRpm}
+          </span>
         </div>
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" onClick={handleQueryBalances}>
@@ -1551,51 +1563,6 @@ export function CredentialsPage() {
             添加
           </Button>
         </div>
-      </div>
-
-      {/* 状态条：服务级 + 凭据汇总 */}
-      <div className="mb-3 flex items-stretch flex-wrap divide-x divide-border rounded-md border bg-card overflow-hidden">
-        <StatCell
-          icon={Clock}
-          label="运行时间"
-          value={statsSummary ? formatUptime(statsSummary.uptimeSecs) : '—'}
-          hint={
-            statsSummary
-              ? `自 ${new Date(statsSummary.startedAt).toLocaleString('zh-CN', { hour12: false })}`
-              : undefined
-          }
-        />
-        <StatCell
-          icon={TrendingUp}
-          label="总请求"
-          value={statsSummary?.totalRequests ?? 0}
-        />
-        <StatCell
-          icon={CheckCircle2}
-          label="成功"
-          value={statsSummary?.totalSuccess ?? 0}
-          tone="ok"
-          hint={
-            statsSummary && statsSummary.totalRequests > 0
-              ? `${((statsSummary.totalSuccess / statsSummary.totalRequests) * 100).toFixed(1)}%`
-              : undefined
-          }
-        />
-        <StatCell
-          icon={Activity}
-          label="并发"
-          value={totalInFlight}
-          tone={totalInFlight > 0 ? 'ok' : 'default'}
-        />
-        <StatCell icon={Gauge} label="实时 RPM" value={totalRpm} />
-        {(statsSummary?.totalFail ?? 0) > 0 && (
-          <StatCell
-            icon={Zap}
-            label="失败"
-            value={statsSummary?.totalFail ?? 0}
-            tone="warn"
-          />
-        )}
       </div>
 
       {/* 筛选条 — 多选连续按钮组 */}
