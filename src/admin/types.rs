@@ -56,6 +56,27 @@ pub struct CredentialStatusItem {
     pub endpoint: Option<String>,
     /// 最终生效的 endpoint 名称
     pub effective_endpoint: String,
+    /// 当前绑定的代理槽 ID（启用代理池时；未绑定者不允许启用）
+    pub proxy_slot_id: Option<String>,
+    /// 已知最近的 overageStatus（"ENABLED" / "DISABLED"），可能为空
+    pub overage_status: Option<String>,
+    /// 当前并发请求数（实时）
+    pub in_flight: u32,
+    /// 最近 60 秒 RPM（实时）
+    pub rpm: u32,
+    /// 累计 429 触发次数
+    pub rate_limit_count: u32,
+    /// 允许超额使用：开启后即使额度用尽也不主动禁用
+    pub allow_overuse: bool,
+    /// 当前冷却原因（None 表示不在冷却中）；前端用来区分「限流/失败」状态
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cooldown_reason: Option<String>,
+    /// 当前冷却剩余时间（秒）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cooldown_remaining_secs: Option<u64>,
+    /// 凭据级 RPM 上限（None 表示沿用全局 credentialRpm）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_rpm: Option<u32>,
 }
 
 // ============ 操作请求 ============
@@ -92,6 +113,48 @@ pub struct SetRegionRequest {
 pub struct SetEndpointRequest {
     /// endpoint 名称，空字符串或 null 表示回退到 defaultEndpoint
     pub endpoint: Option<String>,
+}
+
+/// 修改邮箱请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetEmailRequest {
+    /// 邮箱（空字符串或 null 表示清除）
+    pub email: Option<String>,
+}
+
+/// 设置「允许超额使用」开关请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetAllowOveruseRequest {
+    /// 是否允许超额（true=即使余额用尽也继续派发）
+    pub allow: bool,
+}
+
+/// 设置单凭据 RPM 上限请求（None 表示清除覆盖，沿用全局 credentialRpm）
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetCredentialRpmRequest {
+    /// RPM 上限；空字符串/0/null 表示清除覆盖
+    #[serde(default)]
+    pub rpm: Option<u32>,
+}
+
+/// 设置超额计费偏好请求（Kiro setUserPreference）
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SetOveragePreferenceRequest {
+    /// "ENABLED" 或 "DISABLED"（不区分大小写，服务端会规范化）
+    pub overage_status: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SetOveragePreferenceResponse {
+    pub ok: bool,
+    pub overage_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// 添加凭据请求
@@ -135,14 +198,17 @@ pub struct AddCredentialRequest {
     /// 用户邮箱（可选，用于前端显示）
     pub email: Option<String>,
 
-    /// 凭据级代理 URL
-    pub proxy_url: Option<String>,
+    /// 是否自动从代理池为新凭据分配槽位（默认 true）；
+    /// 启用代理池且 false 时凭据导入后置 disabled=true，需手动 bind
+    #[serde(default = "default_true_opt")]
+    pub auto_bind_proxy: Option<bool>,
 
-    /// 凭据级代理用户名
-    pub proxy_username: Option<String>,
+    /// 手动指定要绑定的代理槽 ID（优先级最高，跳过自动选择）
+    pub proxy_slot_id: Option<String>,
+}
 
-    /// 凭据级代理密码
-    pub proxy_password: Option<String>,
+fn default_true_opt() -> Option<bool> {
+    Some(true)
 }
 
 fn default_auth_method() -> String {
@@ -267,6 +333,28 @@ pub struct TokenJsonItem {
     pub region: Option<String>,
     pub api_region: Option<String>,
     pub machine_id: Option<String>,
+    /// 邮箱（来自导出文件 account.email；用于前端展示）
+    pub email: Option<String>,
+    /// 嵌入式代理（来自 KAM 导出 v1.1+ 的 account.proxy 字段）
+    /// 提供时：导入此凭据后将该代理加入代理池并强制绑定，覆盖自动选槽逻辑
+    pub proxy: Option<TokenJsonProxyItem>,
+}
+
+/// 凭据导出文件中的嵌入式代理
+#[derive(Debug, Deserialize, Clone)]
+pub struct TokenJsonProxyItem {
+    /// 代理 URL，可包含用户名密码：`socks5://user:pass@host:port`
+    pub url: String,
+    /// 协议名（仅作记录；以 url scheme 为准）
+    #[allow(dead_code)]
+    #[serde(default, rename = "type")]
+    pub proxy_type: Option<String>,
+    /// 到期时间（接受 RFC3339 / `YYYY-MM-DD` / Unix 秒 / Unix 毫秒）
+    #[serde(default, alias = "expiresAt")]
+    pub expires_at: Option<serde_json::Value>,
+    /// 备注（可选）
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 /// 批量导入请求
@@ -339,6 +427,232 @@ pub enum ImportAction {
     Invalid,
 }
 
+// ============ 代理池 ============
+
+/// 代理池条目（响应；URL 脱敏由前端按需处理）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyEntryItem {
+    pub id: String,
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub remaining_secs: i64,
+    pub slots: u32,
+    pub used_slots: u32,
+    pub bound_credential_ids: Vec<u64>,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_rotated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// 代理池列表响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyListResponse {
+    pub total: usize,
+    pub proxies: Vec<ProxyEntryItem>,
+    pub enabled: bool,
+}
+
+/// 批量导入代理请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportProxiesRequest {
+    /// 协议（http/https/socks5），默认 http
+    #[serde(default = "default_proxy_scheme")]
+    pub scheme: String,
+    /// 每条代理的槽位容量（默认 1）
+    #[serde(default = "default_slots")]
+    pub slots_per_proxy: u32,
+    /// 统一到期时间（RFC3339）
+    pub default_expires_at: chrono::DateTime<chrono::Utc>,
+    /// 行格式：每行 host:port:user:pass（user/pass 可空 → 留空段）
+    pub lines: Vec<String>,
+    /// 可选标签，所有导入条目共享
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+fn default_proxy_scheme() -> String {
+    "http".to_string()
+}
+
+fn default_slots() -> u32 {
+    1
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportProxiesResponse {
+    pub total: usize,
+    pub added: usize,
+    pub failed: usize,
+    pub items: Vec<ImportProxyItemResult>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportProxyItemResult {
+    pub index: usize,
+    pub line: String,
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// 批量删除请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchProxyDeleteRequest {
+    pub ids: Vec<String>,
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// 批量解绑请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchProxyUnbindRequest {
+    pub ids: Vec<String>,
+}
+
+/// 批量调槽位请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchProxySlotsRequest {
+    pub ids: Vec<String>,
+    pub slots: u32,
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// 批量延长到期时间请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchProxyExtendRequest {
+    pub ids: Vec<String>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// 批量操作的逐项结果
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchProxyItemResult {
+    pub id: String,
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchProxyResponse {
+    pub total: usize,
+    pub success_count: usize,
+    pub fail_count: usize,
+    pub items: Vec<BatchProxyItemResult>,
+}
+
+/// 凭据 ↔ 代理 绑定请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BindProxyRequest {
+    pub proxy_id: String,
+    /// 绑定后是否自动启用凭据（默认 true）
+    #[serde(default = "default_true")]
+    pub auto_enable: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyAlertItem {
+    pub at: chrono::DateTime<chrono::Utc>,
+    pub level: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyAlertsResponse {
+    pub total: usize,
+    pub alerts: Vec<ProxyAlertItem>,
+}
+
+// ============ API Keys ============
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiKeyItem {
+    pub id: i64,
+    pub key: String,
+    pub key_masked: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub enabled: bool,
+    pub max_concurrent: u32,
+    pub cache_read_min_pct: u32,
+    pub cache_read_max_pct: u32,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub success_count: u64,
+    pub fail_count: u64,
+    pub in_flight: u32,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiKeyListResponse {
+    pub total: usize,
+    pub keys: Vec<ApiKeyItem>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateApiKeyRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// 自定义 key，留空则自动生成 sk-kiro-... 格式
+    #[serde(default)]
+    pub custom_key: Option<String>,
+    #[serde(default)]
+    pub max_concurrent: u32,
+    #[serde(default)]
+    pub cache_read_min_pct: u32,
+    #[serde(default)]
+    pub cache_read_max_pct: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateApiKeyRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<Option<String>>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub max_concurrent: Option<u32>,
+    #[serde(default)]
+    pub cache_read_min_pct: Option<u32>,
+    #[serde(default)]
+    pub cache_read_max_pct: Option<u32>,
+}
+
 /// 错误响应
 #[derive(Debug, Serialize)]
 pub struct AdminErrorResponse {
@@ -383,6 +697,114 @@ impl AdminErrorResponse {
     }
 }
 
+// ============ 错误日志 ============
+
+/// 列表项（不含大字段，用于日志页表格）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ErrorLogSummaryItem {
+    pub id: i64,
+    pub at: chrono::DateTime<chrono::Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    pub status_code: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_status: Option<u16>,
+    pub error_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub summary: String,
+}
+
+/// 列表响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ErrorLogListResponse {
+    pub total: u64,
+    pub limit: u32,
+    pub offset: u32,
+    pub items: Vec<ErrorLogSummaryItem>,
+}
+
+/// 详情（包含完整请求/响应）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ErrorLogDetail {
+    pub id: i64,
+    pub at: chrono::DateTime<chrono::Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    pub status_code: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_status: Option<u16>,
+    pub error_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_headers: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_headers: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_body: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_body: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+}
+
+/// 列表查询参数（解析自 ?... query string）
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListErrorLogsQuery {
+    /// 多状态码用逗号分隔，例如 `429,502`
+    #[serde(default)]
+    pub status_codes: Option<String>,
+    /// 多种 kind 用逗号分隔
+    #[serde(default)]
+    pub error_kinds: Option<String>,
+    #[serde(default)]
+    pub credential_id: Option<u64>,
+    /// RFC3339 起始时间（含）
+    #[serde(default)]
+    pub since: Option<String>,
+    /// RFC3339 截止时间（含）
+    #[serde(default)]
+    pub until: Option<String>,
+    #[serde(default = "default_log_limit")]
+    pub limit: u32,
+    #[serde(default)]
+    pub offset: u32,
+}
+
+fn default_log_limit() -> u32 {
+    50
+}
+
+/// POST /error-logs/clear 请求体（无字段时清空全部）
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearErrorLogsRequest {
+    #[serde(default)]
+    pub before: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearErrorLogsResponse {
+    pub deleted: u64,
+}
+
 // ============ 全局配置 ============
 
 /// 全局配置响应
@@ -401,6 +823,26 @@ pub struct GlobalConfigResponse {
     pub default_endpoint: String,
     /// 压缩配置
     pub compression: CompressionConfigResponse,
+    /// 错误响应自动禁用规则（一行一条；body 含其中任一字符串则自动禁用凭据）
+    pub auto_disable_patterns: Vec<String>,
+    /// 错误内容替换规则（一行一条；格式 `pattern===replacement`）
+    pub error_replace_rules: Vec<String>,
+    /// 使用率达到此百分比时自动禁用（0=不启用）
+    pub auto_disable_usage_threshold_pct: u32,
+    /// 单凭据最多重试次数
+    pub max_retries_per_credential: u32,
+    /// 单请求总重试次数硬上限
+    pub max_total_retries: u32,
+    /// "所有凭据均处于冷却"时立即返回 429 的等待阈值（秒）；0 表示永不快速 bail
+    pub all_credentials_cooldown_bail_threshold_secs: u64,
+    /// 错误日志开关
+    pub error_log_enabled: bool,
+    /// 错误日志最大保留条数（0=不限）
+    pub error_log_max_count: u32,
+    /// 错误日志最大保留天数（0=不限）
+    pub error_log_max_age_days: u32,
+    /// 不记录的 HTTP 状态码黑名单
+    pub error_log_excluded_status_codes: Vec<u16>,
 }
 
 /// 压缩配置响应
@@ -436,6 +878,26 @@ pub struct UpdateGlobalConfigRequest {
     pub default_endpoint: Option<String>,
     /// 压缩配置（可选）
     pub compression: Option<UpdateCompressionConfigRequest>,
+    /// 错误响应自动禁用规则（可选；提供则整体替换）
+    pub auto_disable_patterns: Option<Vec<String>>,
+    /// 错误内容替换规则（可选；提供则整体替换）
+    pub error_replace_rules: Option<Vec<String>>,
+    /// 使用率达到此百分比时自动禁用（0=关闭；可选）
+    pub auto_disable_usage_threshold_pct: Option<u32>,
+    /// 单凭据最多重试次数（可选）
+    pub max_retries_per_credential: Option<u32>,
+    /// 单请求总重试次数硬上限（可选）
+    pub max_total_retries: Option<u32>,
+    /// "所有凭据均处于冷却"时立即返回 429 的等待阈值（秒，可选；0=禁用快速 bail）
+    pub all_credentials_cooldown_bail_threshold_secs: Option<u64>,
+    /// 错误日志开关
+    pub error_log_enabled: Option<bool>,
+    /// 错误日志最大保留条数
+    pub error_log_max_count: Option<u32>,
+    /// 错误日志最大保留天数
+    pub error_log_max_age_days: Option<u32>,
+    /// 不记录的 HTTP 状态码黑名单（提供则整体替换；空数组表示不排除任何状态码）
+    pub error_log_excluded_status_codes: Option<Vec<u16>>,
 }
 
 /// 更新压缩配置请求

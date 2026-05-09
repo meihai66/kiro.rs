@@ -11,7 +11,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM node:24-alpine AS frontend-builder
 WORKDIR /app/admin-ui
 COPY admin-ui/package.json ./
-RUN npm install -g pnpm && pnpm install
+RUN npm install -g pnpm@9 && pnpm install
 COPY admin-ui ./
 RUN pnpm build
 
@@ -48,4 +48,7 @@ VOLUME ["/app/config"]
 
 EXPOSE 8990
 
-CMD ["./kiro-rs", "-c", "/app/config/config.json", "--credentials", "/app/config/credentials.json"]
+CMD ["./kiro-rs", \
+     "-c",           "/app/config/config.json", \
+     "--credentials","/app/config/credentials.json", \
+     "--db",         "/app/config/kiro.db"]

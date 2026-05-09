@@ -3,7 +3,9 @@
 use reqwest::RequestBuilder;
 use uuid::Uuid;
 
-use super::{KiroEndpoint, RequestContext, UsageRequestParts};
+use super::{
+    KiroEndpoint, ListModelsParts, RequestContext, SetUserPreferenceParts, UsageRequestParts,
+};
 use crate::kiro::model::credentials::KiroCredentials;
 
 pub const IDE_ENDPOINT_NAME: &str = "ide";
@@ -148,7 +150,7 @@ impl KiroEndpoint for IdeEndpoint {
     fn usage_request_parts(&self, ctx: &RequestContext<'_>) -> anyhow::Result<UsageRequestParts> {
         let host = self.host(ctx);
         let mut url = format!(
-            "https://{}/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST",
+            "https://{}/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST&isEmailRequired=true",
             host
         );
         if let Some(profile_arn) = Self::mcp_profile_arn_header_value(ctx.credentials) {
@@ -185,5 +187,68 @@ impl KiroEndpoint for IdeEndpoint {
         }
 
         Ok(UsageRequestParts { url, headers })
+    }
+
+    fn set_user_preference_parts(
+        &self,
+        ctx: &RequestContext<'_>,
+    ) -> anyhow::Result<SetUserPreferenceParts> {
+        let host = self.host(ctx);
+        let url = format!("https://{}/setUserPreference", host);
+
+        // setUserPreference 必填 profileArn（与 MCP 头逻辑无关：IdC 凭据也要传）
+        let profile_arn = ctx
+            .credentials
+            .profile_arn
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "setUserPreference 需要 profileArn，但当前凭据未保存 profileArn。\
+                     请先点击「刷 Token」（刷新 Token 时会从上游同步 profileArn）"
+                )
+            })?
+            .to_string();
+
+        let headers = vec![
+            ("content-type", "application/json".to_string()),
+            ("x-amz-user-agent", self.x_amz_user_agent(ctx)),
+            ("user-agent", self.user_agent(ctx)),
+            ("host", host),
+            ("amz-sdk-invocation-id", Uuid::new_v4().to_string()),
+            ("amz-sdk-request", "attempt=1; max=1".to_string()),
+            ("Authorization", format!("Bearer {}", ctx.token)),
+            ("Connection", "close".to_string()),
+        ];
+
+        Ok(SetUserPreferenceParts {
+            url,
+            headers,
+            profile_arn,
+        })
+    }
+
+    fn list_models_parts(&self, ctx: &RequestContext<'_>) -> anyhow::Result<ListModelsParts> {
+        let host = self.host(ctx);
+        let mut url = format!("https://{}/ListAvailableModels?origin=AI_EDITOR", host);
+        if let Some(profile_arn) = Self::mcp_profile_arn_header_value(ctx.credentials) {
+            url.push_str(&format!("&profileArn={}", urlencoding::encode(profile_arn)));
+        }
+
+        let mut headers = vec![
+            ("x-amz-user-agent", self.x_amz_user_agent(ctx)),
+            ("user-agent", self.user_agent(ctx)),
+            ("host", host),
+            ("x-amzn-codewhisperer-optout", "true".to_string()),
+            ("amz-sdk-invocation-id", Uuid::new_v4().to_string()),
+            ("amz-sdk-request", "attempt=1; max=1".to_string()),
+            ("Authorization", format!("Bearer {}", ctx.token)),
+            ("Connection", "close".to_string()),
+        ];
+        if ctx.credentials.is_api_key_credential() {
+            headers.push(("tokentype", "API_KEY".to_string()));
+        }
+        Ok(ListModelsParts { url, headers })
     }
 }

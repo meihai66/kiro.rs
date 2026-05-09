@@ -199,6 +199,8 @@ pub(crate) struct FinalUsage<'a> {
     output_tokens: i32,
     cache_usage: Option<CacheUsageBreakdown>,
     metering: Option<&'a MeteringEvent>,
+    /// per-API-Key 的 cache_read 模拟比例
+    cache_sim_pct: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -441,18 +443,49 @@ impl SseStateManager {
         // 发送 message_delta
         if !self.message_delta_sent {
             self.message_delta_sent = true;
+            // 取上下文 simulation pct（StreamContext 字段，由 handler 注入）
+            // 通过 ContextUsageEvent 的 cache_sim_pct 传过来
+            let sim_pct = usage.cache_sim_pct;
+            let cache_usage_opt = usage.cache_usage;
+            let (final_input, final_creation, final_read) = if let Some(pct) = sim_pct {
+                let cu = cache_usage_opt.unwrap_or(CacheUsageBreakdown {
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    cache_creation_5m_input_tokens: 0,
+                    cache_creation_1h_input_tokens: 0,
+                });
+                let (i, r, c) = crate::api_key_manager::apply_cache_simulation(
+                    usage.input_tokens,
+                    cu.cache_read_input_tokens,
+                    cu.cache_creation_input_tokens,
+                    pct,
+                );
+                (i, c, r)
+            } else {
+                (
+                    usage.input_tokens,
+                    cache_usage_opt
+                        .map(|c| c.cache_creation_input_tokens)
+                        .unwrap_or(0),
+                    cache_usage_opt
+                        .map(|c| c.cache_read_input_tokens)
+                        .unwrap_or(0),
+                )
+            };
             let mut usage_json = json!({
-                "input_tokens": usage.input_tokens,
+                "input_tokens": final_input,
                 "output_tokens": usage.output_tokens,
             });
-            if let Some(cache_usage) = usage.cache_usage {
-                usage_json["cache_creation_input_tokens"] =
-                    json!(cache_usage.cache_creation_input_tokens);
-                usage_json["cache_read_input_tokens"] = json!(cache_usage.cache_read_input_tokens);
+            if let Some(cache_usage) = cache_usage_opt {
+                usage_json["cache_creation_input_tokens"] = json!(final_creation);
+                usage_json["cache_read_input_tokens"] = json!(final_read);
                 usage_json["cache_creation"] = json!({
                     "ephemeral_5m_input_tokens": cache_usage.cache_creation_5m_input_tokens,
                     "ephemeral_1h_input_tokens": cache_usage.cache_creation_1h_input_tokens
                 });
+            } else if sim_pct.is_some() {
+                usage_json["cache_creation_input_tokens"] = json!(final_creation);
+                usage_json["cache_read_input_tokens"] = json!(final_read);
             }
             if let Some(metering) = usage.metering {
                 usage_json["credit_usage"] = json!(metering.usage);
@@ -522,6 +555,8 @@ pub struct StreamContext {
     /// 是否需要剥离 thinking 内容开头的换行符
     /// 模型输出 `<thinking>\n` 时，`\n` 可能与标签在同一 chunk 或下一 chunk
     strip_thinking_leading_newline: bool,
+    /// per-API-Key 的 cache_read 模拟比例（0..=100）。None 表示不模拟，输出真实值。
+    pub cache_sim_pct: Option<u32>,
 }
 
 impl StreamContext {
@@ -551,6 +586,7 @@ impl StreamContext {
             text_block_index: None,
             metering: None,
             strip_thinking_leading_newline: false,
+            cache_sim_pct: None,
         }
     }
 
@@ -566,13 +602,36 @@ impl StreamContext {
                 )
             })
             .unwrap_or(self.input_tokens);
+        // 应用 cache 比例模拟（per-API-Key）
+        let (sim_input, sim_creation, sim_read) = if let Some(pct) = self.cache_sim_pct {
+            let cu = self.cache_usage.unwrap_or(CacheUsageBreakdown {
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                cache_creation_5m_input_tokens: 0,
+                cache_creation_1h_input_tokens: 0,
+            });
+            let (i, r, c) = crate::api_key_manager::apply_cache_simulation(
+                billed_input_tokens,
+                cu.cache_read_input_tokens,
+                cu.cache_creation_input_tokens,
+                pct,
+            );
+            (i, c, r)
+        } else {
+            let cu = self.cache_usage;
+            (
+                billed_input_tokens,
+                cu.map(|c| c.cache_creation_input_tokens).unwrap_or(0),
+                cu.map(|c| c.cache_read_input_tokens).unwrap_or(0),
+            )
+        };
         let mut usage = json!({
-            "input_tokens": billed_input_tokens,
+            "input_tokens": sim_input,
             "output_tokens": 1,
         });
-        if let Some(cache_usage) = self.cache_usage {
-            usage["cache_creation_input_tokens"] = json!(cache_usage.cache_creation_input_tokens);
-            usage["cache_read_input_tokens"] = json!(cache_usage.cache_read_input_tokens);
+        if self.cache_usage.is_some() || self.cache_sim_pct.is_some() {
+            usage["cache_creation_input_tokens"] = json!(sim_creation);
+            usage["cache_read_input_tokens"] = json!(sim_read);
         }
         json!({
             "type": "message_start",
@@ -1136,6 +1195,7 @@ impl StreamContext {
             output_tokens: self.output_tokens,
             cache_usage: self.cache_usage,
             metering: self.metering.as_ref(),
+            cache_sim_pct: self.cache_sim_pct,
         }));
         events
     }

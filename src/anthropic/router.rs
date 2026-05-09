@@ -10,6 +10,7 @@ use axum::{
 };
 use parking_lot::RwLock;
 
+use crate::api_key_manager::ApiKeyManager;
 use crate::kiro::provider::KiroProvider;
 use crate::model::config::CompressionConfig;
 
@@ -38,12 +39,16 @@ const MAX_BODY_SIZE: usize = 50 * 1024 * 1024;
 /// - `kiro_provider`: 可选的 KiroProvider，用于调用上游 API
 ///
 /// 创建带有 KiroProvider 的 Anthropic API 路由
+#[allow(clippy::too_many_arguments)]
 pub fn create_router_with_provider(
     api_key: impl Into<String>,
     kiro_provider: Option<Arc<KiroProvider>>,
     profile_arn: Option<String>,
     compression_config: Arc<RwLock<CompressionConfig>>,
     prompt_cache_runtime: Arc<RwLock<PromptCacheRuntime>>,
+    api_key_manager: Option<Arc<ApiKeyManager>>,
+    store: Option<Arc<crate::storage::Store>>,
+    global_config: Option<Arc<RwLock<crate::model::config::Config>>>,
 ) -> Router {
     let mut state = AppState::new(api_key, prompt_cache_runtime);
     if let Some(provider) = kiro_provider {
@@ -53,6 +58,15 @@ pub fn create_router_with_provider(
         state = state.with_profile_arn(arn);
     }
     state = state.with_compression_config(compression_config);
+    if let Some(mgr) = api_key_manager {
+        state = state.with_api_key_manager(mgr);
+    }
+    if let Some(store) = store {
+        state = state.with_store(store);
+    }
+    if let Some(cfg) = global_config {
+        state = state.with_global_config(cfg);
+    }
 
     // 需要认证的 /v1 路由
     let v1_routes = Router::new()

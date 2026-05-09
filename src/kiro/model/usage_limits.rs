@@ -20,6 +20,39 @@ pub struct UsageLimitsResponse {
     /// 使用量明细列表
     #[serde(default)]
     pub usage_breakdown_list: Vec<UsageBreakdown>,
+
+    /// 超额计费配置（与 setUserPreference 请求体同结构）
+    #[serde(default)]
+    pub overage_configuration: Option<OverageConfiguration>,
+
+    /// 用户邮箱（仅当请求带 `isEmailRequired=true` 时上游返回；
+    /// 接受 root 上的 `email` / `userEmail`，以及嵌套 `userInfo.email`）
+    #[serde(default, alias = "email", alias = "userEmail")]
+    pub user_email: Option<String>,
+
+    /// 嵌套 userInfo（部分上游返回会把 email 放在这里）
+    #[serde(default)]
+    pub user_info: Option<UsageUserInfo>,
+}
+
+/// 嵌套 userInfo（容错读取多种字段名）
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageUserInfo {
+    #[serde(default, alias = "userEmail")]
+    pub email: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub user_id: Option<String>,
+}
+
+/// 超额计费配置
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverageConfiguration {
+    /// "ENABLED" / "DISABLED"
+    #[serde(default)]
+    pub overage_status: Option<String>,
 }
 
 /// 订阅信息
@@ -144,6 +177,22 @@ impl UsageLimitsResponse {
         self.subscription_info
             .as_ref()
             .and_then(|info| info.subscription_title.as_deref())
+    }
+
+    /// 提取用户邮箱（容错从 root 字段或嵌套 userInfo 中获取）
+    pub fn extract_email(&self) -> Option<String> {
+        self.user_email
+            .as_deref()
+            .or_else(|| self.user_info.as_ref().and_then(|u| u.email.as_deref()))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && s.contains('@'))
+    }
+
+    /// 获取 overage_status（"ENABLED" / "DISABLED"）
+    pub fn overage_status(&self) -> Option<&str> {
+        self.overage_configuration
+            .as_ref()
+            .and_then(|c| c.overage_status.as_deref())
     }
 
     /// 获取第一个使用量明细

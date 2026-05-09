@@ -31,6 +31,9 @@ pub enum CooldownReason {
 
     /// 模型暂时不可用
     ModelUnavailable,
+
+    /// 代理槽资源耗尽（绑定的代理过期 + 池里无可用备件）
+    ProxyExhausted,
 }
 
 impl CooldownReason {
@@ -47,6 +50,9 @@ impl CooldownReason {
             CooldownReason::AuthenticationFailed => Duration::from_secs(3600),
             CooldownReason::AccountSuspended => Duration::from_secs(86400),
             CooldownReason::QuotaExhausted => Duration::from_secs(86400),
+
+            // 代理资源耗尽：等待管理员补充代理或后台轮换重新绑定（30 分钟轮询级）
+            CooldownReason::ProxyExhausted => Duration::from_secs(1800),
         }
     }
 
@@ -60,6 +66,7 @@ impl CooldownReason {
             CooldownReason::AuthenticationFailed => false,
             CooldownReason::AccountSuspended => false,
             CooldownReason::QuotaExhausted => false,
+            CooldownReason::ProxyExhausted => true,
         }
     }
 
@@ -73,6 +80,7 @@ impl CooldownReason {
             CooldownReason::AuthenticationFailed => "认证失败",
             CooldownReason::ServerError => "服务器错误",
             CooldownReason::ModelUnavailable => "模型暂时不可用",
+            CooldownReason::ProxyExhausted => "代理资源耗尽",
         }
     }
 }

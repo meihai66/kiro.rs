@@ -8,7 +8,7 @@ use crate::kiro::parser::decoder::EventStreamDecoder;
 use crate::token;
 use anyhow::Error;
 use axum::{
-    Json as JsonExtractor,
+    Extension, Json as JsonExtractor,
     body::Body,
     extract::{OriginalUri, State},
     http::{StatusCode, header},
@@ -58,6 +58,8 @@ struct StreamRequestContext<'a> {
     thinking_enabled: bool,
     tool_name_map: std::collections::HashMap<String, String>,
     user_id: Option<&'a str>,
+    cache_sim_pct: Option<u32>,
+    state: &'a super::middleware::AppState,
 }
 
 struct NonStreamRequestContext<'a> {
@@ -68,6 +70,8 @@ struct NonStreamRequestContext<'a> {
     user_id: Option<&'a str>,
     cache_tracker: Option<&'a std::sync::Arc<crate::anthropic::cache_tracker::CacheTracker>>,
     cache_profile: Option<&'a crate::anthropic::cache_tracker::CacheProfile>,
+    cache_sim_pct: Option<u32>,
+    state: &'a super::middleware::AppState,
 }
 
 fn build_cache_profile(
@@ -107,9 +111,34 @@ fn resolved_cache_usage(
     compute_cache_usage(cache_tracker, credential_id, profile)
 }
 
+#[allow(dead_code)]
 fn inject_cache_usage_fields(usage: &mut serde_json::Value, cache_context: CacheUsageContext) {
-    usage["cache_creation_input_tokens"] = json!(cache_context.cache_creation_input_tokens);
-    usage["cache_read_input_tokens"] = json!(cache_context.cache_read_input_tokens);
+    inject_cache_usage_fields_with_sim(usage, cache_context, None);
+}
+
+/// 应用 cache 模拟比例（per-API-Key 的 cacheReadMinPct/maxPct）：
+/// 把 input + cache_read + cache_creation 的总和按 pct 重分配，
+/// cache_read 占 pct%，其余落到 input，cache_creation 清零。
+fn inject_cache_usage_fields_with_sim(
+    usage: &mut serde_json::Value,
+    cache_context: CacheUsageContext,
+    sim_pct: Option<u32>,
+) {
+    let mut creation = cache_context.cache_creation_input_tokens;
+    let mut read = cache_context.cache_read_input_tokens;
+    if let Some(pct) = sim_pct {
+        let input = usage
+            .get("input_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as i32;
+        let (new_input, new_read, new_creation) =
+            crate::api_key_manager::apply_cache_simulation(input, read, creation, pct);
+        usage["input_tokens"] = json!(new_input);
+        read = new_read;
+        creation = new_creation;
+    }
+    usage["cache_creation_input_tokens"] = json!(creation);
+    usage["cache_read_input_tokens"] = json!(read);
     usage["cache_creation"] = json!({
         "ephemeral_5m_input_tokens": cache_context.cache_creation_5m_input_tokens,
         "ephemeral_1h_input_tokens": cache_context.cache_creation_1h_input_tokens
@@ -445,121 +474,264 @@ fn adaptive_shrink_request_body(
     Ok(Some(outcome))
 }
 
+/// 错误响应记录上下文（仅在写错误日志时使用）。
+struct ErrorLogContext<'a> {
+    state: &'a super::middleware::AppState,
+    /// 客户端原始请求路径（如 `/v1/messages`）
+    request_path: Option<&'a str>,
+    /// 客户端请求方法
+    request_method: Option<&'a str>,
+    /// 模型名（来自 payload.model）
+    model: Option<&'a str>,
+    /// 转发到上游 Kiro 的请求体（最贴近触发错误的实际负载）
+    request_body: Option<&'a str>,
+    /// user_id（脱敏前；展示时仍按 mask_user_id 处理）
+    user_id: Option<&'a str>,
+}
+
+/// 错误分类标签（前端日志页过滤用）
+fn classify_error_kind(err: &Error, status_code: u16) -> &'static str {
+    if is_input_too_long_error(err) {
+        return "input_too_long";
+    }
+    if is_improperly_formed_request_error(err) {
+        return "improperly_formed";
+    }
+    if is_no_credentials_error(err) {
+        return "no_credentials";
+    }
+    if is_all_credentials_cooling_down_error(err).0 {
+        return "all_cooling_down";
+    }
+    if is_quota_exhausted_error(err) {
+        return "quota_exhausted";
+    }
+    if is_transient_upstream_error(err) {
+        let s = err.to_string().to_lowercase();
+        if is_network_error(&s) {
+            return "network_error";
+        }
+        return "upstream_transient";
+    }
+    if status_code == 429 {
+        return "rate_limit";
+    }
+    if status_code == 401 || status_code == 403 {
+        return "auth";
+    }
+    "upstream_error"
+}
+
+/// 异步把一条错误响应写入 SQLite。失败仅打日志，不影响响应。
+fn record_error_log(
+    ctx: &ErrorLogContext,
+    err: &Error,
+    status_code: u16,
+    response_body: String,
+) {
+    // 是否启用 + 状态码黑名单（缺 store/config 时不记录）
+    let (Some(store), Some(global_config)) = (
+        ctx.state.store.as_ref().cloned(),
+        ctx.state.global_config.as_ref().cloned(),
+    ) else {
+        return;
+    };
+    let (enabled, excluded) = {
+        let cfg = global_config.read();
+        (
+            cfg.error_log_enabled,
+            cfg.error_log_excluded_status_codes.clone(),
+        )
+    };
+    if !enabled {
+        return;
+    }
+    if excluded.contains(&status_code) {
+        return;
+    }
+
+    // summary：取 err.to_string() 的第一行，截到 200 字符
+    let raw = err.to_string();
+    let line = raw.lines().next().unwrap_or(&raw);
+    let summary = if line.chars().count() > 200 {
+        let truncated: String = line.chars().take(200).collect();
+        format!("{}…", truncated)
+    } else {
+        line.to_string()
+    };
+
+    let kind = classify_error_kind(err, status_code).to_string();
+
+    let request_body = ctx.request_body.map(|s| s.to_string());
+
+    let insert = crate::storage::ErrorLogInsert {
+        at: chrono::Utc::now(),
+        credential_id: None, // provider 错误目前不带 credential_id；后续可扩展
+        endpoint: None,
+        status_code,
+        upstream_status: None,
+        error_kind: kind,
+        model: ctx.model.map(|s| s.to_string()),
+        summary,
+        request_method: ctx.request_method.map(|s| s.to_string()),
+        request_path: ctx.request_path.map(|s| s.to_string()),
+        request_headers: None,
+        response_headers: None,
+        request_body,
+        response_body: Some(response_body),
+        user_id: ctx.user_id.map(|s| s.to_string()),
+        request_id: None,
+    };
+
+    tokio::spawn(async move {
+        if let Err(e) = store.insert_error_log(&insert) {
+            tracing::warn!(error = %e, "写入错误日志失败");
+        }
+    });
+}
+
+/// 把 ErrorResponse 序列化为字符串，写入错误日志的 response_body 字段
+fn err_response_to_body_string(error_type: &str, message: &str) -> String {
+    serde_json::json!({
+        "type": "error",
+        "error": { "type": error_type, "message": message }
+    })
+    .to_string()
+}
+
+#[cfg(test)]
 fn map_kiro_provider_error_to_response(request_body: &str, err: Error) -> Response {
-    if is_input_too_long_error(&err) {
+    map_kiro_provider_error_to_response_with_log(request_body, err, None)
+}
+
+fn map_kiro_provider_error_to_response_with_log(
+    request_body: &str,
+    err: Error,
+    log_ctx: Option<&ErrorLogContext>,
+) -> Response {
+    // 单一出口：先计算 (status, error_type, message, optional retry_after_secs)，
+    // 再统一写日志、构建响应。这样新增分支不容易漏掉日志。
+    struct Mapped {
+        status: StatusCode,
+        error_type: &'static str,
+        message: String,
+        retry_after_secs: Option<u64>,
+    }
+
+    let mapped = if is_input_too_long_error(&err) {
         tracing::warn!(
             kiro_request_body_bytes = request_body.len(),
             error = %err,
             "上游拒绝请求：输入上下文过长（不应重试）"
         );
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new(
-                "invalid_request_error",
-                "Input is too long (CONTENT_LENGTH_EXCEEDS_THRESHOLD). Reduce conversation history/system/tools; retrying the same request will not help.",
-            )),
-        )
-            .into_response();
-    }
-
-    if is_improperly_formed_request_error(&err) {
+        Mapped {
+            status: StatusCode::BAD_REQUEST,
+            error_type: "invalid_request_error",
+            message: "Input is too long (CONTENT_LENGTH_EXCEEDS_THRESHOLD). Reduce conversation history/system/tools; retrying the same request will not help.".to_string(),
+            retry_after_secs: None,
+        }
+    } else if is_improperly_formed_request_error(&err) {
         tracing::warn!(
             error = %err,
             kiro_request_body_bytes = request_body.len(),
             "上游拒绝请求：请求格式错误（可能由超大请求体、消息/工具序列异常或空内容块导致）"
         );
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new(
-                "invalid_request_error",
-                "Improperly formed request. This is often caused by oversized payloads, malformed message/tool sequences, or empty content blocks.",
-            )),
-        )
-            .into_response();
-    }
-
-    if is_no_credentials_error(&err) {
+        Mapped {
+            status: StatusCode::BAD_REQUEST,
+            error_type: "invalid_request_error",
+            message: "Improperly formed request. This is often caused by oversized payloads, malformed message/tool sequences, or empty content blocks.".to_string(),
+            retry_after_secs: None,
+        }
+    } else if is_no_credentials_error(&err) {
         tracing::error!(error = %err, "没有可用的凭据");
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ErrorResponse::new(
-                "service_unavailable",
-                "No credentials available. Please add or enable credentials via Admin API or credentials.json.",
-            )),
-        )
-            .into_response();
-    }
-
-    let (cooling, retry_after) = is_all_credentials_cooling_down_error(&err);
-    if cooling {
+        Mapped {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            error_type: "service_unavailable",
+            message: "No credentials available. Please add or enable credentials via Admin API or credentials.json.".to_string(),
+            retry_after_secs: None,
+        }
+    } else if let (true, retry_after) = is_all_credentials_cooling_down_error(&err) {
         let secs = retry_after.unwrap_or(60);
         tracing::warn!(
             error = %err,
             retry_after_secs = secs,
             "所有凭据临时冷却，返回 429 + Retry-After"
         );
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            [(header::RETRY_AFTER, secs.to_string())],
-            Json(ErrorResponse::new(
-                "rate_limit_error",
-                format!(
-                    "All credentials are temporarily cooling down. Retry after {}s.",
-                    secs
-                ),
-            )),
-        )
-            .into_response();
-    }
-
-    if is_quota_exhausted_error(&err) {
+        Mapped {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            error_type: "rate_limit_error",
+            message: format!(
+                "All credentials are temporarily cooling down. Retry after {}s.",
+                secs
+            ),
+            retry_after_secs: Some(secs),
+        }
+    } else if is_quota_exhausted_error(&err) {
         tracing::warn!(error = %err, "所有凭据配额已耗尽");
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(ErrorResponse::new(
-                "rate_limit_error",
-                "All credentials quota exhausted. Please wait for quota reset or add new credentials.",
-            )),
-        )
-            .into_response();
-    }
-
-    if is_transient_upstream_error(&err) {
+        Mapped {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            error_type: "rate_limit_error",
+            message:
+                "All credentials quota exhausted. Please wait for quota reset or add new credentials."
+                    .to_string(),
+            retry_after_secs: None,
+        }
+    } else if is_transient_upstream_error(&err) {
         let err_str = err.to_string().to_lowercase();
         if is_network_error(&err_str) {
             tracing::warn!(error = %err, "上游网络错误，不输出请求体");
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(ErrorResponse::new(
-                    "api_error",
-                    format!("上游网络错误: {}", err),
-                )),
-            )
-                .into_response();
+            Mapped {
+                status: StatusCode::BAD_GATEWAY,
+                error_type: "api_error",
+                message: format!("上游网络错误: {}", err),
+                retry_after_secs: None,
+            }
+        } else {
+            tracing::warn!(error = %err, "上游瞬态错误（429/5xx），不输出请求体");
+            Mapped {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                error_type: "rate_limit_error",
+                message: err.to_string(),
+                retry_after_secs: None,
+            }
         }
-        tracing::warn!(error = %err, "上游瞬态错误（429/5xx），不输出请求体");
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(ErrorResponse::new("rate_limit_error", err.to_string())),
-        )
-            .into_response();
+    } else {
+        tracing::error!("Kiro API 调用失败: {}", err);
+        #[cfg(feature = "sensitive-logs")]
+        tracing::error!(
+            request_body_bytes = request_body.len(),
+            "上游报错，请求体大小: {} bytes",
+            request_body.len()
+        );
+        Mapped {
+            status: StatusCode::BAD_GATEWAY,
+            error_type: "api_error",
+            message: format!("上游 API 调用失败: {}", err),
+            retry_after_secs: None,
+        }
+    };
+
+    // 写错误日志（如果上下文在）
+    if let Some(ctx) = log_ctx {
+        let body_str = err_response_to_body_string(mapped.error_type, &mapped.message);
+        record_error_log(ctx, &err, mapped.status.as_u16(), body_str);
     }
 
-    tracing::error!("Kiro API 调用失败: {}", err);
-    #[cfg(feature = "sensitive-logs")]
-    tracing::error!(
-        request_body_bytes = request_body.len(),
-        "上游报错，请求体大小: {} bytes",
-        request_body.len()
-    );
-    (
-        StatusCode::BAD_GATEWAY,
-        Json(ErrorResponse::new(
-            "api_error",
-            format!("上游 API 调用失败: {}", err),
-        )),
-    )
-        .into_response()
+    // 构造响应
+    if let Some(secs) = mapped.retry_after_secs {
+        (
+            mapped.status,
+            [(header::RETRY_AFTER, secs.to_string())],
+            Json(ErrorResponse::new(mapped.error_type, mapped.message)),
+        )
+            .into_response()
+    } else {
+        (
+            mapped.status,
+            Json(ErrorResponse::new(mapped.error_type, mapped.message)),
+        )
+            .into_response()
+    }
 }
 
 /// 对 user_id 进行掩码处理，保护隐私
@@ -862,11 +1034,21 @@ pub async fn get_models(OriginalUri(uri): OriginalUri) -> impl IntoResponse {
 /// POST /v1/messages
 ///
 /// 创建消息（对话）
+type AuthSlot =
+    std::sync::Arc<parking_lot::Mutex<Option<crate::api_key_manager::AuthGuard>>>;
+
 pub async fn post_messages(
     OriginalUri(uri): OriginalUri,
     State(state): State<AppState>,
+    auth_slot: Option<Extension<AuthSlot>>,
     JsonExtractor(mut payload): JsonExtractor<MessagesRequest>,
 ) -> Response {
+    // 从 ApiKey 配置取 cache 比例模拟（命中 0..0 时 None=不模拟）
+    let cache_sim_pct: Option<u32> = auth_slot.as_ref().and_then(|Extension(slot)| {
+        slot.lock()
+            .as_ref()
+            .and_then(|g| g.entry().sample_cache_read_pct())
+    });
     // 读取压缩配置快照（读锁 + clone，避免持锁跨 await）
     let compression_config = state.compression_config.read().clone();
     let prompt_cache = state.prompt_cache_snapshot();
@@ -1126,6 +1308,8 @@ pub async fn post_messages(
             thinking_enabled,
             tool_name_map: tool_name_map.clone(),
             user_id: user_id.as_deref(),
+            cache_sim_pct,
+            state: &state,
         };
         handle_stream_request(provider, stream_request).await
     } else {
@@ -1136,10 +1320,12 @@ pub async fn post_messages(
             input_tokens: estimated_input_tokens,
             tool_name_map,
             user_id: user_id.as_deref(),
+            cache_sim_pct,
             cache_tracker: prompt_cache
                 .accounting_enabled
                 .then_some(&prompt_cache.tracker),
             cache_profile: cache_profile.as_ref(),
+            state: &state,
         };
         handle_non_stream_request(provider, non_stream_request).await
     }
@@ -1154,7 +1340,21 @@ async fn handle_stream_request(
         .await
     {
         Ok(resp) => resp,
-        Err(e) => return map_kiro_provider_error_to_response(context.request_body, e),
+        Err(e) => {
+            let log_ctx = ErrorLogContext {
+                state: context.state,
+                request_path: Some("/v1/messages"),
+                request_method: Some("POST"),
+                model: Some(context.model),
+                request_body: Some(context.request_body),
+                user_id: context.user_id,
+            };
+            return map_kiro_provider_error_to_response_with_log(
+                context.request_body,
+                e,
+                Some(&log_ctx),
+            );
+        }
     };
 
     let final_cache_context = match (context.cache_tracker, context.cache_profile) {
@@ -1186,6 +1386,7 @@ async fn handle_stream_request(
         context.thinking_enabled,
         context.tool_name_map,
     );
+    ctx.cache_sim_pct = context.cache_sim_pct;
 
     // 生成初始事件
     let initial_events = ctx.generate_initial_events();
@@ -1316,7 +1517,21 @@ async fn handle_non_stream_request(
         .await
     {
         Ok(resp) => resp,
-        Err(e) => return map_kiro_provider_error_to_response(context.request_body, e),
+        Err(e) => {
+            let log_ctx = ErrorLogContext {
+                state: context.state,
+                request_path: Some("/v1/messages"),
+                request_method: Some("POST"),
+                model: Some(context.model),
+                request_body: Some(context.request_body),
+                user_id: context.user_id,
+            };
+            return map_kiro_provider_error_to_response_with_log(
+                context.request_body,
+                e,
+                Some(&log_ctx),
+            );
+        }
     };
 
     let final_cache_context = match (context.cache_tracker, context.cache_profile) {
@@ -1550,7 +1765,14 @@ async fn handle_non_stream_request(
             inject_credit_usage_fields(&mut usage, metering);
         }
         if let Some(cache_context) = final_cache_context {
-            inject_cache_usage_fields(&mut usage, cache_context);
+            inject_cache_usage_fields_with_sim(&mut usage, cache_context, context.cache_sim_pct);
+        } else if let Some(pct) = context.cache_sim_pct {
+            // 即使没有真实 cache_context，启用 sim 时也要重写
+            inject_cache_usage_fields_with_sim(
+                &mut usage,
+                CacheUsageContext::default(),
+                Some(pct),
+            );
         }
 
         json!({

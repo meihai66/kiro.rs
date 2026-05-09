@@ -1,6 +1,6 @@
 [package]
 name = "kiro-rs"
-version = "1.1.29"
+version = "1.1.37"
 edition = "2024"
 
 [profile.release]
@@ -40,3 +40,7 @@ rust-embed = "8"      # 嵌入静态文件
 mime_guess = "2"      # MIME 类型推断
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }  # 图片处理
 base64 = "0.22"       # Base64 编解码
+rusqlite = { version = "0.32", features = ["bundled", "chrono"] }   # 嵌入式 SQLite（含静态链接）
+r2d2 = "0.8"          # SQLite 连接池
+r2d2_sqlite = "0.25"  # r2d2 + rusqlite 适配
+thiserror = "1"       # 自定义错误派生

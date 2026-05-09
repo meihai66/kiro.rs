@@ -12,6 +12,7 @@ use axum::{
 };
 use parking_lot::RwLock;
 
+use crate::api_key_manager::{ApiKeyManager, AuthError, AuthGuard};
 use crate::common::auth;
 use crate::kiro::provider::KiroProvider;
 use crate::model::config::CompressionConfig;
@@ -66,7 +67,8 @@ impl PromptCacheRuntime {
 /// 应用共享状态
 #[derive(Clone)]
 pub struct AppState {
-    /// API 密钥
+    /// 启动期 seed 用的 API Key（仅启动时一次性导入 SQLite api_keys 表，运行期不用）
+    #[allow(dead_code)]
     pub api_key: String,
     /// Kiro Provider（可选，用于实际 API 调用）
     /// 内部使用 MultiTokenManager，已支持线程安全的多凭据管理
@@ -77,6 +79,12 @@ pub struct AppState {
     pub compression_config: Arc<RwLock<CompressionConfig>>,
     /// Prompt Cache 运行时配置（共享引用，支持热更新）
     pub prompt_cache_runtime: Arc<RwLock<PromptCacheRuntime>>,
+    /// API Key 管理器（启动期注入；为 None 时仅用 config.api_key 兜底）
+    pub api_key_manager: Option<Arc<ApiKeyManager>>,
+    /// SQLite 存储（可选；用于错误日志写库）
+    pub store: Option<Arc<crate::storage::Store>>,
+    /// 全局配置（用于读取错误日志开关 / 黑名单等）
+    pub global_config: Option<Arc<RwLock<crate::model::config::Config>>>,
 }
 
 impl AppState {
@@ -91,7 +99,28 @@ impl AppState {
             profile_arn: None,
             compression_config: Arc::new(RwLock::new(CompressionConfig::default())),
             prompt_cache_runtime,
+            api_key_manager: None,
+            store: None,
+            global_config: None,
         }
+    }
+
+    pub fn with_store(mut self, store: Arc<crate::storage::Store>) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    pub fn with_global_config(
+        mut self,
+        config: Arc<RwLock<crate::model::config::Config>>,
+    ) -> Self {
+        self.global_config = Some(config);
+        self
+    }
+
+    pub fn with_api_key_manager(mut self, mgr: Arc<ApiKeyManager>) -> Self {
+        self.api_key_manager = Some(mgr);
+        self
     }
 
     /// 设置 KiroProvider
@@ -118,16 +147,84 @@ impl AppState {
 }
 
 /// API Key 认证中间件
+///
+/// 仅查 `ApiKeyManager`（数据库里的 `api_keys` 表）。`config.api_key` 在启动期会被
+/// 一次性 seed 进数据库，不再作为运行期兜底比较，避免出现"双路径不可见 key"。
+///
+/// - 鉴权失败 → 401
+/// - 并发超限 → 429 + Retry-After
+/// - 成功通过 → AuthGuard 在 drop 时根据响应 status 异步写 success/fail 计数
 pub async fn auth_middleware(
     State(state): State<AppState>,
-    request: Request<Body>,
+    mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    match auth::extract_api_key(&request) {
-        Some(key) if auth::constant_time_eq(&key, &state.api_key) => next.run(request).await,
-        _ => {
-            let error = ErrorResponse::authentication_error();
-            (StatusCode::UNAUTHORIZED, Json(error)).into_response()
+    let key = match auth::extract_api_key(&request) {
+        Some(k) => k,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse::authentication_error()),
+            )
+                .into_response();
+        }
+    };
+
+    let mgr = match &state.api_key_manager {
+        Some(m) => m,
+        None => {
+            tracing::error!("ApiKeyManager 未注入，所有请求将被拒绝");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse::authentication_error()),
+            )
+                .into_response();
+        }
+    };
+
+    match mgr.authorize(&key) {
+        Ok(guard) => {
+            let guard_slot: Arc<parking_lot::Mutex<Option<AuthGuard>>> =
+                Arc::new(parking_lot::Mutex::new(Some(guard)));
+            let guard_held = guard_slot.clone();
+            request.extensions_mut().insert(guard_slot);
+            let response = next.run(request).await;
+            if let Some(mut g) = guard_held.lock().take() {
+                if response.status().is_success() {
+                    g.mark_success();
+                } else {
+                    g.mark_fail();
+                }
+                drop(g);
+            }
+            response
+        }
+        Err(AuthError::NotFound) | Err(AuthError::Disabled) => (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse::authentication_error()),
+        )
+            .into_response(),
+        Err(AuthError::ConcurrencyLimit { limit, current }) => {
+            tracing::warn!(
+                api_key_name = ?mgr.get(&key).map(|e| e.name.clone()),
+                limit,
+                current,
+                "API Key 已达并发上限"
+            );
+            let mut resp = (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({
+                    "type": "error",
+                    "error": {
+                        "type": "rate_limit_error",
+                        "message": format!("已达并发上限 {} (当前 {})", limit, current),
+                    }
+                })),
+            )
+                .into_response();
+            resp.headers_mut()
+                .insert("retry-after", "1".parse().unwrap());
+            resp
         }
     }
 }

@@ -3,7 +3,9 @@
 use reqwest::RequestBuilder;
 use uuid::Uuid;
 
-use super::{KiroEndpoint, RequestContext, UsageRequestParts};
+use super::{
+    KiroEndpoint, ListModelsParts, RequestContext, SetUserPreferenceParts, UsageRequestParts,
+};
 
 pub const CLI_ENDPOINT_NAME: &str = "cli";
 const CLI_ORIGIN: &str = "KIRO_CLI";
@@ -166,7 +168,7 @@ impl KiroEndpoint for CliEndpoint {
     fn usage_request_parts(&self, ctx: &RequestContext<'_>) -> anyhow::Result<UsageRequestParts> {
         let host = self.host(ctx);
         let url = format!(
-            "https://{}/getUsageLimits?origin={}&resourceType=AGENTIC_REQUEST",
+            "https://{}/getUsageLimits?origin={}&resourceType=AGENTIC_REQUEST&isEmailRequired=true",
             host,
             self.api_origin()
         );
@@ -186,5 +188,74 @@ impl KiroEndpoint for CliEndpoint {
         }
 
         Ok(UsageRequestParts { url, headers })
+    }
+
+    fn set_user_preference_parts(
+        &self,
+        ctx: &RequestContext<'_>,
+    ) -> anyhow::Result<SetUserPreferenceParts> {
+        let host = self.host(ctx);
+        let url = format!("https://{}/setUserPreference", host);
+
+        // setUserPreference 必填 profileArn（IdC/Social 都要传）
+        let profile_arn = ctx
+            .credentials
+            .profile_arn
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "setUserPreference 需要 profileArn，但当前凭据未保存 profileArn。\
+                     请先点击「刷 Token」（刷新 Token 时会从上游同步 profileArn）"
+                )
+            })?
+            .to_string();
+
+        let headers = vec![
+            ("Accept", "*/*".to_string()),
+            ("content-type", "application/json".to_string()),
+            ("x-amz-user-agent", self.runtime_x_amz_user_agent()),
+            ("user-agent", self.runtime_user_agent()),
+            ("host", host),
+            ("amz-sdk-invocation-id", Uuid::new_v4().to_string()),
+            ("amz-sdk-request", "attempt=1; max=1".to_string()),
+            ("Authorization", format!("Bearer {}", ctx.token)),
+            ("Connection", "close".to_string()),
+        ];
+
+        Ok(SetUserPreferenceParts {
+            url,
+            headers,
+            profile_arn,
+        })
+    }
+
+    fn list_models_parts(&self, ctx: &RequestContext<'_>) -> anyhow::Result<ListModelsParts> {
+        let host = self.host(ctx);
+        let mut url = format!("https://{}/ListAvailableModels?origin={}", host, CLI_ORIGIN);
+        if let Some(profile_arn) = ctx
+            .credentials
+            .profile_arn
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            url.push_str(&format!("&profileArn={}", urlencoding::encode(profile_arn)));
+        }
+
+        let mut headers = vec![
+            ("Accept", "application/json".to_string()),
+            ("x-amz-user-agent", self.runtime_x_amz_user_agent()),
+            ("user-agent", self.runtime_user_agent()),
+            ("host", host),
+            ("amz-sdk-invocation-id", Uuid::new_v4().to_string()),
+            ("amz-sdk-request", "attempt=1; max=1".to_string()),
+            ("Authorization", format!("Bearer {}", ctx.token)),
+            ("Connection", "close".to_string()),
+        ];
+        if ctx.credentials.is_api_key_credential() {
+            headers.push(("tokentype", "API_KEY".to_string()));
+        }
+        Ok(ListModelsParts { url, headers })
     }
 }

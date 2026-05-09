@@ -19,6 +19,19 @@ pub struct UsageRequestParts {
     pub headers: Vec<(&'static str, String)>,
 }
 
+/// `setUserPreference` 请求参数
+pub struct SetUserPreferenceParts {
+    pub url: String,
+    pub headers: Vec<(&'static str, String)>,
+    pub profile_arn: String,
+}
+
+/// `ListAvailableModels` 请求参数
+pub struct ListModelsParts {
+    pub url: String,
+    pub headers: Vec<(&'static str, String)>,
+}
+
 pub trait KiroEndpoint: Send + Sync {
     fn name(&self) -> &'static str;
 
@@ -37,6 +50,15 @@ pub trait KiroEndpoint: Send + Sync {
     }
 
     fn usage_request_parts(&self, ctx: &RequestContext<'_>) -> anyhow::Result<UsageRequestParts>;
+
+    /// `setUserPreference` 上游请求参数（profileArn + headers + url）
+    fn set_user_preference_parts(
+        &self,
+        ctx: &RequestContext<'_>,
+    ) -> anyhow::Result<SetUserPreferenceParts>;
+
+    /// `ListAvailableModels` 请求参数
+    fn list_models_parts(&self, ctx: &RequestContext<'_>) -> anyhow::Result<ListModelsParts>;
 
     fn is_monthly_request_limit(&self, body: &str) -> bool {
         default_is_monthly_request_limit(body)

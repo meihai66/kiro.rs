@@ -71,6 +71,43 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
     setTimeout(resetState, 200)
   }, [onOpenChange, resetState, isVerifying])
 
+  // 从对象任意常见位置中找邮箱：account.email / userInfo.email / profile.email /
+  // user.email / credentials.email / awsAccount.email 等
+  const pickEmail = useCallback((obj: unknown): string | undefined => {
+    if (!obj || typeof obj !== 'object') return undefined
+    const candidates: unknown[] = [obj]
+    const o = obj as Record<string, unknown>
+    if (o.userInfo) candidates.push(o.userInfo)
+    if (o.profile) candidates.push(o.profile)
+    if (o.user) candidates.push(o.user)
+    if (o.credentials) candidates.push(o.credentials)
+    if (o.awsAccount) candidates.push(o.awsAccount)
+    if (o.accountInfo) candidates.push(o.accountInfo)
+    if (o.account) candidates.push(o.account)
+    if (o.identity) candidates.push(o.identity)
+    if (o.metadata) candidates.push(o.metadata)
+    const emailKeys = [
+      'email',
+      'emailAddress',
+      'email_address',
+      'mail',
+      'userEmail',
+      'accountEmail',
+      'loginEmail',
+    ]
+    for (const c of candidates) {
+      if (!c || typeof c !== 'object') continue
+      const r = c as Record<string, unknown>
+      for (const k of emailKeys) {
+        const v = r[k]
+        if (typeof v === 'string' && v.trim() && v.includes('@')) {
+          return v.trim()
+        }
+      }
+    }
+    return undefined
+  }, [])
+
   // 兼容 KAM 1.8.3 新版平铺格式，统一转换为旧格式（credentials 嵌套结构）
   const normalizeKamAccount = useCallback((item: unknown): unknown => {
     if (!item || typeof item !== 'object') return item
@@ -85,7 +122,7 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
           : undefined
 
       return {
-        email: typeof obj.email === 'string' ? obj.email : undefined,
+        email: pickEmail(obj),
         userId:
           typeof obj.userId === 'string' || obj.userId === null
             ? obj.userId
@@ -93,6 +130,8 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
         nickname,
         status: typeof obj.status === 'string' ? obj.status : undefined,
         machineId: typeof obj.machineId === 'string' ? obj.machineId : undefined,
+        // 透传内嵌代理字段（v1.1+ KAM 导出格式）
+        proxy: obj.proxy,
         credentials: {
           refreshToken: obj.refreshToken,
           clientId: typeof obj.clientId === 'string' ? obj.clientId : undefined,
@@ -105,7 +144,7 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
     }
 
     return item
-  }, [])
+  }, [pickEmail])
 
   // 将 KAM 账号结构展平为 TokenJsonItem
   const flattenKamAccount = useCallback((account: Record<string, unknown>): TokenJsonItem | null => {
@@ -116,6 +155,27 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
     // 跳过 error 状态的账号
     if (account.status === 'error') return null
     const authMethod = cred.authMethod as string | undefined
+    // 内嵌代理（v1.1+ account.proxy）→ 透传给后端，由后端加入代理池并强制绑定
+    const proxyRaw = account.proxy as Record<string, unknown> | undefined
+    const proxy =
+      proxyRaw && typeof proxyRaw === 'object' && typeof proxyRaw.url === 'string'
+        ? {
+            url: proxyRaw.url,
+            type: typeof proxyRaw.type === 'string' ? proxyRaw.type : undefined,
+            expires_at:
+              typeof proxyRaw.expires_at === 'string' ||
+              typeof proxyRaw.expires_at === 'number'
+                ? proxyRaw.expires_at
+                : undefined,
+            expiresAt:
+              typeof proxyRaw.expiresAt === 'string' ||
+              typeof proxyRaw.expiresAt === 'number'
+                ? proxyRaw.expiresAt
+                : undefined,
+            label:
+              typeof proxyRaw.label === 'string' ? proxyRaw.label : undefined,
+          }
+        : undefined
     return {
       refreshToken: cred.refreshToken.trim(),
       clientId: cred.clientId as string | undefined,
@@ -123,8 +183,10 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
       authMethod: (!authMethod && cred.clientId && cred.clientSecret) ? 'idc' : authMethod,
       region: cred.region as string | undefined,
       machineId: account.machineId as string | undefined,
+      email: pickEmail(account),
+      proxy,
     }
-  }, [])
+  }, [pickEmail])
 
   // 解析 JSON（兼容 Token JSON / KAM 导出 / 批量导入格式）
   const parseJson = useCallback((text: string): TokenJsonItem[] | null => {
@@ -168,6 +230,10 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
           if (!tokenItem.authMethod && tokenItem.clientId && tokenItem.clientSecret) {
             tokenItem.authMethod = 'idc'
           }
+          // 邮箱兜底：扁平格式可能把 email 平在外层
+          if (!tokenItem.email) {
+            tokenItem.email = pickEmail(obj)
+          }
           validItems.push(tokenItem)
         }
       }
@@ -181,7 +247,7 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
       toast.error('JSON 格式无效')
       return null
     }
-  }, [flattenKamAccount, normalizeKamAccount])
+  }, [flattenKamAccount, normalizeKamAccount, pickEmail])
 
   const readJsonFiles = useCallback(async (files: FileList | File[]) => {
     const jsonFiles = Array.from(files).filter(file => file.name.endsWith('.json'))

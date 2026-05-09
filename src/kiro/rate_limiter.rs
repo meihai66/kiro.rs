@@ -116,6 +116,8 @@ impl Default for CredentialRateState {
 pub struct RateLimiter {
     config: RwLock<RateLimitConfig>,
     states: Mutex<HashMap<u64, CredentialRateState>>,
+    /// 凭据级最小请求间隔覆盖（毫秒）。存在时优先于全局 config。
+    credential_intervals: RwLock<HashMap<u64, u64>>,
 }
 
 impl RateLimiter {
@@ -124,7 +126,29 @@ impl RateLimiter {
         Self {
             config: RwLock::new(config),
             states: Mutex::new(HashMap::new()),
+            credential_intervals: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// 设置某个凭据的最小请求间隔覆盖（None 表示清除，回到全局策略）
+    pub fn set_credential_min_interval(&self, credential_id: u64, interval_ms: Option<u64>) {
+        let mut map = self.credential_intervals.write();
+        match interval_ms {
+            Some(v) if v > 0 => {
+                map.insert(credential_id, v);
+            }
+            _ => {
+                map.remove(&credential_id);
+            }
+        }
+    }
+
+    /// 取某个凭据当前生效的最小请求间隔（优先凭据级覆盖，其次全局 config）
+    fn effective_interval(&self, credential_id: u64, config: &RateLimitConfig) -> Duration {
+        if let Some(ms) = self.credential_intervals.read().get(&credential_id).copied() {
+            return Duration::from_millis(ms);
+        }
+        Self::calculate_interval_with_config(config)
     }
 
     /// 使用默认配置创建速率限制器
@@ -169,7 +193,7 @@ impl RateLimiter {
 
         // 检查请求间隔
         if let Some(last_request) = state.last_request_at {
-            let min_interval = Self::calculate_interval_with_config(&config);
+            let min_interval = self.effective_interval(credential_id, &config);
             let elapsed = now.saturating_duration_since(last_request);
             if elapsed < min_interval {
                 return Err(min_interval - elapsed);
@@ -189,7 +213,7 @@ impl RateLimiter {
     /// 返回 `Ok(())` 表示已占用一个发送窗口；`Err(Duration)` 表示需要等待的时间。
     pub fn try_acquire(&self, credential_id: u64) -> Result<(), Duration> {
         let config = self.config.read().clone();
-        let min_interval = Self::calculate_interval_with_config(&config);
+        let min_interval = self.effective_interval(credential_id, &config);
 
         let mut states = self.states.lock();
         let state = states.entry(credential_id).or_default();

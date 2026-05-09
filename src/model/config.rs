@@ -102,9 +102,93 @@ pub struct Config {
     #[serde(default = "default_endpoint")]
     pub default_endpoint: String,
 
+    /// 是否启用代理池（启用后所有出站强制走凭据所绑代理，不允许回退本地直连）
+    #[serde(default)]
+    pub proxy_pool_enabled: bool,
+
+    /// 代理池文件路径（默认 ./proxies.json，命令行 --proxies 优先）
+    #[serde(default)]
+    pub proxy_pool_path: Option<String>,
+
+    /// 提前轮换阈值（小时），剩余有效期 < 此值则触发后台轮换。默认 24
+    #[serde(default = "default_proxy_expiry_warning_hours")]
+    pub proxy_expiry_warning_hours: i64,
+
+    /// 后台轮换扫描间隔（秒）。默认 60
+    #[serde(default = "default_proxy_rotation_interval_seconds")]
+    pub proxy_rotation_interval_seconds: u64,
+
+    /// SQLite 数据库文件路径（默认 ./kiro.db）
+    #[serde(default)]
+    pub db_path: Option<String>,
+
+    /// 错误响应自动禁用规则：响应 body 含其中任一字符串则自动禁用对应凭据
+    /// 一行一条；空字符串忽略
+    #[serde(default)]
+    pub auto_disable_patterns: Vec<String>,
+
+    /// 错误内容替换规则：每条形如 `pattern===replacement`，命中 pattern 时把整段错误体换成 replacement
+    /// 一行一条；空字符串忽略；只影响返回给客户端的错误体，不影响内部禁用/重试逻辑
+    #[serde(default)]
+    pub error_replace_rules: Vec<String>,
+
+    /// 当凭据使用率达到此百分比时自动禁用（0~100；0=不启用）
+    #[serde(default)]
+    pub auto_disable_usage_threshold_pct: u32,
+
+    /// 错误日志总开关（关闭后不写库；接口仍可读历史日志）
+    #[serde(default = "default_true")]
+    pub error_log_enabled: bool,
+
+    /// 错误日志最大保留条数（0 = 不限）
+    #[serde(default = "default_error_log_max_count")]
+    pub error_log_max_count: u32,
+
+    /// 错误日志最大保留天数（0 = 不限）
+    #[serde(default = "default_error_log_max_age_days")]
+    pub error_log_max_age_days: u32,
+
+    /// 不记录的状态码黑名单（如 [400, 401]）
+    #[serde(default)]
+    pub error_log_excluded_status_codes: Vec<u16>,
+
+    /// 单凭据最多重试次数（0 视为禁用重试，按未配置取默认 2）
+    #[serde(default = "default_max_retries_per_credential")]
+    pub max_retries_per_credential: u32,
+
+    /// 单请求总重试次数硬上限（默认 3）
+    #[serde(default = "default_max_total_retries")]
+    pub max_total_retries: u32,
+
+    /// "所有凭据均处于冷却"时立即返回 429 的等待阈值（秒）；
+    /// 最短可用等待 ≤ 该阈值时短睡再试；> 该阈值则立即 429+Retry-After 给客户端。
+    /// 默认 2 秒；0 视为不启用快速 bail（永远短睡到可用）。
+    #[serde(default = "default_all_credentials_cooldown_bail_threshold_secs")]
+    pub all_credentials_cooldown_bail_threshold_secs: u64,
+
     /// 配置文件路径（运行时元数据，不写入 JSON）
     #[serde(skip)]
     config_path: Option<PathBuf>,
+}
+
+fn default_error_log_max_count() -> u32 {
+    50_000
+}
+
+fn default_error_log_max_age_days() -> u32 {
+    7
+}
+
+fn default_max_retries_per_credential() -> u32 {
+    2
+}
+
+fn default_max_total_retries() -> u32 {
+    3
+}
+
+fn default_all_credentials_cooldown_bail_threshold_secs() -> u64 {
+    2
 }
 
 fn default_host() -> String {
@@ -138,6 +222,14 @@ fn default_count_tokens_auth_type() -> String {
 
 fn default_endpoint() -> String {
     "ide".to_string()
+}
+
+fn default_proxy_expiry_warning_hours() -> i64 {
+    24
+}
+
+fn default_proxy_rotation_interval_seconds() -> u64 {
+    60
 }
 
 fn default_prompt_cache_ttl_seconds() -> u64 {
@@ -307,6 +399,22 @@ impl Default for Config {
             prompt_cache_ttl_seconds: default_prompt_cache_ttl_seconds(),
             prompt_cache_accounting_enabled: default_true(),
             default_endpoint: default_endpoint(),
+            proxy_pool_enabled: false,
+            proxy_pool_path: None,
+            proxy_expiry_warning_hours: default_proxy_expiry_warning_hours(),
+            proxy_rotation_interval_seconds: default_proxy_rotation_interval_seconds(),
+            db_path: None,
+            auto_disable_patterns: Vec::new(),
+            error_replace_rules: Vec::new(),
+            auto_disable_usage_threshold_pct: 0,
+            max_retries_per_credential: default_max_retries_per_credential(),
+            max_total_retries: default_max_total_retries(),
+            all_credentials_cooldown_bail_threshold_secs:
+                default_all_credentials_cooldown_bail_threshold_secs(),
+            error_log_enabled: true,
+            error_log_max_count: default_error_log_max_count(),
+            error_log_max_age_days: default_error_log_max_age_days(),
+            error_log_excluded_status_codes: Vec::new(),
             config_path: None,
         }
     }

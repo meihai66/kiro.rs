@@ -9,6 +9,7 @@
 /admin-ui/dist/
 /admin-ui/package-lock.json
 /admin-ui/tsconfig.tsbuildinfo
+/admin-ui/.pnpm-store/
 
 .claude/
 !.claude/skills/

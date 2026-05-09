@@ -1,11 +1,13 @@
 mod admin;
 mod admin_ui;
 mod anthropic;
+mod api_key_manager;
 mod common;
 mod http_client;
 pub mod image;
 mod kiro;
 mod model;
+mod storage;
 pub mod token;
 
 use std::collections::HashMap;
@@ -13,15 +15,25 @@ use std::sync::Arc;
 
 use clap::Parser;
 use kiro::endpoint::{CliEndpoint, IdeEndpoint, KiroEndpoint};
-use kiro::model::credentials::{CredentialsConfig, KiroCredentials};
+use kiro::model::credentials::KiroCredentials;
 use kiro::provider::KiroProvider;
+use kiro::proxy_pool::ProxyPool;
+use kiro::proxy_rotation;
+use api_key_manager::ApiKeyManager;
 use kiro::token_manager::MultiTokenManager;
+use std::sync::OnceLock;
+
+pub static SERVICE_STARTED_AT: OnceLock<chrono::DateTime<chrono::Utc>> = OnceLock::new();
 use model::arg::Args;
 use model::config::Config;
 use parking_lot::RwLock;
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() {
+    // 记录启动时间（统计页"运行时间"用）
+    let _ = SERVICE_STARTED_AT.set(chrono::Utc::now());
+
     // 解析命令行参数
     let args = Args::parse();
 
@@ -43,20 +55,63 @@ async fn main() {
     });
     let config = Arc::new(RwLock::new(config));
 
-    // 加载凭证（支持单对象或数组格式）
-    let credentials_path = args
-        .credentials
-        .unwrap_or_else(|| KiroCredentials::default_credentials_path().to_string());
-    let credentials_config = CredentialsConfig::load(&credentials_path).unwrap_or_else(|e| {
-        tracing::error!("加载凭证失败: {}", e);
+    // ============ 打开 SQLite + 一次性 JSON 迁移 ============
+    let db_path = args
+        .db
+        .clone()
+        .or_else(|| config.read().db_path.clone())
+        .unwrap_or_else(|| "kiro.db".to_string());
+    let store = storage::Store::open(&db_path).unwrap_or_else(|e| {
+        tracing::error!("打开 SQLite 数据库失败 ({}): {}", db_path, e);
         std::process::exit(1);
     });
+    tracing::info!("SQLite 数据库就绪: {}", db_path);
 
-    // 判断是否为多凭据格式（用于刷新后回写）
-    let is_multiple_format = credentials_config.is_multiple();
+    // 凭据/代理/余额 JSON 一次性迁移（仅 DB 为空时执行；导入后 .json → .json.migrated）
+    let credentials_path = args
+        .credentials
+        .clone()
+        .unwrap_or_else(|| KiroCredentials::default_credentials_path().to_string());
+    let proxies_path_for_migration = args
+        .proxies
+        .clone()
+        .or_else(|| config.read().proxy_pool_path.clone())
+        .unwrap_or_else(|| "proxies.json".to_string());
+    let balance_cache_path = std::path::Path::new(&credentials_path)
+        .parent()
+        .map(|d| d.join("kiro_balance_cache.json"));
+    match storage::migration::migrate_json_if_needed(
+        &store,
+        Some(std::path::Path::new(&credentials_path)),
+        Some(std::path::Path::new(&proxies_path_for_migration)),
+        balance_cache_path.as_deref(),
+    ) {
+        Ok(report) => {
+            if !report.skipped
+                && (report.credentials_imported > 0
+                    || report.proxies_imported > 0
+                    || report.balances_imported > 0)
+            {
+                tracing::info!(
+                    "JSON → SQLite 迁移完成：凭据 {} / 代理 {} / 余额 {}",
+                    report.credentials_imported,
+                    report.proxies_imported,
+                    report.balances_imported
+                );
+            }
+        }
+        Err(e) => {
+            tracing::error!("JSON → SQLite 迁移失败: {}", e);
+            std::process::exit(1);
+        }
+    }
 
-    // 转换为按优先级排序的凭据列表
-    let mut credentials_list = credentials_config.into_sorted_credentials();
+    // 始终从 SQLite 加载凭据（启用 sqlite 后 JSON 仅是迁移源）
+    let mut credentials_list = store.list_credentials().unwrap_or_else(|e| {
+        tracing::error!("从 SQLite 加载凭据失败: {}", e);
+        std::process::exit(1);
+    });
+    let is_multiple_format = true; // SQLite 始终多凭据格式
 
     if let Ok(kiro_api_key) = std::env::var("KIRO_API_KEY")
         && !kiro_api_key.trim().is_empty()
@@ -104,6 +159,43 @@ async fn main() {
                 endpoint_names
             );
             std::process::exit(1);
+        }
+    }
+
+    // ============ 代理池（启用时从 SQLite 加载）============
+    let proxy_pool: Option<Arc<ProxyPool>> = if config.read().proxy_pool_enabled {
+        match ProxyPool::from_store(store.clone()) {
+            Ok(p) => {
+                tracing::info!("代理池已启用，从 SQLite 加载 {} 个代理", p.len());
+                Some(p)
+            }
+            Err(e) => {
+                tracing::error!("加载代理池失败: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+
+    // 启用代理池时，对未绑代理槽的凭据强制 disabled，等管理员手动分配
+    if proxy_pool.is_some() {
+        let mut unbound_count = 0;
+        for cred in credentials_list.iter_mut() {
+            if cred.proxy_slot_id.is_none() && !cred.disabled {
+                tracing::warn!(
+                    cred_id = ?cred.id,
+                    "代理池启用但凭据未绑代理槽，已强制 disabled"
+                );
+                cred.disabled = true;
+                unbound_count += 1;
+            }
+        }
+        if unbound_count > 0 {
+            tracing::warn!(
+                "{} 个凭据因未绑定代理槽被强制禁用，请通过 Admin API/UI 手动分配代理后再启用",
+                unbound_count
+            );
         }
     }
 
@@ -160,11 +252,80 @@ async fn main() {
     });
     let token_manager = Arc::new(token_manager);
 
-    // 初始化余额缓存并按余额选择初始凭据
-    let init_count = token_manager.initialize_balances().await;
-    if init_count == 0 && token_manager.total_count() > 0 {
-        tracing::warn!("所有凭据余额初始化失败，将按优先级选择凭据");
+    // 给 token_manager 注入 SQLite store（凭据写入走 SQL）
+    token_manager.set_store(store.clone());
+
+    // 注入代理池（启用时）并启动后台轮换任务
+    if let Some(pool) = proxy_pool.as_ref() {
+        token_manager.set_proxy_pool(pool.clone());
+        let warning_hours = config.read().proxy_expiry_warning_hours;
+        let interval_secs = config.read().proxy_rotation_interval_seconds.max(15);
+        let _handle = proxy_rotation::start_rotation_task(
+            pool.clone(),
+            token_manager.clone(),
+            warning_hours,
+            Duration::from_secs(interval_secs),
+        );
     }
+
+    // 启动 RPM 历史采样任务：每分钟把当前 60s rpm 写入 SQLite
+    {
+        let store_for_rpm = store.clone();
+        let tm_for_rpm = token_manager.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(60));
+            ticker.tick().await; // 跳过首个 tick（避免 0 数据点）
+            loop {
+                ticker.tick().await;
+                let snapshot = tm_for_rpm.snapshot();
+                let minute_ts = chrono::Utc::now().timestamp() / 60;
+                for entry in snapshot.entries {
+                    if let Err(e) =
+                        store_for_rpm.record_rpm(entry.id, minute_ts, entry.rpm)
+                    {
+                        tracing::warn!(credential_id = entry.id, "RPM 历史写入失败: {}", e);
+                        break;
+                    }
+                }
+                // 保留 7 天
+                let _ = store_for_rpm.purge_old_rpm(7);
+            }
+        });
+    }
+
+    // 错误日志后台清理：每小时按 (max_count, max_age_days) prune
+    {
+        let store_for_logs = store.clone();
+        let cfg_for_logs = config.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(3600));
+            ticker.tick().await; // 跳过首个 tick（启动直接 prune 没必要）
+            loop {
+                ticker.tick().await;
+                let (max_count, max_age_days) = {
+                    let cfg = cfg_for_logs.read();
+                    (cfg.error_log_max_count as u64, cfg.error_log_max_age_days)
+                };
+                if max_count == 0 && max_age_days == 0 {
+                    continue;
+                }
+                match store_for_logs.prune_error_logs(max_count, max_age_days) {
+                    Ok(n) if n > 0 => tracing::info!(deleted = n, "错误日志后台清理完成"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("错误日志清理失败: {}", e),
+                }
+            }
+        });
+    }
+
+    // 余额缓存：启动期不再主动调上游 getUsageLimits（避免 N×500ms 串行拖慢启动）。
+    // - SQLite balance_cache 已经在 AdminService::new 中恢复，前端查询直接命中
+    // - token 仅在剩余有效期 < 10 分钟时刷新（持久化到 SQLite）
+    // - 余额按需刷新：admin "查询余额" 按钮 / 凭据被实际调度时延迟刷
+    tracing::info!(
+        "启动期跳过余额预热（{} 个凭据），余额从 SQLite 缓存恢复，按需刷新",
+        token_manager.total_count()
+    );
 
     let kiro_provider = KiroProvider::with_proxy(
         token_manager.clone(),
@@ -193,6 +354,52 @@ async fn main() {
         config.read().prompt_cache_accounting_enabled,
     )));
 
+    // 启动期 seed：把 config.api_key 一次性导入 api_keys 表（如尚未存在）
+    // 这样升级到 0.0.8 后旧 config.api_key 仍可用，但中间件不再走"双路径兜底"。
+    if !api_key.trim().is_empty() {
+        match store.list_api_keys() {
+            Ok(existing) => {
+                if !existing.iter().any(|r| r.key == api_key) {
+                    match store.create_api_key(&storage::ApiKeyCreate {
+                        key: api_key.clone(),
+                        name: "config-default".to_string(),
+                        description: Some(
+                            "由 config.json 中 apiKey 自动 seed（升级路径）".to_string(),
+                        ),
+                        enabled: true,
+                        max_concurrent: 0,
+                        cache_read_min_pct: 0,
+                        cache_read_max_pct: 0,
+                    }) {
+                        Ok(row) => {
+                            tracing::info!(
+                                "已 seed config.apiKey 到 api_keys 表（id={}, name={}）",
+                                row.id,
+                                row.name
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!("seed config.apiKey 失败（可能已存在）: {}", e);
+                        }
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("查询 api_keys 表失败: {}", e),
+        }
+    }
+
+    // 加载 API Key 管理器（从 SQLite）
+    let api_key_manager = match ApiKeyManager::load(store.clone()) {
+        Ok(m) => {
+            tracing::info!("API Key 管理器已加载");
+            Some(m)
+        }
+        Err(e) => {
+            tracing::error!("加载 API Key 管理器失败: {}", e);
+            std::process::exit(1);
+        }
+    };
+
     // 构建 Anthropic API 路由（从第一个凭据获取 profile_arn）
     let anthropic_app = anthropic::create_router_with_provider(
         &api_key,
@@ -200,6 +407,9 @@ async fn main() {
         first_credentials.profile_arn.clone(),
         compression_config.clone(),
         prompt_cache_runtime.clone(),
+        api_key_manager.clone(),
+        Some(store.clone()),
+        Some(config.clone()),
     );
 
     // 构建 Admin API 路由（如果配置了非空的 admin_api_key）
@@ -218,7 +428,7 @@ async fn main() {
                 tracing::warn!("admin_api_key 配置为空，Admin API 未启用");
                 anthropic_app
             } else {
-                let admin_service = admin::AdminService::new(
+                let mut admin_service = admin::AdminService::new(
                     token_manager.clone(),
                     Some(kiro_provider.clone()),
                     config.clone(),
@@ -226,6 +436,13 @@ async fn main() {
                     prompt_cache_runtime.clone(),
                     endpoint_names.clone(),
                 );
+                if let Some(pool) = proxy_pool.as_ref() {
+                    admin_service = admin_service.with_proxy_pool(pool.clone());
+                }
+                admin_service = admin_service.with_store(store.clone());
+                if let Some(mgr) = api_key_manager.clone() {
+                    admin_service = admin_service.with_api_key_manager(mgr);
+                }
                 let admin_state = admin::AdminState::new(admin_key, admin_service);
                 let admin_app = admin::create_admin_router(admin_state);
 

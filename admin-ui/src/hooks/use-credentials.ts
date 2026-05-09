@@ -7,6 +7,9 @@ import {
   setCredentialPriority,
   setCredentialRegion,
   setCredentialEndpoint,
+  setCredentialEmail,
+  setCredentialAllowOveruse,
+  setCredentialRpm,
   resetCredentialFailure,
   forceRefreshToken,
   getCredentialBalance,
@@ -23,13 +26,16 @@ import {
   updateGlobalConfig,
 } from '@/api/credentials'
 import type { AddCredentialRequest, ImportTokenJsonRequest, UpdateGlobalConfigRequest } from '@/types/api'
+import { storage } from '@/lib/storage'
 
 // 查询凭据列表
 export function useCredentials() {
   return useQuery({
     queryKey: ['credentials'],
     queryFn: getCredentials,
-    refetchInterval: 30000, // 每 30 秒刷新一次
+    // 用户可在设置页调（默认 2s），保存在浏览器 localStorage
+    refetchInterval: () => storage.getRefreshIntervalSecs() * 1000,
+    refetchIntervalInBackground: false,
   })
 }
 
@@ -60,7 +66,8 @@ export function useCachedBalances() {
   return useQuery({
     queryKey: ['cached-balances'],
     queryFn: getCachedBalances,
-    refetchInterval: (query) => (query.state.error ? 60000 : 30000),
+    refetchInterval: (query) =>
+      query.state.error ? 60000 : storage.getRefreshIntervalSecs() * 1000,
     refetchIntervalInBackground: false, // 页面不可见时暂停轮询
   })
 }
@@ -131,6 +138,42 @@ export function useSetEndpoint() {
   return useMutation({
     mutationFn: ({ id, endpoint }: { id: number; endpoint: string | null }) =>
       setCredentialEndpoint(id, endpoint),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
+  })
+}
+
+// 设置凭据邮箱
+export function useSetEmail() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, email }: { id: number; email: string | null }) =>
+      setCredentialEmail(id, email),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
+  })
+}
+
+// 设置凭据「允许超额使用」开关
+export function useSetAllowOveruse() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, allow }: { id: number; allow: boolean }) =>
+      setCredentialAllowOveruse(id, allow),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
+  })
+}
+
+// 设置凭据级 RPM 上限
+export function useSetCredentialRpm() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, rpm }: { id: number; rpm: number | null }) =>
+      setCredentialRpm(id, rpm),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['credentials'] })
     },

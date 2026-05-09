@@ -1,13 +1,67 @@
 services:
   kiro-rs:
-    # 使用国内镜像
-    # image: ghcr.nju.edu.cn/${IMAGE_OWNER:-hank9999}/kiro-rs:${IMAGE_TAG:-latest}
-    image: ghcr.io/${IMAGE_OWNER:-hank9999}/kiro-rs:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # 排障时设为 "true" 输出 token 用量等敏感日志
+        ENABLE_SENSITIVE_LOGS: "false"
+    image: kiro-rs:local
     container_name: kiro-rs
+
+    # 让容器内可以访问宿主机本地服务（如本机代理 127.0.0.1:7890）
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
     ports:
       - "8990:8990"
+
     volumes:
       - ./config/:/app/config/
+
+    # 0.0.6+ 启动后会在 /app/config/kiro.db 落 SQLite（与 ./config/ 挂载同目录持久化）
+    # 旧的 credentials.json / proxies.json / kiro_balance_cache.json 首次启动后会被
+    # 自动迁移并改名为 *.migrated（保留作为备份）
+
+    # 高并发：提高单进程文件描述符上限（每个 TCP 连接一个 fd）
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+
+    # 健康检查：BusyBox wget 探 /v1/models；
+    # 退出码 0=200 OK；8=服务返回 4xx/5xx（含 401 未鉴权），都说明端口存活；
+    # 4=连接失败，判定为不健康
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "wget -q -O /dev/null --tries=1 --timeout=3 http://127.0.0.1:8990/v1/models; rc=$$?; [ $$rc -eq 0 ] || [ $$rc -eq 8 ]"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+    # 日志驱动：限制单文件 50MB、保留 5 份，避免长跑时日志吃光磁盘
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+    # 资源策略：高并发优先，limits 拉宽；reservations 给保底
+    # 注：在非 swarm 模式下，docker compose v2 也会读取 deploy.resources
+    deploy:
+      resources:
+        limits:
+          cpus: "8.0"
+          memory: 4G
+        reservations:
+          cpus: "1.0"
+          memory: 512M
+
     restart: unless-stopped
+
+    # 可选：如需通过环境变量注入最高优先级凭据
+    # environment:
+    #   KIRO_API_KEY: "your-kiro-api-key"
+    #   RUST_LOG: "info"

@@ -30,9 +30,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
   const [priority, setPriority] = useState('0')
   const [machineId, setMachineId] = useState('')
   const [endpoint, setEndpoint] = useState('')
-  const [proxyUrl, setProxyUrl] = useState('')
-  const [proxyUsername, setProxyUsername] = useState('')
-  const [proxyPassword, setProxyPassword] = useState('')
+  const [autoBindProxy, setAutoBindProxy] = useState(true)
 
   const { mutate, isPending } = useAddCredential()
   const isApiKey = authMethod === 'api_key'
@@ -48,9 +46,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
     setPriority('0')
     setMachineId('')
     setEndpoint('')
-    setProxyUrl('')
-    setProxyUsername('')
-    setProxyPassword('')
+    setAutoBindProxy(true)
   }
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -85,9 +81,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
         priority: parseInt(priority) || 0,
         machineId: machineId.trim() || undefined,
         endpoint: endpoint.trim() || undefined,
-        proxyUrl: proxyUrl.trim() || undefined,
-        proxyUsername: proxyUsername.trim() || undefined,
-        proxyPassword: proxyPassword.trim() || undefined,
+        autoBindProxy,
       },
       {
         onSuccess: (data) => {
@@ -276,35 +270,19 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
               </p>
             </div>
 
-            {/* 代理配置 */}
-            <div className="space-y-2">
-              <label className="text-sm font-medium">代理配置</label>
-              <Input
-                id="proxyUrl"
-                placeholder='代理 URL（留空使用全局配置，"direct" 不使用代理）'
-                value={proxyUrl}
-                onChange={(e) => setProxyUrl(e.target.value)}
-                disabled={isPending}
-              />
-              <div className="grid grid-cols-2 gap-2">
-                <Input
-                  id="proxyUsername"
-                  placeholder="代理用户名"
-                  value={proxyUsername}
-                  onChange={(e) => setProxyUsername(e.target.value)}
+            {/* 代理池策略 */}
+            <div className="space-y-2 rounded-md border bg-muted/30 p-3">
+              <label className="flex items-center gap-2 text-sm font-medium">
+                <input
+                  type="checkbox"
+                  checked={!autoBindProxy}
+                  onChange={(e) => setAutoBindProxy(!e.target.checked)}
                   disabled={isPending}
                 />
-                <Input
-                  id="proxyPassword"
-                  type="password"
-                  placeholder="代理密码"
-                  value={proxyPassword}
-                  onChange={(e) => setProxyPassword(e.target.value)}
-                  disabled={isPending}
-                />
-              </div>
+                暂不绑定代理（导入后手动指派）
+              </label>
               <p className="text-xs text-muted-foreground">
-                留空使用全局代理。输入 "direct" 可显式不使用代理
+                启用代理池时：默认勾选将自动从池里分配最优代理；勾选此项则导入后凭据保持禁用，需到凭据列表手动绑定。代理池未启用时此选项无影响。
               </p>
             </div>
           </div>

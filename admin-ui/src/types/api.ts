@@ -35,8 +35,6 @@ export interface CredentialStatusItem {
   // ===== upstream 字段 =====
   successCount: number
   lastUsedAt: string | null
-  hasProxy: boolean
-  proxyUrl?: string
   /** 凭据级 Region（用于 Token 刷新） */
   region: string | null
   /** 凭据级 API Region（单独覆盖 API 请求） */
@@ -45,6 +43,105 @@ export interface CredentialStatusItem {
   endpoint?: string | null
   /** 最终生效的 endpoint */
   effectiveEndpoint: string
+  /** 当前绑定的代理槽 ID（启用代理池时；未绑定者不允许启用） */
+  proxySlotId: string | null
+  /** 已知最近的 overageStatus（"ENABLED" / "DISABLED"），可能为空 */
+  overageStatus: string | null
+  /** 当前并发请求数（实时） */
+  inFlight: number
+  /** 最近 60 秒 RPM（实时） */
+  rpm: number
+  /** 累计 429 触发次数（运行时统计；重启清零） */
+  rateLimitCount: number
+  /** 允许超额使用：开启后即使额度用尽也不主动禁用（凭据级开关，与上游账号 overageStatus 不同） */
+  allowOveruse: boolean
+  /** 当前冷却原因（None/缺省 表示不在冷却中） */
+  cooldownReason?: string | null
+  /** 当前冷却剩余时间（秒） */
+  cooldownRemainingSecs?: number | null
+  /** 凭据级 RPM 上限（缺省表示沿用全局 credentialRpm） */
+  credentialRpm?: number | null
+}
+
+// ===== API Keys =====
+
+export interface ApiKeyItem {
+  id: number
+  key: string
+  keyMasked: string
+  name: string
+  description?: string | null
+  enabled: boolean
+  maxConcurrent: number
+  cacheReadMinPct: number
+  cacheReadMaxPct: number
+  createdAt: string
+  lastUsedAt?: string | null
+  successCount: number
+  failCount: number
+  inFlight: number
+}
+
+export interface ApiKeyListResponse {
+  total: number
+  keys: ApiKeyItem[]
+}
+
+export interface CreateApiKeyRequest {
+  name: string
+  description?: string
+  customKey?: string
+  maxConcurrent?: number
+  cacheReadMinPct?: number
+  cacheReadMaxPct?: number
+}
+
+export interface UpdateApiKeyRequest {
+  name?: string
+  description?: string | null
+  enabled?: boolean
+  maxConcurrent?: number
+  cacheReadMinPct?: number
+  cacheReadMaxPct?: number
+}
+
+// ===== RPM 历史 =====
+
+export interface RpmHistoryPoint {
+  /** Unix 分钟时间戳（秒/60） */
+  minuteTs: number
+  count: number
+}
+
+export interface RpmHistoryResponse {
+  id: number
+  hours: number
+  points: RpmHistoryPoint[]
+}
+
+export interface RpmHistoryAggregateResponse {
+  hours: number
+  points: RpmHistoryPoint[]
+}
+
+export interface StatsSummaryResponse {
+  startedAt: string
+  uptimeSecs: number
+  totalRequests: number
+  totalSuccess: number
+  totalFail: number
+}
+
+// ===== 超额计费偏好 =====
+
+export interface SetOveragePreferenceRequest {
+  overage_status: 'ENABLED' | 'DISABLED'
+}
+
+export interface SetOveragePreferenceResponse {
+  ok: boolean
+  overage_status?: string | null
+  error?: string | null
 }
 
 // 余额响应
@@ -146,9 +243,12 @@ export interface AddCredentialRequest {
   apiRegion?: string
   machineId?: string
   endpoint?: string
-  proxyUrl?: string
-  proxyUsername?: string
-  proxyPassword?: string
+  email?: string
+  /** 是否自动从代理池为新凭据分配槽位（默认 true）；
+   *  启用代理池且 false 时凭据导入后置 disabled，需手动 bind */
+  autoBindProxy?: boolean
+  /** 手动指定代理槽 ID（优先级最高） */
+  proxySlotId?: string
 }
 
 // 添加凭据响应
@@ -292,6 +392,19 @@ export interface TokenJsonItem {
   priority?: number
   region?: string
   machineId?: string
+  /** 邮箱（KAM v1.1+ account.email） */
+  email?: string
+  /** 内嵌代理（KAM v1.1+ account.proxy）；导入时会加入代理池并强制绑定 */
+  proxy?: TokenJsonProxyItem
+}
+
+export interface TokenJsonProxyItem {
+  url: string
+  type?: string
+  /** 接受 RFC3339 / YYYY-MM-DD / Unix 秒 / Unix 毫秒 */
+  expires_at?: string | number
+  expiresAt?: string | number
+  label?: string
 }
 
 // 批量导入请求
@@ -326,7 +439,120 @@ export interface ImportTokenJsonResponse {
   items: ImportItemResult[]
 }
 
-// ============ 全局代理配置 ============
+// ============ 代理池 ============
+
+export type ProxyStatus = 'active' | 'expiring' | 'expired' | 'full'
+
+export interface ProxyEntryItem {
+  id: string
+  url: string
+  username?: string | null
+  expiresAt: string
+  remainingSecs: number
+  slots: number
+  usedSlots: number
+  boundCredentialIds: number[]
+  status: ProxyStatus | string
+  label?: string | null
+  createdAt: string
+  lastRotatedAt?: string | null
+}
+
+export interface ProxyListResponse {
+  total: number
+  proxies: ProxyEntryItem[]
+  enabled: boolean
+}
+
+export interface ImportProxiesRequest {
+  scheme: 'http' | 'https' | 'socks5' | 'socks5h'
+  slotsPerProxy: number
+  defaultExpiresAt: string
+  lines: string[]
+  label?: string
+}
+
+export interface ImportProxyItemResult {
+  index: number
+  line: string
+  success: boolean
+  proxyId?: string
+  error?: string
+}
+
+export interface ImportProxiesResponse {
+  total: number
+  added: number
+  failed: number
+  items: ImportProxyItemResult[]
+}
+
+export interface BatchProxyDeleteRequest {
+  ids: string[]
+  force?: boolean
+}
+
+export interface BatchProxyUnbindRequest {
+  ids: string[]
+}
+
+export interface BatchProxySlotsRequest {
+  ids: string[]
+  slots: number
+  force?: boolean
+}
+
+export interface BatchProxyExtendRequest {
+  ids: string[]
+  expiresAt: string
+}
+
+export interface BatchProxyItemResult {
+  id: string
+  success: boolean
+  error?: string
+}
+
+export interface BatchProxyResponse {
+  total: number
+  successCount: number
+  failCount: number
+  items: BatchProxyItemResult[]
+}
+
+export interface BindProxyRequest {
+  proxyId: string
+  /** 绑定后是否自动启用（默认 true） */
+  autoEnable?: boolean
+}
+
+export interface ProxyTestResult {
+  id: string
+  ok: boolean
+  elapsedMs: number
+  ip?: string | null
+  error?: string | null
+}
+
+export interface BatchProxyTestResponse {
+  total: number
+  okCount: number
+  failCount: number
+  results: ProxyTestResult[]
+}
+
+export interface ProxyAlertItem {
+  at: string
+  level: 'info' | 'warn' | 'error' | string
+  message: string
+}
+
+export interface ProxyAlertsResponse {
+  total: number
+  alerts: ProxyAlertItem[]
+}
+
+// ============ 全局代理配置（保留兼容；UI 可不暴露）============
 
 export interface ProxyConfigResponse {
   proxyUrl: string | null
@@ -362,6 +588,16 @@ export interface GlobalConfigResponse {
   promptCacheAccountingEnabled: boolean
   defaultEndpoint: string
   compression: CompressionConfigResponse
+  autoDisablePatterns: string[]
+  errorReplaceRules: string[]
+  autoDisableUsageThresholdPct: number
+  maxRetriesPerCredential: number
+  maxTotalRetries: number
+  allCredentialsCooldownBailThresholdSecs: number
+  errorLogEnabled: boolean
+  errorLogMaxCount: number
+  errorLogMaxAgeDays: number
+  errorLogExcludedStatusCodes: number[]
 }
 
 export interface UpdateCompressionConfigRequest {
@@ -385,4 +621,64 @@ export interface UpdateGlobalConfigRequest {
   promptCacheAccountingEnabled?: boolean
   defaultEndpoint?: string
   compression?: UpdateCompressionConfigRequest
+  autoDisablePatterns?: string[]
+  errorReplaceRules?: string[]
+  autoDisableUsageThresholdPct?: number
+  maxRetriesPerCredential?: number
+  maxTotalRetries?: number
+  allCredentialsCooldownBailThresholdSecs?: number
+  errorLogEnabled?: boolean
+  errorLogMaxCount?: number
+  errorLogMaxAgeDays?: number
+  errorLogExcludedStatusCodes?: number[]
+}
+
+// ===== 错误日志 =====
+
+export interface ErrorLogSummaryItem {
+  id: number
+  at: string
+  credentialId?: number | null
+  endpoint?: string | null
+  statusCode: number
+  upstreamStatus?: number | null
+  errorKind: string
+  model?: string | null
+  summary: string
+}
+
+export interface ErrorLogListResponse {
+  total: number
+  limit: number
+  offset: number
+  items: ErrorLogSummaryItem[]
+}
+
+export interface ErrorLogDetail extends ErrorLogSummaryItem {
+  requestMethod?: string | null
+  requestPath?: string | null
+  requestHeaders?: string | null
+  responseHeaders?: string | null
+  requestBody?: string | null
+  responseBody?: string | null
+  userId?: string | null
+  requestId?: string | null
+}
+
+export interface ListErrorLogsParams {
+  statusCodes?: string  // CSV
+  errorKinds?: string   // CSV
+  credentialId?: number
+  since?: string
+  until?: string
+  limit?: number
+  offset?: number
+}
+
+export interface ClearErrorLogsRequest {
+  before?: string
+}
+
+export interface ClearErrorLogsResponse {
+  deleted: number
 }

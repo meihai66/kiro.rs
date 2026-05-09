@@ -20,6 +20,7 @@ use crate::kiro::endpoint::{
     CliEndpoint, IDE_ENDPOINT_NAME, IdeEndpoint, KiroEndpoint, RequestContext,
 };
 use crate::kiro::machine_id;
+use crate::kiro::metrics::InFlightGuard;
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::token_manager::{CallContext, MultiTokenManager};
 
@@ -35,17 +36,21 @@ pub struct McpCallResult {
     pub credential_id: u64,
 }
 
-/// 每个凭据的最大重试次数
-const MAX_RETRIES_PER_CREDENTIAL: usize = 2;
+/// 每个凭据的最大重试次数（默认值；可通过 Config.max_retries_per_credential 覆盖）
+const DEFAULT_MAX_RETRIES_PER_CREDENTIAL: usize = 2;
 
-/// 总重试次数硬上限（避免无限重试）
-const MAX_TOTAL_RETRIES: usize = 3;
+/// 总重试次数硬上限默认值（避免无限重试；可通过 Config.max_total_retries 覆盖）
+const DEFAULT_MAX_TOTAL_RETRIES: usize = 3;
 
 /// 429 冷却默认时长（无 Retry-After 时使用 CooldownManager 的默认递增策略）
 const DEFAULT_RATE_LIMIT_COOLDOWN_SECS: u64 = 60;
 
 /// 429 冷却最大时长上限（避免异常 Retry-After 把单号挂死太久）
 const MAX_RATE_LIMIT_COOLDOWN_SECS: u64 = 300;
+
+/// 上游容量类 429（INSUFFICIENT_MODEL_CAPACITY / high traffic）的短冷却下限。
+/// 这种 429 是上游侧瞬时扩容问题，不是凭据被限流，长冷却会反复换号导致全军覆没。
+const CAPACITY_RATE_LIMIT_COOLDOWN_SECS: u64 = 8;
 
 /// Kiro API Provider
 ///
@@ -140,35 +145,33 @@ impl KiroProvider {
 
     /// 获取凭据对应的 HTTP Client
     ///
-    /// 优先使用凭据级代理，否则使用默认 client
-    fn get_client_for_credential(&self, ctx: &CallContext) -> Client {
+    /// 启用代理池时：必须从凭据所绑代理槽取（缺失/过期返回 Err，由调用方标 ProxyExhausted）。
+    /// 未启用代理池时：使用全局代理 default_client。
+    fn get_client_for_credential(&self, ctx: &CallContext) -> anyhow::Result<Client> {
         let global_proxy = self.global_proxy.read().clone();
-        let effective_proxy = ctx.credentials.effective_proxy(global_proxy.as_ref());
+        let effective_proxy = self.token_manager.effective_proxy_for_cred(&ctx.credentials)?;
 
+        // 与全局代理一致 → 复用 default_client
         if effective_proxy == global_proxy {
-            return self.default_client.read().clone();
+            return Ok(self.default_client.read().clone());
         }
 
         {
             let cache = self.client_cache.lock();
             if let Some(client) = cache.get(&ctx.id) {
-                return client.clone();
+                return Ok(client.clone());
             }
         }
 
         let config = self.token_manager.config();
-        let client = build_client(effective_proxy.as_ref(), 720, config.tls_backend)
-            .unwrap_or_else(|e| {
-                tracing::warn!("创建凭据级代理 client 失败，使用默认 client: {}", e);
-                self.default_client.read().clone()
-            });
+        let client = build_client(effective_proxy.as_ref(), 720, config.tls_backend)?;
 
         {
             let mut cache = self.client_cache.lock();
             cache.insert(ctx.id, client.clone());
         }
 
-        client
+        Ok(client)
     }
 
     fn endpoint_for(&self, credentials: &KiroCredentials) -> anyhow::Result<Arc<dyn KiroEndpoint>> {
@@ -273,7 +276,8 @@ impl KiroProvider {
         if available == 0 {
             anyhow::bail!("没有可用的凭据");
         }
-        let max_retries = (total_credentials * MAX_RETRIES_PER_CREDENTIAL).min(MAX_TOTAL_RETRIES);
+        let max_retries =
+            Self::compute_max_retries(&self.token_manager.config(), total_credentials);
         let mut last_error: Option<anyhow::Error> = None;
         let mut forced_token_refresh: HashSet<u64> = HashSet::new();
 
@@ -286,6 +290,10 @@ impl KiroProvider {
                     continue;
                 }
             };
+
+            // 实时指标：进 in_flight + 记 rpm（guard drop 时自动 dec）
+            ctx.rpm.record();
+            let _in_flight_guard = InFlightGuard::new(ctx.in_flight.clone());
 
             let config = self.token_manager.config();
             let machine_id = machine_id::generate_from_credentials(&ctx.credentials, &config)
@@ -318,7 +326,19 @@ impl KiroProvider {
                 endpoint = %endpoint_name,
                 "发送 MCP 请求"
             );
-            let client = self.get_client_for_credential(&ctx);
+            let client = match self.get_client_for_credential(&ctx) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(
+                        credential_id = %ctx.id,
+                        "MCP 请求获取代理 client 失败（标记 ProxyExhausted 冷却）: {}",
+                        e
+                    );
+                    self.token_manager.report_proxy_exhausted(ctx.id);
+                    last_error = Some(e);
+                    continue;
+                }
+            };
             let base_request = client
                 .post(&url)
                 .body(body)
@@ -365,6 +385,29 @@ impl KiroProvider {
 
             // 失败响应
             let body = response.text().await.unwrap_or_default();
+            let display_body = self
+                .token_manager
+                .match_error_replacement(&body)
+                .unwrap_or_else(|| body.clone());
+
+            // 配置的"错误响应自动禁用"规则
+            if let Some(pattern) =
+                self.token_manager.match_auto_disable_pattern(&body)
+            {
+                tracing::warn!(
+                    credential_id = ctx.id,
+                    pattern = %pattern,
+                    "MCP 错误响应命中自动禁用规则，凭据被永久禁用"
+                );
+                self.token_manager.mark_account_suspended(ctx.id);
+                last_error = Some(anyhow::anyhow!(
+                    "MCP 命中自动禁用规则 \"{}\": {} {}",
+                    pattern,
+                    status,
+                    display_body
+                ));
+                continue;
+            }
 
             // 402 额度用尽
             if status.as_u16() == 402 && endpoint.is_monthly_request_limit(&body) {
@@ -455,6 +498,7 @@ impl KiroProvider {
             }
 
             if status.as_u16() == 429 {
+                self.token_manager.report_rate_limit(ctx.id);
                 if Self::is_model_temporarily_unavailable(&body)
                     && self.token_manager.report_model_unavailable()
                 {
@@ -538,7 +582,8 @@ impl KiroProvider {
         if available == 0 {
             anyhow::bail!("没有可用的凭据");
         }
-        let max_retries = (total_credentials * MAX_RETRIES_PER_CREDENTIAL).min(MAX_TOTAL_RETRIES);
+        let max_retries =
+            Self::compute_max_retries(&self.token_manager.config(), total_credentials);
         let mut last_error: Option<anyhow::Error> = None;
         let mut forced_token_refresh: HashSet<u64> = HashSet::new();
         let api_type = if is_stream { "流式" } else { "非流式" };
@@ -552,6 +597,10 @@ impl KiroProvider {
                     continue;
                 }
             };
+
+            // 实时指标：进 in_flight + 记 rpm（guard drop 时自动 dec）
+            ctx.rpm.record();
+            let _in_flight_guard = InFlightGuard::new(ctx.in_flight.clone());
 
             let config = self.token_manager.config();
             let machine_id = machine_id::generate_from_credentials(&ctx.credentials, &config)
@@ -587,8 +636,20 @@ impl KiroProvider {
                 api_type
             );
 
-            // 获取凭据对应的 client（支持凭据级代理）
-            let client = self.get_client_for_credential(&ctx);
+            // 获取凭据对应的 client（启用代理池时强制走代理槽，不允许回退本地）
+            let client = match self.get_client_for_credential(&ctx) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(
+                        credential_id = %ctx.id,
+                        "API 请求获取代理 client 失败（标记 ProxyExhausted 冷却）: {}",
+                        e
+                    );
+                    self.token_manager.report_proxy_exhausted(ctx.id);
+                    last_error = Some(e);
+                    continue;
+                }
+            };
             let base_request = client
                 .post(&url)
                 .body(final_body)
@@ -639,6 +700,32 @@ impl KiroProvider {
 
             // 失败响应：读取 body 用于日志/错误信息
             let body = response.text().await.unwrap_or_default();
+
+            // 错误内容替换规则：用于改变返回给客户端的错误体（不影响内部判断）
+            let display_body = self
+                .token_manager
+                .match_error_replacement(&body)
+                .unwrap_or_else(|| body.clone());
+
+            // 配置的"错误响应自动禁用"规则：命中任一关键字则永久禁用该凭据
+            if let Some(pattern) =
+                self.token_manager.match_auto_disable_pattern(&body)
+            {
+                tracing::warn!(
+                    credential_id = ctx.id,
+                    pattern = %pattern,
+                    "错误响应命中自动禁用规则，凭据被永久禁用"
+                );
+                self.token_manager.mark_account_suspended(ctx.id);
+                last_error = Some(anyhow::anyhow!(
+                    "{} 命中自动禁用规则 \"{}\": {} {}",
+                    api_type,
+                    pattern,
+                    status,
+                    display_body
+                ));
+                continue;
+            }
 
             // 402 Payment Required 且额度用尽：禁用凭据并故障转移
             if status.as_u16() == 402 && endpoint.is_monthly_request_limit(&body) {
@@ -775,6 +862,7 @@ impl KiroProvider {
             }
 
             if status.as_u16() == 429 {
+                self.token_manager.report_rate_limit(ctx.id);
                 if Self::is_model_temporarily_unavailable(&body)
                     && self.token_manager.report_model_unavailable()
                 {
@@ -870,6 +958,26 @@ impl KiroProvider {
         }))
     }
 
+    /// 根据配置和当前凭据数计算本次请求的最大重试次数（每凭据次数 × 凭据数，
+    /// 受 `max_total_retries` 上限约束；保证至少为 1，避免误配置导致一次都不试）。
+    fn compute_max_retries(
+        config: &crate::model::config::Config,
+        total_credentials: usize,
+    ) -> usize {
+        let per_cred = if config.max_retries_per_credential == 0 {
+            DEFAULT_MAX_RETRIES_PER_CREDENTIAL
+        } else {
+            config.max_retries_per_credential as usize
+        };
+        let total_cap = if config.max_total_retries == 0 {
+            DEFAULT_MAX_TOTAL_RETRIES
+        } else {
+            config.max_total_retries as usize
+        };
+        let raw = total_credentials.saturating_mul(per_cred).min(total_cap);
+        raw.max(1)
+    }
+
     fn retry_delay(attempt: usize) -> Duration {
         // 指数退避 + 少量抖动，避免上游抖动时放大故障
         const BASE_MS: u64 = 200;
@@ -887,10 +995,24 @@ impl KiroProvider {
         body: &str,
         retry_after: Option<Duration>,
     ) -> Duration {
+        // 容量类 429（INSUFFICIENT_MODEL_CAPACITY / "high traffic"）是上游侧瞬时
+        // 扩容问题，不是某个凭据真的被限流。给个短冷却即可（下次仍可被选中），
+        // 避免把所有凭据按 60s 标准冷却轮一遍后误报"所有凭据均处于冷却"。
+        let is_capacity_pressure = Self::is_insufficient_model_capacity(body);
+
+        let custom_duration = if is_capacity_pressure {
+            // 优先尊重上游 Retry-After；否则使用容量短冷却下限
+            Some(retry_after.unwrap_or_else(|| {
+                Duration::from_secs(CAPACITY_RATE_LIMIT_COOLDOWN_SECS)
+            }))
+        } else {
+            retry_after
+        };
+
         let cooldown = self.token_manager.set_credential_cooldown_with_duration(
             credential_id,
             crate::kiro::cooldown::CooldownReason::RateLimitExceeded,
-            retry_after,
+            custom_duration,
         );
 
         tracing::warn!(
@@ -898,10 +1020,39 @@ impl KiroProvider {
             retry_after_secs = ?retry_after.map(|d| d.as_secs()),
             cooldown_secs = %cooldown.as_secs(),
             rate_limit_response = %Self::is_rate_limit_response(body),
+            capacity_pressure = %is_capacity_pressure,
             "凭据触发 429 限流，已设置冷却"
         );
 
         cooldown
+    }
+
+    /// 检测是否为容量瓶颈型 429（INSUFFICIENT_MODEL_CAPACITY / "high traffic"）。
+    /// 这类错误代表上游模型暂时容量不足，所有凭据看到的状态相同；
+    /// 不应当作单凭据"被限流"标准 60s 冷却处理。
+    fn is_insufficient_model_capacity(body: &str) -> bool {
+        let lower = body.to_ascii_lowercase();
+        if lower.contains("insufficient_model_capacity")
+            || lower.contains("high traffic")
+            || lower.contains("experiencing high traffic")
+        {
+            return true;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+            return false;
+        };
+        let reason_matches = |s: &str| {
+            let upper = s.to_ascii_uppercase();
+            upper.contains("INSUFFICIENT_MODEL_CAPACITY") || upper.contains("HIGH_TRAFFIC")
+        };
+        value
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .is_some_and(reason_matches)
+            || value
+                .pointer("/error/reason")
+                .and_then(|v| v.as_str())
+                .is_some_and(reason_matches)
     }
 
     fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {

@@ -1,0 +1,94 @@
+# ===== kiro-rs 一键部署（0.0.7+，SQLite 持久化）=====
+#
+# 三步上手：
+#   1. 编辑 ./config/config.json     - 已含 apiKey/adminApiKey
+#   2. 编辑 ./config/credentials.json - 填 refreshToken（可填多个）；首次启动后会迁移到 kiro.db
+#   3. docker compose up -d
+#
+# 服务端口： 3003（与 config.json 中 "port": 3003 一致）
+#
+# 验证：
+#   curl http://127.0.0.1:3003/v1/models -H "x-api-key: test"
+#
+# Web 管理面板：
+#   http://127.0.0.1:3003/admin
+#
+# ⚠️ 持久化（数据不丢失的关键）
+# ---------------------------------------------------------------------
+# 整个 ./config/ 目录都在挂载点；容器内 /app/config/ 写盘 = 宿主机 ./config/。
+#   - kiro.db                  权威数据库（凭据/代理/余额缓存/RPM 历史）
+#   - credentials.json[.migrated]  原始 JSON；首次启动迁移到 kiro.db 后改名
+#   - proxies.json[.migrated]      同上
+#   - kiro_balance_cache.json[.migrated] 同上
+#
+# 要保证升级（docker compose pull 拉新版镜像 + up）数据不丢，**必须**满足：
+#   ✅ ./config 是宿主机真实目录（bind mount），不是 docker named volume 之类的临时卷
+#   ✅ docker compose down 不要加 -v（不要删卷）
+#   ✅ 不要 prune ./config/ 里的 *.db、*.db-wal、*.db-shm 文件
+#
+# 升级流程：
+#   docker compose pull            # 拉新镜像（如 0.0.7）
+#   docker compose up -d           # 重建容器；kiro.db 在 ./config/ 不会动
+#   docker compose logs -f kiro-rs # 检查日志：成功会看到"SQLite 数据库就绪"
+#
+# 备份建议：直接 cp -r ./config/ ./config.backup.$(date +%F)/
+#
+# 健康检查状态：
+#   docker compose ps     （STATUS 列会显示 healthy）
+
+services:
+  kiro-rs:
+    image: meihai0211/kiro:0.0.7
+    container_name: kiro-rs
+    pull_policy: always
+
+    # 让容器内可访问宿主机服务（如本机代理 host.docker.internal:7890）
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    ports:
+      - "3003:3003"
+
+    volumes:
+      # 关键：./config/ 是宿主机真实目录，承载 kiro.db + 配置文件
+      - ./config/:/app/config/
+
+    # 高并发：抬高文件描述符上限（每个 TCP 连接占一个 fd）
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+
+    # 健康检查：BusyBox wget 探 /v1/models
+    # 退出码 0=200，8=4xx（含 401，端口存活），都判健康；4=连接失败=不健康
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "wget -q -O /dev/null --tries=1 --timeout=3 http://127.0.0.1:3003/v1/models; rc=$$?; [ $$rc -eq 0 ] || [ $$rc -eq 8 ]"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+    # 日志：单文件 50MB × 5 份滚动，避免吃满磁盘
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+    # 资源：高并发优先；不够请直接调大 limits
+    deploy:
+      resources:
+        limits:
+          cpus: "8.0"
+          memory: 4G
+        reservations:
+          cpus: "1.0"
+          memory: 512M
+
+    restart: unless-stopped
+
+    # environment:
+    #   KIRO_API_KEY: "可选，注入最高优先级运行时凭据（不写盘）"
+    #   RUST_LOG: "info"
