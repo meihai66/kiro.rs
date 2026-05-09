@@ -1,15 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import {
-  Activity,
-  CheckCircle2,
-  Clock,
-  Gauge,
-  Loader2,
-  Plus,
-  TrendingUp,
-  Upload,
-  Wallet,
-} from 'lucide-react'
+import { CheckCircle2, Loader2, Plus, Upload, Wallet } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { ColumnDef, RowSelectionState } from '@tanstack/react-table'
 import { toast } from 'sonner'
@@ -1516,37 +1506,41 @@ export function CredentialsPage() {
           </Badge>
           {/* 内联实时指标 pill —— 紧凑、与 badge 同一行，避免多占一行 */}
           <span
-            className="inline-flex items-center gap-1 rounded-md border bg-card px-2 py-0.5 text-xs font-mono"
+            className="inline-flex items-center gap-1 rounded-md border bg-card px-2 py-0.5 text-xs"
             title="服务运行时长"
           >
-            <Clock className="h-3 w-3 text-muted-foreground" />
-            {statsSummary ? formatUptime(statsSummary.uptimeSecs) : '—'}
+            <span className="text-muted-foreground">运行</span>
+            <span className="font-mono font-medium">
+              {statsSummary ? formatUptime(statsSummary.uptimeSecs) : '—'}
+            </span>
           </span>
           <span
-            className="inline-flex items-center gap-1 rounded-md border bg-card px-2 py-0.5 text-xs font-mono"
+            className="inline-flex items-center gap-1 rounded-md border bg-card px-2 py-0.5 text-xs"
             title="累计请求数"
           >
-            <TrendingUp className="h-3 w-3 text-muted-foreground" />
-            {statsSummary?.totalRequests ?? 0}
+            <span className="text-muted-foreground">请求</span>
+            <span className="font-mono font-medium">
+              {statsSummary?.totalRequests ?? 0}
+            </span>
           </span>
           <span
             className={
-              'inline-flex items-center gap-1 rounded-md border bg-card px-2 py-0.5 text-xs font-mono ' +
+              'inline-flex items-center gap-1 rounded-md border bg-card px-2 py-0.5 text-xs ' +
               (totalInFlight > 0
                 ? 'text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
                 : '')
             }
             title="当前并发请求数"
           >
-            <Activity className="h-3 w-3 text-muted-foreground" />
-            {totalInFlight}
+            <span className="text-muted-foreground">并发</span>
+            <span className="font-mono font-medium">{totalInFlight}</span>
           </span>
           <span
-            className="inline-flex items-center gap-1 rounded-md border bg-card px-2 py-0.5 text-xs font-mono"
+            className="inline-flex items-center gap-1 rounded-md border bg-card px-2 py-0.5 text-xs"
             title="实时 RPM 总和"
           >
-            <Gauge className="h-3 w-3 text-muted-foreground" />
-            {totalRpm}
+            <span className="text-muted-foreground">RPM</span>
+            <span className="font-mono font-medium">{totalRpm}</span>
           </span>
         </div>
         <div className="flex items-center gap-2">
