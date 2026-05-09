@@ -71,6 +71,72 @@ import type {
   ProxyTestResult,
 } from '@/types/api'
 
+/** 进度条（与列宽自适应；红/黄/绿/灰四档 tone） */
+function ProgressBar({
+  pct,
+  tone,
+}: {
+  pct: number
+  tone: 'red' | 'yellow' | 'emerald' | 'muted'
+}) {
+  const safe = Math.max(0, Math.min(100, pct))
+  const colorClass =
+    tone === 'red'
+      ? 'bg-red-500'
+      : tone === 'yellow'
+        ? 'bg-yellow-500'
+        : tone === 'emerald'
+          ? 'bg-emerald-500'
+          : 'bg-muted-foreground/40'
+  return (
+    <div className="h-1 rounded-full bg-muted overflow-hidden">
+      <div
+        className={`h-full ${colorClass} transition-[width]`}
+        style={{ width: `${safe}%` }}
+      />
+    </div>
+  )
+}
+
+/** 订阅徽章：识别 PRO+ / PRO / FREE / Solo / Indie 等 → 颜色 + 简写 */
+function SubscriptionBadge({ title }: { title: string }) {
+  const upper = title.toUpperCase()
+  // 取最具区分性的简写
+  let short = title
+  let cls = 'bg-muted text-muted-foreground'
+  if (upper.includes('PRO+') || upper.includes('PRO PLUS')) {
+    short = 'PRO+'
+    cls =
+      'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 ring-1 ring-emerald-500/30'
+  } else if (upper.includes('PRO')) {
+    short = 'PRO'
+    cls =
+      'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 ring-1 ring-emerald-500/30'
+  } else if (upper.includes('SOLO')) {
+    short = 'S'
+    cls = 'bg-blue-500/15 text-blue-700 dark:text-blue-400 ring-1 ring-blue-500/30'
+  } else if (upper.includes('INDIE') || upper.includes('INDIVIDUAL')) {
+    short = 'I'
+    cls =
+      'bg-purple-500/15 text-purple-700 dark:text-purple-400 ring-1 ring-purple-500/30'
+  } else if (upper.includes('TEAM') || upper.includes('BUSINESS')) {
+    short = 'T'
+    cls =
+      'bg-orange-500/15 text-orange-700 dark:text-orange-400 ring-1 ring-orange-500/30'
+  } else if (upper.includes('FREE') || upper.includes('TRIAL')) {
+    short = 'FREE'
+    cls = 'bg-yellow-500/15 text-yellow-700 dark:text-yellow-400 ring-1 ring-yellow-500/30'
+  }
+  return (
+    <span
+      className={`inline-flex items-center justify-center rounded px-1.5 h-4 text-[10px] font-semibold leading-none w-fit ${cls}`}
+      title={title}
+    >
+      {short}
+    </span>
+  )
+}
+
 /** 把数字按 K/M 单位格式化：1100 → 1.1k；12_500 → 12.5k；2_000_000 → 2.0M */
 function formatK(n: number): string {
   const abs = Math.abs(n)
@@ -199,8 +265,8 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
       cell: ({ row }) => {
         const c = row.original
         return (
-          <span
-            className="inline-flex items-center gap-1.5 text-xs max-w-[220px]"
+          <div
+            className="inline-flex items-center gap-1.5 text-xs w-[160px]"
             title={
               (c.email ?? '') +
               (c.allowOveruse ? '（已开启允许超额使用）' : '')
@@ -212,10 +278,10 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
                 title="允许超额使用：开"
               />
             )}
-            <span className="truncate">
+            <span className="truncate min-w-0 flex-1">
               {c.email || <span className="text-muted-foreground">—</span>}
             </span>
-          </span>
+          </div>
         )
       },
     },
@@ -294,14 +360,24 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
     },
     {
       accessorKey: 'authMethod',
-      header: '认证',
-      cell: ({ row }) => (
-        <span className="text-xs">
-          {row.original.authMethod ?? (
-            <span className="text-muted-foreground">—</span>
-          )}
-        </span>
-      ),
+      header: '认证 / 套餐',
+      cell: ({ row }) => {
+        const c = row.original
+        return (
+          <div className="flex flex-col gap-0.5 text-xs whitespace-nowrap">
+            <span className="font-mono">
+              {c.authMethod ?? (
+                <span className="text-muted-foreground">—</span>
+              )}
+            </span>
+            {c.subscriptionTitle ? (
+              <SubscriptionBadge title={c.subscriptionTitle} />
+            ) : (
+              <span className="text-[10px] text-muted-foreground">—</span>
+            )}
+          </div>
+        )
+      },
     },
     {
       accessorKey: 'priority',
@@ -323,32 +399,38 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
         if (limit <= 0) {
           return <span className="text-xs text-muted-foreground">—</span>
         }
-        // 已使用 = limit - remaining；当 remaining < 0 时表示已超额，超出部分为 |remaining|
         const remaining = live?.remaining ?? cached?.remaining ?? 0
         const baseUsed = Math.min(limit, Math.max(0, limit - remaining))
         const overage = remaining < 0 ? -remaining : 0
         const totalUsed = baseUsed + overage
         const pct = (totalUsed / limit) * 100
-        const color =
-          overage > 0
-            ? 'text-red-500'
-            : pct >= 90
-              ? 'text-red-500'
-              : pct >= 70
-                ? 'text-yellow-600'
-                : 'text-emerald-600'
+        const tone: 'red' | 'yellow' | 'emerald' =
+          overage > 0 || pct >= 90
+            ? 'red'
+            : pct >= 70
+              ? 'yellow'
+              : 'emerald'
+        const textCls =
+          tone === 'red'
+            ? 'text-red-600 dark:text-red-400'
+            : tone === 'yellow'
+              ? 'text-yellow-600 dark:text-yellow-400'
+              : 'text-emerald-600 dark:text-emerald-400'
         return (
-          <span
-            className={`text-xs font-mono whitespace-nowrap ${color}`}
+          <div
+            className="flex flex-col gap-0.5 min-w-[140px]"
             title={`已用 ${totalUsed.toFixed(2)}（含超额 ${overage.toFixed(2)}），合计 ${pct.toFixed(1)}%`}
           >
-            {formatK(totalUsed)} / {formatK(limit)}
-            {overage > 0 && (
-              <span className="ml-1 text-[10px] font-semibold text-red-600">
-                超 +{formatK(overage)}
-              </span>
-            )}
-          </span>
+            <div className={`text-xs font-mono whitespace-nowrap ${textCls}`}>
+              {formatK(totalUsed)} / {formatK(limit)}
+              {overage > 0 && (
+                <span className="ml-1 text-[10px] font-semibold text-red-600">
+                  超 +{formatK(overage)}
+                </span>
+              )}
+            </div>
+            <ProgressBar pct={pct} tone={tone} />
+          </div>
         )
       },
     },
@@ -427,50 +509,47 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
       },
     },
     {
-      accessorKey: 'inFlight',
-      header: '并发',
-      cell: ({ row }) => {
-        const v = row.original.inFlight
-        return (
-          <span
-            className={`font-mono text-xs ${v > 0 ? 'font-bold text-emerald-600' : 'text-muted-foreground'}`}
-          >
-            {v}
-          </span>
-        )
-      },
-    },
-    {
       accessorKey: 'rpm',
       header: 'RPM',
       cell: ({ row }) => {
         const c = row.original
         const credCap = c.credentialRpm ?? null
         const globalCap = ctx.globalCredentialRpm
-        // 上限展示：凭据级覆盖优先，其次全局，否则 —
         const cap = credCap ?? globalCap ?? null
         const capSource = credCap != null ? '凭据级' : globalCap ? '全局' : '未设置'
+        const pct = cap && cap > 0 ? Math.min(100, (c.rpm / cap) * 100) : 0
+        const tone =
+          cap == null
+            ? 'muted'
+            : pct >= 100
+              ? 'red'
+              : pct >= 80
+                ? 'yellow'
+                : 'emerald'
         return (
-          <span
-            className="font-mono text-xs whitespace-nowrap"
+          <div
+            className="flex flex-col gap-0.5 min-w-[80px]"
             title={
               cap
                 ? `实时 RPM ${c.rpm}；上限 ${cap}/min（${capSource}）`
                 : `实时 RPM ${c.rpm}；未设上限`
             }
           >
-            {c.rpm}
-            <span
-              className={
-                'ml-0.5 text-[10px] ' +
-                (credCap != null
-                  ? 'text-emerald-600 dark:text-emerald-400 font-semibold'
-                  : 'text-muted-foreground')
-              }
-            >
-              /{cap ?? '—'}
-            </span>
-          </span>
+            <div className="text-xs font-mono whitespace-nowrap">
+              {c.rpm}
+              <span
+                className={
+                  'ml-0.5 text-[10px] ' +
+                  (credCap != null
+                    ? 'text-emerald-600 dark:text-emerald-400 font-semibold'
+                    : 'text-muted-foreground')
+                }
+              >
+                /{cap ?? '—'}
+              </span>
+            </div>
+            {cap != null && cap > 0 && <ProgressBar pct={pct} tone={tone} />}
+          </div>
         )
       },
     },
