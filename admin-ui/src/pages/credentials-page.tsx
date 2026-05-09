@@ -784,7 +784,6 @@ export function CredentialsPage() {
   const [priorityFilters, setPriorityFilters] = useState<Set<number>>(
     () => new Set()
   )
-  const [authFilters, setAuthFilters] = useState<Set<string>>(() => new Set())
   const [overuseFilter, setOveruseFilter] = useState<'' | 'on' | 'off'>('')
   // 上游账号侧 overageStatus 筛选：ENABLED / DISABLED / unknown
   const [accountOverageFilter, setAccountOverageFilter] = useState<
@@ -809,14 +808,6 @@ export function CredentialsPage() {
   }
   const togglePriorityFilter = (v: number) => {
     setPriorityFilters((prev) => {
-      const next = new Set(prev)
-      if (next.has(v)) next.delete(v)
-      else next.add(v)
-      return next
-    })
-  }
-  const toggleAuthFilter = (v: string) => {
-    setAuthFilters((prev) => {
       const next = new Set(prev)
       if (next.has(v)) next.delete(v)
       else next.add(v)
@@ -946,23 +937,6 @@ export function CredentialsPage() {
     return m
   }, [allCredentials])
 
-  // 认证类型集合（动态）+ 计数
-  const authOptions = useMemo(() => {
-    const set = new Set<string>()
-    allCredentials.forEach((c) => {
-      if (c.authMethod) set.add(c.authMethod)
-    })
-    return Array.from(set).sort()
-  }, [allCredentials])
-  const authCountMap = useMemo(() => {
-    const m = new Map<string, number>()
-    allCredentials.forEach((c) => {
-      const k = c.authMethod ?? '—'
-      m.set(k, (m.get(k) ?? 0) + 1)
-    })
-    return m
-  }, [allCredentials])
-
   // 允许超额计数
   const overuseCountMap = useMemo(() => {
     let on = 0
@@ -1005,10 +979,6 @@ export function CredentialsPage() {
       if (priorityFilters.size > 0 && !priorityFilters.has(c.priority)) {
         return false
       }
-      // 认证：选中的任一类型命中即通过
-      if (authFilters.size > 0 && !authFilters.has(c.authMethod ?? '')) {
-        return false
-      }
       // 允许超额：on/off 单选
       if (overuseFilter === 'on' && !c.allowOveruse) return false
       if (overuseFilter === 'off' && c.allowOveruse) return false
@@ -1030,7 +1000,6 @@ export function CredentialsPage() {
     statusFilters,
     usageLimitFilters,
     priorityFilters,
-    authFilters,
     overuseFilter,
     accountOverageFilter,
     cachedBalanceMap,
@@ -1700,42 +1669,6 @@ export function CredentialsPage() {
           </div>
         )}
 
-        {/* 认证类型 */}
-        {authOptions.length > 0 && (
-          <div className="flex items-center gap-1">
-            <span className="text-muted-foreground mr-1">认证</span>
-            <div className="inline-flex rounded-md border overflow-hidden">
-              {authOptions.map((m, i) => {
-                const active = authFilters.has(m)
-                const count = authCountMap.get(m) ?? 0
-                return (
-                  <button
-                    key={m}
-                    type="button"
-                    onClick={() => toggleAuthFilter(m)}
-                    className={
-                      'h-7 px-3 text-xs font-mono transition-colors ' +
-                      (i > 0 ? 'border-l ' : '') +
-                      (active
-                        ? 'bg-primary text-primary-foreground'
-                        : 'bg-background hover:bg-muted')
-                    }
-                  >
-                    {m}
-                    <span
-                      className={
-                        'ml-1 text-[10px] ' +
-                        (active ? 'opacity-90' : 'text-muted-foreground')
-                      }
-                    >
-                      ({count})
-                    </span>
-                  </button>
-                )
-              })}
-            </div>
-          </div>
-        )}
 
         {/* 允许超额（凭据级开关） */}
         <div className="flex items-center gap-1">
@@ -1857,7 +1790,6 @@ export function CredentialsPage() {
         {(statusFilters.size > 0 ||
           usageLimitFilters.size > 0 ||
           priorityFilters.size > 0 ||
-          authFilters.size > 0 ||
           overuseFilter !== '' ||
           accountOverageFilter.size > 0) && (
           <Button
@@ -1868,7 +1800,6 @@ export function CredentialsPage() {
               setStatusFilters(new Set())
               setUsageLimitFilters(new Set())
               setPriorityFilters(new Set())
-              setAuthFilters(new Set())
               setOveruseFilter('')
               setAccountOverageFilter(new Set())
             }}
