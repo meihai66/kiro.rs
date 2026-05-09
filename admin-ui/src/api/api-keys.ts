@@ -1,5 +1,4 @@
-import axios from 'axios'
-import { storage } from '@/lib/storage'
+import { adminApi as api } from '@/lib/admin-axios'
 import type {
   ApiKeyItem,
   ApiKeyListResponse,
@@ -7,17 +6,6 @@ import type {
   SuccessResponse,
   UpdateApiKeyRequest,
 } from '@/types/api'
-
-const api = axios.create({
-  baseURL: '/api/admin',
-  headers: { 'Content-Type': 'application/json' },
-})
-
-api.interceptors.request.use((config) => {
-  const apiKey = storage.getApiKey()
-  if (apiKey) config.headers['x-api-key'] = apiKey
-  return config
-})
 
 export async function listApiKeys(): Promise<ApiKeyListResponse> {
   const { data } = await api.get<ApiKeyListResponse>('/api-keys')

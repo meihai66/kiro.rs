@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import axios from 'axios'
 import { KeyRound } from 'lucide-react'
 import { storage } from '@/lib/storage'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -11,6 +12,8 @@ interface LoginPageProps {
 
 export function LoginPage({ onLogin }: LoginPageProps) {
   const [apiKey, setApiKey] = useState('')
+  const [verifying, setVerifying] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     // 从 storage 读取保存的 API Key
@@ -20,11 +23,34 @@ export function LoginPage({ onLogin }: LoginPageProps) {
     }
   }, [])
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (apiKey.trim()) {
-      storage.setApiKey(apiKey.trim())
-      onLogin(apiKey.trim())
+    const key = apiKey.trim()
+    if (!key || verifying) return
+
+    setVerifying(true)
+    setError(null)
+    try {
+      // 用输入的 key 实际请求一次 admin API,验证密钥是否有效
+      const resp = await axios.get('/api/admin/stats/summary', {
+        headers: { 'x-api-key': key },
+        validateStatus: () => true,
+      })
+      if (resp.status === 401 || resp.status === 403) {
+        setError('Admin API Key 错误')
+        return
+      }
+      if (resp.status >= 200 && resp.status < 300) {
+        storage.setApiKey(key)
+        onLogin(key)
+        return
+      }
+      setError(`服务异常 (HTTP ${resp.status})`)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setError(`无法连接到服务: ${msg}`)
+    } finally {
+      setVerifying(false)
     }
   }
 
@@ -47,12 +73,20 @@ export function LoginPage({ onLogin }: LoginPageProps) {
                 type="password"
                 placeholder="Admin API Key"
                 value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
+                onChange={(e) => {
+                  setApiKey(e.target.value)
+                  if (error) setError(null)
+                }}
                 className="text-center"
+                autoFocus
+                disabled={verifying}
               />
+              {error && (
+                <p className="text-sm text-destructive text-center">{error}</p>
+              )}
             </div>
-            <Button type="submit" className="w-full" disabled={!apiKey.trim()}>
-              登录
+            <Button type="submit" className="w-full" disabled={!apiKey.trim() || verifying}>
+              {verifying ? '验证中...' : '登录'}
             </Button>
           </form>
         </CardContent>

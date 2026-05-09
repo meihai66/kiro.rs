@@ -1,5 +1,4 @@
-import axios from 'axios'
-import { storage } from '@/lib/storage'
+import { adminApi as api } from '@/lib/admin-axios'
 import type {
   ClearErrorLogsRequest,
   ClearErrorLogsResponse,
@@ -7,17 +6,6 @@ import type {
   ErrorLogListResponse,
   ListErrorLogsParams,
 } from '@/types/api'
-
-const api = axios.create({
-  baseURL: '/api/admin',
-  headers: { 'Content-Type': 'application/json' },
-})
-
-api.interceptors.request.use((config) => {
-  const k = storage.getApiKey()
-  if (k) config.headers['x-api-key'] = k
-  return config
-})
 
 export async function listErrorLogs(
   params: ListErrorLogsParams = {}

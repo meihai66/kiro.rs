@@ -1,5 +1,4 @@
-import axios from 'axios'
-import { storage } from '@/lib/storage'
+import { adminApi as api } from '@/lib/admin-axios'
 import type {
   BatchProxyDeleteRequest,
   BatchProxyExtendRequest,
@@ -15,17 +14,6 @@ import type {
   ProxyTestResult,
   SuccessResponse,
 } from '@/types/api'
-
-const api = axios.create({
-  baseURL: '/api/admin',
-  headers: { 'Content-Type': 'application/json' },
-})
-
-api.interceptors.request.use((config) => {
-  const apiKey = storage.getApiKey()
-  if (apiKey) config.headers['x-api-key'] = apiKey
-  return config
-})
 
 export async function getProxies(): Promise<ProxyListResponse> {
   const { data } = await api.get<ProxyListResponse>('/proxies')
