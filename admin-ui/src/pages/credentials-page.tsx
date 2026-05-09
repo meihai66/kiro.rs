@@ -92,10 +92,22 @@ function UsageBar({
   tone: 'red' | 'yellow' | 'emerald'
 }) {
   const safe = Math.max(0, Math.min(100, pct))
+  // 满额"危险"色：用 dusty rose 暗底 + 斜纹叠加，类似 CI/CD danger zone 风格
+  // 不再用纯红渐变（太亮/刺眼），但仍保持"警示性"足够明显
+  const fillStyle: React.CSSProperties =
+    tone === 'red'
+      ? {
+          backgroundColor: 'rgb(244 63 94 / 0.55)', // rose-500 @ 55% 不透明
+          backgroundImage:
+            'repeating-linear-gradient(' +
+            '45deg, ' +
+            'rgb(190 18 60 / 0.35) 0 4px, ' + // rose-700 暗斜纹
+            'transparent 4px 8px)',
+        }
+      : {}
   const fillCls =
     tone === 'red'
-      ? // 满额红色：用 rose-400→red-500（更柔和不刺眼）+ /85 整体降亮度
-        'bg-gradient-to-r from-rose-400 to-red-500 opacity-85 dark:opacity-90'
+      ? '' // 用 inline style 控制
       : tone === 'yellow'
         ? 'bg-gradient-to-r from-yellow-400 to-orange-500'
         : 'bg-gradient-to-r from-emerald-500 to-teal-500'
@@ -109,7 +121,7 @@ function UsageBar({
     >
       <div
         className={`absolute inset-y-0 left-0 rounded-full ${fillCls} transition-all duration-300`}
-        style={{ width: `${safe}%` }}
+        style={{ width: `${safe}%`, ...fillStyle }}
       />
       {/* 25/50/75 刻度线，仅在 muted 上方淡淡显示 */}
       <div className="pointer-events-none absolute inset-0 flex">
