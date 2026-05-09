@@ -105,6 +105,10 @@ export function DataTable<TData>({
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
     getPaginationRowModel: getPaginationRowModel(),
+    // 关键：TanStack Table v8 默认 data 引用变化就把 pageIndex 重置为 0；
+    // refetch 每 2-30s 一次，会让用户停在的页全部跳回第 1 页。
+    // 我们的"数据缩短时回缩 pageIndex"逻辑在下方 useEffect 里手动处理。
+    autoResetPageIndex: false,
   })
 
   // 数据缩短时，把 pageIndex 拉回到合法范围内（避免显示"第 N / N 页"且空白）
