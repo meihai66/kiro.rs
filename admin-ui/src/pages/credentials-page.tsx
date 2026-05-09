@@ -1,5 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { CheckCircle2, Loader2, MessageSquare, Plus, Upload, Wallet } from 'lucide-react'
+import {
+  Activity,
+  CheckCircle2,
+  Clock,
+  Gauge,
+  Loader2,
+  Plus,
+  TrendingUp,
+  Upload,
+  Wallet,
+  Zap,
+} from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { ColumnDef, RowSelectionState } from '@tanstack/react-table'
 import { toast } from 'sonner'
@@ -14,7 +25,6 @@ import { BindProxyDialog } from '@/components/bind-proxy-dialog'
 import { CredentialCard } from '@/components/credential-card'
 import { DataTable } from '@/components/data-table'
 import { ImportTokenJsonDialog } from '@/components/import-token-json-dialog'
-import { TestChatDialog } from '@/components/test-chat-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -40,6 +50,7 @@ import {
   testProxy as testProxyApi,
   unbindCredentialProxy,
 } from '@/api/proxies'
+import { getStatsSummary } from '@/api/credentials'
 
 type BatchAction =
   | 'enable'
@@ -70,33 +81,6 @@ import type {
   ProxyEntryItem,
   ProxyTestResult,
 } from '@/types/api'
-
-/** 进度条（与列宽自适应；红/黄/绿/灰四档 tone） */
-function ProgressBar({
-  pct,
-  tone,
-}: {
-  pct: number
-  tone: 'red' | 'yellow' | 'emerald' | 'muted'
-}) {
-  const safe = Math.max(0, Math.min(100, pct))
-  const colorClass =
-    tone === 'red'
-      ? 'bg-red-500'
-      : tone === 'yellow'
-        ? 'bg-yellow-500'
-        : tone === 'emerald'
-          ? 'bg-emerald-500'
-          : 'bg-muted-foreground/40'
-  return (
-    <div className="h-1 rounded-full bg-muted overflow-hidden">
-      <div
-        className={`h-full ${colorClass} transition-[width]`}
-        style={{ width: `${safe}%` }}
-      />
-    </div>
-  )
-}
 
 /** 额度使用条：分段刻度 + 渐变填充，比纯色单条更清晰；
  * 100% 满格时仍能看见底色，超额时整条饱和深红。 */
@@ -223,27 +207,81 @@ function SubscriptionBadge({ title }: { title: string }) {
   return <LetterIcon letter={letter} cls={cls} title={`套餐：${title}`} />
 }
 
-/** 优先级方块：宽 4px 高 5（与 LetterIcon 等高），按数值取色——0 强调 / 数字越大越淡 */
+/** 优先级图标：与 LetterIcon 同尺寸（5×5 圆角方块），里面显示数字。
+ * 颜色按数值取色——0 红（最高优先），数字越大越淡。 */
 function PriorityChip({ priority }: { priority: number }) {
-  // 颜色映射：0=红（最高优先）, 1=橙, 2=黄, 3=绿, 4+=蓝/灰
   const cls =
     priority === 0
-      ? 'bg-red-500'
+      ? 'bg-red-500/15 text-red-700 dark:text-red-400 ring-red-500/30'
       : priority === 1
-        ? 'bg-orange-500'
+        ? 'bg-orange-500/15 text-orange-700 dark:text-orange-400 ring-orange-500/30'
         : priority === 2
-          ? 'bg-yellow-500'
+          ? 'bg-yellow-500/15 text-yellow-700 dark:text-yellow-400 ring-yellow-500/30'
           : priority === 3
-            ? 'bg-emerald-500'
+            ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 ring-emerald-500/30'
             : priority === 4
-              ? 'bg-blue-500'
-              : 'bg-slate-400 dark:bg-slate-600'
+              ? 'bg-blue-500/15 text-blue-700 dark:text-blue-400 ring-blue-500/30'
+              : 'bg-muted text-muted-foreground ring-muted-foreground/30'
   return (
     <span
-      className={`inline-block h-5 w-1 rounded-sm shrink-0 ${cls}`}
+      className={`inline-flex h-5 w-5 items-center justify-center rounded text-[11px] font-bold leading-none ring-1 ${cls}`}
       title={`优先级 ${priority}（数字越小越优先）`}
-    />
+    >
+      {priority}
+    </span>
   )
+}
+
+/** 顶部紧凑状态条单元（图标 + label + 大数字 + 备注） */
+function StatCell({
+  icon: Icon,
+  label,
+  value,
+  hint,
+  tone = 'default',
+}: {
+  icon: React.ComponentType<{ className?: string }>
+  label: string
+  value: string | number
+  hint?: string
+  tone?: 'default' | 'ok' | 'warn'
+}) {
+  const valueCls =
+    tone === 'ok'
+      ? 'text-emerald-600 dark:text-emerald-400'
+      : tone === 'warn'
+        ? 'text-yellow-600 dark:text-yellow-400'
+        : 'text-foreground'
+  return (
+    <div className="flex items-center gap-2.5 px-3 py-1.5 first:pl-0 last:pr-0">
+      <Icon className="h-4 w-4 text-muted-foreground shrink-0" />
+      <div className="flex flex-col leading-tight">
+        <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+          {label}
+        </span>
+        <span className={`text-sm font-semibold font-mono ${valueCls}`}>
+          {value}
+          {hint && (
+            <span className="ml-1 text-[10px] font-normal text-muted-foreground">
+              {hint}
+            </span>
+          )}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+function formatUptime(secs: number): string {
+  if (secs < 60) return `${Math.max(0, Math.floor(secs))}s`
+  const m = Math.floor(secs / 60)
+  if (m < 60) return `${m}m`
+  const h = Math.floor(m / 60)
+  const mm = m % 60
+  if (h < 24) return mm > 0 ? `${h}h ${mm}m` : `${h}h`
+  const d = Math.floor(h / 24)
+  const hh = h % 24
+  return hh > 0 ? `${d}d ${hh}h` : `${d}d`
 }
 
 /** 把数字按 K/M 单位格式化：1100 → 1.1k；12_500 → 12.5k；2_000_000 → 2.0M */
@@ -529,8 +567,8 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
             <div className={`text-xs font-mono whitespace-nowrap ${textCls}`}>
               {fmt(totalUsed)} / {fmt(limit)}
               {overage > 0 && (
-                <span className="ml-1 text-[10px] font-semibold text-red-600">
-                  超 +{formatK(overage)}
+                <span className="ml-1 text-[11px] font-semibold text-red-600">
+                  +{formatK(overage)}
                 </span>
               )}
             </div>
@@ -623,28 +661,36 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
         const cap = credCap ?? globalCap ?? null
         const capSource = credCap != null ? '凭据级' : globalCap ? '全局' : '未设置'
         const pct = cap && cap > 0 ? Math.min(100, (c.rpm / cap) * 100) : 0
-        const tone =
+        const tone: 'red' | 'yellow' | 'emerald' =
           cap == null
-            ? 'muted'
-            : pct >= 100
+            ? 'emerald'
+            : pct >= 100 || pct >= 90
               ? 'red'
-              : pct >= 80
+              : pct >= 70
                 ? 'yellow'
                 : 'emerald'
+        const textCls =
+          cap == null
+            ? 'text-muted-foreground'
+            : tone === 'red'
+              ? 'text-red-600 dark:text-red-400'
+              : tone === 'yellow'
+                ? 'text-yellow-600 dark:text-yellow-400'
+                : 'text-emerald-600 dark:text-emerald-400'
         return (
           <div
-            className="flex flex-col gap-0.5 min-w-[80px]"
+            className="flex flex-col gap-1 min-w-[110px]"
             title={
               cap
                 ? `实时 RPM ${c.rpm}；上限 ${cap}/min（${capSource}）`
                 : `实时 RPM ${c.rpm}；未设上限`
             }
           >
-            <div className="text-xs font-mono whitespace-nowrap">
+            <div className={`text-xs font-mono whitespace-nowrap ${textCls}`}>
               {c.rpm}
               <span
                 className={
-                  'ml-0.5 text-[10px] ' +
+                  'ml-0.5 ' +
                   (credCap != null
                     ? 'text-emerald-600 dark:text-emerald-400 font-semibold'
                     : 'text-muted-foreground')
@@ -653,7 +699,7 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
                 /{cap ?? '—'}
               </span>
             </div>
-            {cap != null && cap > 0 && <ProgressBar pct={pct} tone={tone} />}
+            {cap != null && cap > 0 && <UsageBar pct={pct} tone={tone} />}
           </div>
         )
       },
@@ -773,6 +819,11 @@ export function CredentialsPage() {
   const [usageLimitFilters, setUsageLimitFilters] = useState<Set<string>>(
     () => new Set()
   )
+  const [priorityFilters, setPriorityFilters] = useState<Set<number>>(
+    () => new Set()
+  )
+  const [authFilters, setAuthFilters] = useState<Set<string>>(() => new Set())
+  const [overuseFilter, setOveruseFilter] = useState<'' | 'on' | 'off'>('')
 
   const toggleStatusFilter = (v: StatusFilter) => {
     setStatusFilters((prev) => {
@@ -790,9 +841,24 @@ export function CredentialsPage() {
       return next
     })
   }
+  const togglePriorityFilter = (v: number) => {
+    setPriorityFilters((prev) => {
+      const next = new Set(prev)
+      if (next.has(v)) next.delete(v)
+      else next.add(v)
+      return next
+    })
+  }
+  const toggleAuthFilter = (v: string) => {
+    setAuthFilters((prev) => {
+      const next = new Set(prev)
+      if (next.has(v)) next.delete(v)
+      else next.add(v)
+      return next
+    })
+  }
   const [addOpen, setAddOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
-  const [testChatOpen, setTestChatOpen] = useState(false)
   const [verifyOpen, setVerifyOpen] = useState(false)
   const [bindProxyId, setBindProxyId] = useState<number | null>(null)
   const [detailCred, setDetailCred] = useState<CredentialStatusItem | null>(
@@ -842,6 +908,18 @@ export function CredentialsPage() {
 
   const allCredentials = data?.credentials ?? []
 
+  // 顶部状态条数据：服务级摘要（运行时间/总请求/成功率）+ 凭据汇总（in-flight/RPM）
+  const { data: statsSummary } = useQuery({
+    queryKey: ['stats-summary'],
+    queryFn: getStatsSummary,
+    refetchInterval: 30_000,
+  })
+  const totalInFlight = allCredentials.reduce(
+    (s, c) => s + (c.inFlight ?? 0),
+    0
+  )
+  const totalRpm = allCredentials.reduce((s, c) => s + (c.rpm ?? 0), 0)
+
   // 取凭据当前生效的额度上限：优先实时余额，回退到缓存余额
   const limitFor = (c: CredentialStatusItem): number => {
     const live = liveBalances.get(c.id)
@@ -890,6 +968,43 @@ export function CredentialsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allCredentials, cachedBalanceMap, liveBalances])
 
+  // 优先级取值集合（动态）+ 计数
+  const priorityOptions = useMemo(() => {
+    const set = new Set<number>()
+    allCredentials.forEach((c) => set.add(c.priority))
+    return Array.from(set).sort((a, b) => a - b)
+  }, [allCredentials])
+  const priorityCountMap = useMemo(() => {
+    const m = new Map<number, number>()
+    allCredentials.forEach((c) => m.set(c.priority, (m.get(c.priority) ?? 0) + 1))
+    return m
+  }, [allCredentials])
+
+  // 认证类型集合（动态）+ 计数
+  const authOptions = useMemo(() => {
+    const set = new Set<string>()
+    allCredentials.forEach((c) => {
+      if (c.authMethod) set.add(c.authMethod)
+    })
+    return Array.from(set).sort()
+  }, [allCredentials])
+  const authCountMap = useMemo(() => {
+    const m = new Map<string, number>()
+    allCredentials.forEach((c) => {
+      const k = c.authMethod ?? '—'
+      m.set(k, (m.get(k) ?? 0) + 1)
+    })
+    return m
+  }, [allCredentials])
+
+  // 允许超额计数
+  const overuseCountMap = useMemo(() => {
+    let on = 0
+    let off = 0
+    allCredentials.forEach((c) => (c.allowOveruse ? on++ : off++))
+    return { on, off }
+  }, [allCredentials])
+
   // 应用筛选（多选 OR：空集合表示全部）
   const credentials = useMemo(() => {
     return allCredentials.filter((c) => {
@@ -907,6 +1022,17 @@ export function CredentialsPage() {
           (!isUnknown && usageLimitFilters.has(String(lim)))
         if (!ok) return false
       }
+      // 优先级：选中的任一档位命中即通过
+      if (priorityFilters.size > 0 && !priorityFilters.has(c.priority)) {
+        return false
+      }
+      // 认证：选中的任一类型命中即通过
+      if (authFilters.size > 0 && !authFilters.has(c.authMethod ?? '')) {
+        return false
+      }
+      // 允许超额：on/off 单选
+      if (overuseFilter === 'on' && !c.allowOveruse) return false
+      if (overuseFilter === 'off' && c.allowOveruse) return false
       return true
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -914,6 +1040,9 @@ export function CredentialsPage() {
     allCredentials,
     statusFilters,
     usageLimitFilters,
+    priorityFilters,
+    authFilters,
+    overuseFilter,
     cachedBalanceMap,
     liveBalances,
   ])
@@ -1387,7 +1516,7 @@ export function CredentialsPage() {
   return (
     <>
       {/* 顶栏 */}
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-3">
           <h1 className="text-2xl font-semibold">凭据管理</h1>
           <Badge variant="secondary">总数 {data?.total ?? 0}</Badge>
@@ -1396,15 +1525,6 @@ export function CredentialsPage() {
           </Badge>
         </div>
         <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setTestChatOpen(true)}
-            title="走 admin 凭据触发一次最小对话测试"
-          >
-            <MessageSquare className="h-4 w-4 mr-2" />
-            对话测试
-          </Button>
           <Button variant="outline" size="sm" onClick={handleQueryBalances}>
             <Wallet className="h-4 w-4 mr-2" />
             查询余额
@@ -1418,6 +1538,51 @@ export function CredentialsPage() {
             添加
           </Button>
         </div>
+      </div>
+
+      {/* 状态条：服务级 + 凭据汇总 */}
+      <div className="mb-3 flex items-stretch flex-wrap divide-x divide-border rounded-md border bg-card overflow-hidden">
+        <StatCell
+          icon={Clock}
+          label="运行时间"
+          value={statsSummary ? formatUptime(statsSummary.uptimeSecs) : '—'}
+          hint={
+            statsSummary
+              ? `自 ${new Date(statsSummary.startedAt).toLocaleString('zh-CN', { hour12: false })}`
+              : undefined
+          }
+        />
+        <StatCell
+          icon={TrendingUp}
+          label="总请求"
+          value={statsSummary?.totalRequests ?? 0}
+        />
+        <StatCell
+          icon={CheckCircle2}
+          label="成功"
+          value={statsSummary?.totalSuccess ?? 0}
+          tone="ok"
+          hint={
+            statsSummary && statsSummary.totalRequests > 0
+              ? `${((statsSummary.totalSuccess / statsSummary.totalRequests) * 100).toFixed(1)}%`
+              : undefined
+          }
+        />
+        <StatCell
+          icon={Activity}
+          label="并发"
+          value={totalInFlight}
+          tone={totalInFlight > 0 ? 'ok' : 'default'}
+        />
+        <StatCell icon={Gauge} label="实时 RPM" value={totalRpm} />
+        {(statsSummary?.totalFail ?? 0) > 0 && (
+          <StatCell
+            icon={Zap}
+            label="失败"
+            value={statsSummary?.totalFail ?? 0}
+            tone="warn"
+          />
+        )}
       </div>
 
       {/* 筛选条 — 多选连续按钮组 */}
@@ -1496,10 +1661,133 @@ export function CredentialsPage() {
           </div>
         </div>
 
+        {/* 优先级 */}
+        {priorityOptions.length > 0 && (
+          <div className="flex items-center gap-1">
+            <span className="text-muted-foreground mr-1">优先级</span>
+            <div className="inline-flex rounded-md border overflow-hidden">
+              {priorityOptions.map((p, i) => {
+                const active = priorityFilters.has(p)
+                const count = priorityCountMap.get(p) ?? 0
+                return (
+                  <button
+                    key={p}
+                    type="button"
+                    onClick={() => togglePriorityFilter(p)}
+                    className={
+                      'h-7 px-3 text-xs transition-colors ' +
+                      (i > 0 ? 'border-l ' : '') +
+                      (active
+                        ? 'bg-primary text-primary-foreground'
+                        : 'bg-background hover:bg-muted')
+                    }
+                  >
+                    {p}
+                    <span
+                      className={
+                        'ml-1 text-[10px] ' +
+                        (active ? 'opacity-90' : 'text-muted-foreground')
+                      }
+                    >
+                      ({count})
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* 认证类型 */}
+        {authOptions.length > 0 && (
+          <div className="flex items-center gap-1">
+            <span className="text-muted-foreground mr-1">认证</span>
+            <div className="inline-flex rounded-md border overflow-hidden">
+              {authOptions.map((m, i) => {
+                const active = authFilters.has(m)
+                const count = authCountMap.get(m) ?? 0
+                return (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => toggleAuthFilter(m)}
+                    className={
+                      'h-7 px-3 text-xs font-mono transition-colors ' +
+                      (i > 0 ? 'border-l ' : '') +
+                      (active
+                        ? 'bg-primary text-primary-foreground'
+                        : 'bg-background hover:bg-muted')
+                    }
+                  >
+                    {m}
+                    <span
+                      className={
+                        'ml-1 text-[10px] ' +
+                        (active ? 'opacity-90' : 'text-muted-foreground')
+                      }
+                    >
+                      ({count})
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* 允许超额 */}
+        <div className="flex items-center gap-1">
+          <span className="text-muted-foreground mr-1">允许超额</span>
+          <div className="inline-flex rounded-md border overflow-hidden">
+            {(
+              [
+                { value: 'on' as const, label: '开', count: overuseCountMap.on },
+                {
+                  value: 'off' as const,
+                  label: '关',
+                  count: overuseCountMap.off,
+                },
+              ]
+            ).map((opt, i) => {
+              const active = overuseFilter === opt.value
+              return (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() =>
+                    setOveruseFilter(active ? '' : (opt.value as 'on' | 'off'))
+                  }
+                  className={
+                    'h-7 px-3 text-xs transition-colors ' +
+                    (i > 0 ? 'border-l ' : '') +
+                    (active
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-background hover:bg-muted')
+                  }
+                >
+                  {opt.label}
+                  <span
+                    className={
+                      'ml-1 text-[10px] ' +
+                      (active ? 'opacity-90' : 'text-muted-foreground')
+                    }
+                  >
+                    ({opt.count})
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+        </div>
+
         <span className="text-muted-foreground">
           匹配 {credentials.length} / 共 {allCredentials.length}
         </span>
-        {(statusFilters.size > 0 || usageLimitFilters.size > 0) && (
+        {(statusFilters.size > 0 ||
+          usageLimitFilters.size > 0 ||
+          priorityFilters.size > 0 ||
+          authFilters.size > 0 ||
+          overuseFilter !== '') && (
           <Button
             size="sm"
             variant="ghost"
@@ -1507,6 +1795,9 @@ export function CredentialsPage() {
             onClick={() => {
               setStatusFilters(new Set())
               setUsageLimitFilters(new Set())
+              setPriorityFilters(new Set())
+              setAuthFilters(new Set())
+              setOveruseFilter('')
             }}
           >
             清除筛选
@@ -1734,7 +2025,6 @@ export function CredentialsPage() {
 
       <AddCredentialDialog open={addOpen} onOpenChange={setAddOpen} />
       <ImportTokenJsonDialog open={importOpen} onOpenChange={setImportOpen} />
-      <TestChatDialog open={testChatOpen} onOpenChange={setTestChatOpen} />
       <BatchVerifyDialog
         open={verifyOpen}
         onOpenChange={setVerifyOpen}
