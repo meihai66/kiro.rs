@@ -1001,10 +1001,15 @@ export function CredentialsPage() {
     liveBalances,
   ])
 
-  const selectedIds = useMemo(
-    () => Object.keys(rowSelection).filter((k) => rowSelection[k]).map(Number),
-    [rowSelection]
-  )
+  // 批量操作的勾选必须限制在「当前页可见行」内：
+  // 跨页选中虽可保留 rowSelection，但执行时只会作用到当前可见行，
+  // 避免操作到看不见的行造成误删/误改。
+  const selectedIds = useMemo(() => {
+    const visibleIdSet = new Set(visibleRows.map((r) => String(r.id)))
+    return Object.keys(rowSelection)
+      .filter((k) => rowSelection[k] && visibleIdSet.has(k))
+      .map(Number)
+  }, [rowSelection, visibleRows])
 
   const handleViewBalance = (id: number, force: boolean) => {
     setBalanceTargetId(id)
@@ -1473,29 +1478,52 @@ export function CredentialsPage() {
       <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
         <div className="flex items-center gap-2 flex-wrap">
           <h1 className="text-2xl font-semibold mr-1">凭据管理</h1>
-          <Badge variant="secondary">总数 {data?.total ?? 0}</Badge>
-          <Badge className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-400">
-            可用 {data?.available ?? 0}
-          </Badge>
-          <Badge
-            className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
-            title={
-              statsSummary && statsSummary.totalRequests > 0
-                ? `成功率 ${((statsSummary.totalSuccess / statsSummary.totalRequests) * 100).toFixed(1)}%`
-                : undefined
-            }
-          >
-            成功 {statsSummary?.totalSuccess ?? 0}
-          </Badge>
-          <Badge
-            className={
-              (statsSummary?.totalFail ?? 0) > 0
-                ? 'bg-rose-500/15 text-rose-700 dark:text-rose-400'
-                : 'bg-muted text-muted-foreground'
-            }
-          >
-            失败 {statsSummary?.totalFail ?? 0}
-          </Badge>
+          {/* 统计框：总数 / 可用 / 成功率 / 成功 / 失败 */}
+          <div className="inline-flex items-center gap-3 rounded-md border bg-card px-2.5 py-1 text-xs">
+            <span className="inline-flex items-center gap-1">
+              <span className="text-muted-foreground">总数</span>
+              <span className="font-mono font-medium tabular-nums">
+                {data?.total ?? 0}
+              </span>
+            </span>
+            <span className="h-3 w-px bg-border" />
+            <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-400">
+              <span className="text-muted-foreground">可用</span>
+              <span className="font-mono font-medium tabular-nums">
+                {data?.available ?? 0}
+              </span>
+            </span>
+            <span className="h-3 w-px bg-border" />
+            <span className="inline-flex items-center gap-1">
+              <span className="text-muted-foreground">成功率</span>
+              <span className="font-mono font-medium tabular-nums">
+                {statsSummary && statsSummary.totalRequests > 0
+                  ? `${((statsSummary.totalSuccess / statsSummary.totalRequests) * 100).toFixed(1)}%`
+                  : '—'}
+              </span>
+            </span>
+            <span className="h-3 w-px bg-border" />
+            <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-400">
+              <span className="text-muted-foreground">成功</span>
+              <span className="font-mono font-medium tabular-nums">
+                {statsSummary?.totalSuccess ?? 0}
+              </span>
+            </span>
+            <span className="h-3 w-px bg-border" />
+            <span
+              className={
+                'inline-flex items-center gap-1 ' +
+                ((statsSummary?.totalFail ?? 0) > 0
+                  ? 'text-rose-700 dark:text-rose-400'
+                  : 'text-muted-foreground')
+              }
+            >
+              <span className="text-muted-foreground">失败</span>
+              <span className="font-mono font-medium tabular-nums">
+                {statsSummary?.totalFail ?? 0}
+              </span>
+            </span>
+          </div>
           {/* 内联实时指标 pill —— 紧凑、与 badge 同一行，避免多占一行 */}
           <span
             className="inline-flex items-center gap-1 rounded-md border bg-card px-2 py-0.5 text-xs"

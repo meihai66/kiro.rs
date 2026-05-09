@@ -177,8 +177,8 @@ pub struct AddCredentialRequest {
     /// OIDC Client Secret（IdC 认证需要）
     pub client_secret: Option<String>,
 
-    /// 优先级（可选，默认 0）
-    #[serde(default)]
+    /// 优先级（可选，默认 10）
+    #[serde(default = "default_import_priority")]
     pub priority: u32,
 
     /// 凭据级 Region 配置（用于 Token 刷新）
@@ -328,7 +328,7 @@ pub struct TokenJsonItem {
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub auth_method: Option<String>,
-    #[serde(default)]
+    #[serde(default = "default_import_priority")]
     pub priority: u32,
     pub region: Option<String>,
     pub api_region: Option<String>,
@@ -368,6 +368,10 @@ pub struct ImportTokenJsonRequest {
 
 fn default_dry_run() -> bool {
     true
+}
+
+fn default_import_priority() -> u32 {
+    10
 }
 
 /// 导入项（支持单个或数组）

@@ -342,6 +342,11 @@ async fn refresh_social_token(
 /// IdC Token 刷新所需的 x-amz-user-agent header 前缀
 const IDC_AMZ_USER_AGENT_PREFIX: &str = "aws-sdk-js/3.980.0";
 
+/// IdC 账号开启超额时若 ListAvailableProfiles 拿不到 profileArn 的兜底值
+/// （来自 kiro-proxy2 的发现）。仅用于 setUserPreference 这一种必填 ARN 的场景。
+pub(crate) const FALLBACK_IDC_PROFILE_ARN: &str =
+    "arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX";
+
 fn build_idc_refresh_user_agents(config: &Config) -> (String, String) {
     let os_name = &config.system_version;
     let node_version = &config.node_version;
@@ -557,6 +562,58 @@ pub(crate) async fn set_user_preference(
         bail!("setUserPreference 返回 {}: {}", status, truncated);
     }
     Ok(())
+}
+
+/// 调用上游 ListAvailableProfiles 获取首个 profileArn。
+/// 主要用途：IdC 账号在 setUserPreference 时缺 profileArn，先尝试拉取；
+/// 拉取失败则由调用方走 FALLBACK_IDC_PROFILE_ARN 兜底。
+pub(crate) async fn list_available_profiles(
+    credentials: &KiroCredentials,
+    config: &Config,
+    token: &str,
+    proxy: Option<&ProxyConfig>,
+) -> anyhow::Result<String> {
+    let region = credentials.effective_api_region(config);
+    let url = format!("https://q.{}.amazonaws.com/ListAvailableProfiles", region);
+    let machine_id = machine_id::generate_from_credentials(credentials, config)
+        .ok_or_else(|| anyhow::anyhow!("无法生成 machineId"))?;
+    let kiro_version = &config.kiro_version;
+    let amz_user_agent = format!(
+        "aws-sdk-js/1.0.0 KiroIDE-{}-{}",
+        kiro_version, machine_id
+    );
+    let user_agent = format!(
+        "aws-sdk-js/1.0.0 ua/2.1 os/{} lang/js md/nodejs#{} api/codewhispererruntime#1.0.0 m/N,E KiroIDE-{}-{}",
+        config.system_version, config.node_version, kiro_version, machine_id
+    );
+
+    let client = build_client(proxy, 60, config.tls_backend)?;
+    let response = client
+        .post(&url)
+        .header("content-type", "application/json")
+        .header("Authorization", format!("Bearer {}", token))
+        .header("x-amz-user-agent", &amz_user_agent)
+        .header("user-agent", &user_agent)
+        .header("amz-sdk-invocation-id", uuid::Uuid::new_v4().to_string())
+        .header("amz-sdk-request", "attempt=1; max=1")
+        .header("Connection", "close")
+        .body("{}")
+        .send()
+        .await?;
+
+    let status = response.status();
+    let body_text = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        bail!("ListAvailableProfiles 返回 {}: {}", status, body_text);
+    }
+    let value: serde_json::Value = serde_json::from_str(&body_text)?;
+    let arn = value
+        .pointer("/profiles/0/arn")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("ListAvailableProfiles 响应没有 profileArn"))?;
+    Ok(arn)
 }
 
 // ============================================================================
@@ -3001,6 +3058,56 @@ impl MultiTokenManager {
         };
 
         let proxy = self.effective_proxy_for_cred(&credentials)?;
+
+        // IdC 账号开启超额需要 profileArn，但 IdC token 刷新时未必返回。
+        // 缺失则先试 ListAvailableProfiles，再退回固定兜底 ARN，并持久化。
+        let mut credentials = credentials;
+        let needs_profile_arn = credentials
+            .profile_arn
+            .as_deref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true);
+        let auth_is_idc = credentials
+            .auth_method
+            .as_deref()
+            .map(|m| {
+                m.eq_ignore_ascii_case("idc")
+                    || m.eq_ignore_ascii_case("builder-id")
+                    || m.eq_ignore_ascii_case("iam")
+            })
+            .unwrap_or(false);
+        if needs_profile_arn && auth_is_idc {
+            let arn = match list_available_profiles(&credentials, &config, &token, proxy.as_ref())
+                .await
+            {
+                Ok(arn) => {
+                    tracing::info!(
+                        credential_id = id,
+                        "IdC 缺 profileArn，通过 ListAvailableProfiles 获取成功"
+                    );
+                    arn
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        credential_id = id,
+                        error = %e,
+                        "IdC 缺 profileArn 且 ListAvailableProfiles 失败，使用兜底 ARN"
+                    );
+                    FALLBACK_IDC_PROFILE_ARN.to_string()
+                }
+            };
+            credentials.profile_arn = Some(arn.clone());
+            {
+                let mut entries = self.entries.lock();
+                if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                    entry.credentials.profile_arn = Some(arn);
+                }
+            }
+            if let Err(e) = self.persist_credentials() {
+                tracing::warn!("IdC profileArn 兜底后持久化失败（不影响本次请求）: {}", e);
+            }
+        }
+
         match set_user_preference(&credentials, &config, &token, &normalized, proxy.as_ref()).await
         {
             Ok(()) => {

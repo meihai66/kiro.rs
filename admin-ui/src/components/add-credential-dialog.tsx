@@ -43,7 +43,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
     setApiRegion('')
     setClientId('')
     setClientSecret('')
-    setPriority('0')
+    setPriority('10')
     setMachineId('')
     setEndpoint('')
     setAutoBindProxy(true)
@@ -78,7 +78,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
         apiRegion: apiRegion.trim() || undefined,
         clientId: isApiKey ? undefined : clientId.trim() || undefined,
         clientSecret: isApiKey ? undefined : clientSecret.trim() || undefined,
-        priority: parseInt(priority) || 0,
+        priority: Number.isFinite(parseInt(priority)) ? parseInt(priority) : 10,
         machineId: machineId.trim() || undefined,
         endpoint: endpoint.trim() || undefined,
         autoBindProxy,
