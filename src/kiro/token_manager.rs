@@ -1897,6 +1897,20 @@ impl MultiTokenManager {
     /// # Arguments
     /// * `id` - 凭据 ID，用于更新正确的条目
     /// * `credentials` - 凭据信息
+    /// 强制使用指定凭据获取调用上下文（绕过调度）。
+    /// 用于"对话测试"等需要锁定单凭据的场景。
+    pub async fn acquire_context_for_credential(&self, id: u64) -> anyhow::Result<CallContext> {
+        let credentials = {
+            let entries = self.entries.lock();
+            entries
+                .iter()
+                .find(|e| e.id == id)
+                .map(|e| e.credentials.clone())
+                .ok_or_else(|| anyhow::anyhow!("凭据 #{} 不存在", id))?
+        };
+        self.try_ensure_token(id, &credentials).await
+    }
+
     async fn try_ensure_token(
         &self,
         id: u64,

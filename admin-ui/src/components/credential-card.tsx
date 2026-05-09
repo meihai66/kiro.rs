@@ -6,6 +6,7 @@ import {
   Wallet,
   Trash2,
   Loader2,
+  MessageSquare,
   Shield,
   ShieldAlert,
   Link as LinkIcon,
@@ -30,6 +31,7 @@ import type {
 } from '@/types/api'
 import { unbindCredentialProxy } from '@/api/proxies'
 import { RpmSparkline } from '@/components/rpm-sparkline'
+import { TestChatDialog } from '@/components/test-chat-dialog'
 import {
   useSetDisabled,
   useSetPriority,
@@ -142,6 +144,7 @@ export function CredentialCard({
     credential.credentialRpm != null ? String(credential.credentialRpm) : ''
   )
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
+  const [showTestChat, setShowTestChat] = useState(false)
 
   useEffect(() => {
     setEmailVal(credential.email ?? '')
@@ -652,6 +655,15 @@ export function CredentialCard({
             <Button
               size="sm"
               variant="outline"
+              onClick={() => setShowTestChat(true)}
+              title="用此凭据发送一条最小测试请求"
+            >
+              <MessageSquare className="h-3.5 w-3.5 mr-1" />
+              对话测试
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
               onClick={() => onViewBalance(credential.id, isCacheStale())}
             >
               <Wallet className="h-3.5 w-3.5 mr-1" />
@@ -711,6 +723,12 @@ export function CredentialCard({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <TestChatDialog
+        open={showTestChat}
+        onOpenChange={setShowTestChat}
+        credentialId={credential.id}
+      />
     </>
   )
 }

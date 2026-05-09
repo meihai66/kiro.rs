@@ -28,14 +28,20 @@ const MODEL_OPTIONS = [
 interface TestChatDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
+  /** 限定使用某个凭据（来自凭据详情时）；不传则走默认调度 */
+  credentialId?: number
 }
 
-export function TestChatDialog({ open, onOpenChange }: TestChatDialogProps) {
+export function TestChatDialog({
+  open,
+  onOpenChange,
+  credentialId,
+}: TestChatDialogProps) {
   const [model, setModel] = useState<string>('claude-opus-4-7')
   const [message, setMessage] = useState('hi')
 
   const mut = useMutation({
-    mutationFn: () => testChat({ model, message }),
+    mutationFn: () => testChat({ model, message, credentialId }),
     onError: (e) => toast.error('测试失败: ' + extractErrorMessage(e)),
   })
 
@@ -56,7 +62,14 @@ export function TestChatDialog({ open, onOpenChange }: TestChatDialogProps) {
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl max-h-[90vh] flex flex-col gap-0 p-0">
         <DialogHeader className="px-6 pt-6 pb-3 border-b shrink-0">
-          <DialogTitle className="pr-8">对话测试</DialogTitle>
+          <DialogTitle className="pr-8">
+            对话测试
+            {credentialId != null && (
+              <span className="ml-2 text-xs font-normal text-muted-foreground">
+                · 凭据 #{credentialId}（强制使用）
+              </span>
+            )}
+          </DialogTitle>
         </DialogHeader>
         <div className="flex-1 overflow-y-auto p-6 space-y-4">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -75,7 +88,9 @@ export function TestChatDialog({ open, onOpenChange }: TestChatDialogProps) {
                 ))}
               </select>
               <p className="text-[11px] text-muted-foreground">
-                使用任意可用凭据走默认调度策略
+                {credentialId != null
+                  ? `仅用凭据 #${credentialId}，不走故障转移`
+                  : '使用任意可用凭据走默认调度策略'}
               </p>
             </div>
             <div className="space-y-1">

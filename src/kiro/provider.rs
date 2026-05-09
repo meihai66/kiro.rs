@@ -235,6 +235,54 @@ impl KiroProvider {
         self.call_api_with_retry(request_body, false, user_id).await
     }
 
+    /// 强制用指定凭据发一次（无重试 / 无故障转移；用于"对话测试"等场景）。
+    /// 不计入冷却 / 失败计数；上游错误直接 bail，由调用方决定如何处理。
+    pub async fn call_api_with_credential(
+        &self,
+        credential_id: u64,
+        request_body: &str,
+    ) -> anyhow::Result<ApiCallResult> {
+        let ctx = self
+            .token_manager
+            .acquire_context_for_credential(credential_id)
+            .await?;
+
+        ctx.rpm.record();
+        let _in_flight_guard = InFlightGuard::new(ctx.in_flight.clone());
+
+        let config = self.token_manager.config();
+        let machine_id = machine_id::generate_from_credentials(&ctx.credentials, &config)
+            .ok_or_else(|| anyhow::anyhow!("无法生成 machine_id"))?;
+        let endpoint = self.endpoint_for(&ctx.credentials)?;
+        let request_ctx = RequestContext {
+            credentials: &ctx.credentials,
+            token: &ctx.token,
+            machine_id: &machine_id,
+            config: &config,
+        };
+        let url = endpoint.api_url(&request_ctx);
+        let final_body = endpoint
+            .transform_api_body(request_body, &request_ctx)
+            .unwrap_or_else(|_| request_body.to_string());
+
+        let client = self.get_client_for_credential(&ctx)?;
+        let base_request = client
+            .post(&url)
+            .body(final_body)
+            .header("content-type", "application/json");
+        let request = endpoint.decorate_api(base_request, &request_ctx);
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("test-chat 上游 {} 错误: {}", status, body);
+        }
+        Ok(ApiCallResult {
+            response,
+            credential_id,
+        })
+    }
+
     /// 发送流式 API 请求
     ///
     /// 支持多凭据故障转移：

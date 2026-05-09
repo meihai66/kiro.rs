@@ -368,15 +368,25 @@ impl AdminService {
         let body = serde_json::to_string(&kiro_request)
             .map_err(|e| AdminServiceError::InternalError(format!("序列化失败: {}", e)))?;
 
-        // 如果指定了 credential_id，临时改优先级方式不便；这里走默认调度，
-        // 让上层根据需要再扩展（"指定凭据"可以在前端先做禁用其他号再点测试）。
-        let _ = req.credential_id; // 暂未使用
-
         let started = std::time::Instant::now();
-        let result = provider
-            .call_api(&body, None)
-            .await
-            .map_err(|e| AdminServiceError::InternalError(format!("上游调用失败: {}", e)))?;
+        // 指定 credential_id 时强制用该凭据发，不走调度/重试；用于"测试某个号是否可用"。
+        // 不指定则走正常 call_api（含故障转移），用于"任意号都行"的快速 smoke test。
+        let result = if let Some(cid) = req.credential_id {
+            provider
+                .call_api_with_credential(cid, &body)
+                .await
+                .map_err(|e| {
+                    AdminServiceError::InternalError(format!(
+                        "凭据 #{} 测试失败: {}",
+                        cid, e
+                    ))
+                })?
+        } else {
+            provider
+                .call_api(&body, None)
+                .await
+                .map_err(|e| AdminServiceError::InternalError(format!("上游调用失败: {}", e)))?
+        };
 
         // 解析响应（Event Stream → 取所有 assistantResponseEvent.content）
         let bytes = result
