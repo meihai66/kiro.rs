@@ -98,42 +98,151 @@ function ProgressBar({
   )
 }
 
-/** 订阅徽章：识别 PRO+ / PRO / FREE / Solo / Indie 等 → 颜色 + 简写 */
-function SubscriptionBadge({ title }: { title: string }) {
-  const upper = title.toUpperCase()
-  // 取最具区分性的简写
-  let short = title
-  let cls = 'bg-muted text-muted-foreground'
-  if (upper.includes('PRO+') || upper.includes('PRO PLUS')) {
-    short = 'PRO+'
-    cls =
-      'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 ring-1 ring-emerald-500/30'
-  } else if (upper.includes('PRO')) {
-    short = 'PRO'
-    cls =
-      'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 ring-1 ring-emerald-500/30'
-  } else if (upper.includes('SOLO')) {
-    short = 'S'
-    cls = 'bg-blue-500/15 text-blue-700 dark:text-blue-400 ring-1 ring-blue-500/30'
-  } else if (upper.includes('INDIE') || upper.includes('INDIVIDUAL')) {
-    short = 'I'
-    cls =
-      'bg-purple-500/15 text-purple-700 dark:text-purple-400 ring-1 ring-purple-500/30'
-  } else if (upper.includes('TEAM') || upper.includes('BUSINESS')) {
-    short = 'T'
-    cls =
-      'bg-orange-500/15 text-orange-700 dark:text-orange-400 ring-1 ring-orange-500/30'
-  } else if (upper.includes('FREE') || upper.includes('TRIAL')) {
-    short = 'FREE'
-    cls = 'bg-yellow-500/15 text-yellow-700 dark:text-yellow-400 ring-1 ring-yellow-500/30'
-  }
+/** 额度使用条：分段刻度 + 渐变填充，比纯色单条更清晰；
+ * 100% 满格时仍能看见底色，超额时整条饱和深红。 */
+function UsageBar({
+  pct,
+  tone,
+}: {
+  pct: number
+  tone: 'red' | 'yellow' | 'emerald'
+}) {
+  const safe = Math.max(0, Math.min(100, pct))
+  const fillCls =
+    tone === 'red'
+      ? 'bg-gradient-to-r from-red-500 to-red-600'
+      : tone === 'yellow'
+        ? 'bg-gradient-to-r from-yellow-400 to-orange-500'
+        : 'bg-gradient-to-r from-emerald-500 to-teal-500'
+  return (
+    <div
+      className="relative h-1.5 rounded-full overflow-hidden bg-muted/60"
+      role="progressbar"
+      aria-valuenow={safe}
+      aria-valuemin={0}
+      aria-valuemax={100}
+    >
+      <div
+        className={`absolute inset-y-0 left-0 rounded-full ${fillCls} transition-all duration-300`}
+        style={{ width: `${safe}%` }}
+      />
+      {/* 25/50/75 刻度线，仅在 muted 上方淡淡显示 */}
+      <div className="pointer-events-none absolute inset-0 flex">
+        <div className="flex-1 border-r border-background/40" />
+        <div className="flex-1 border-r border-background/40" />
+        <div className="flex-1 border-r border-background/40" />
+        <div className="flex-1" />
+      </div>
+    </div>
+  )
+}
+
+/** 单字符图标徽章：方形大写首字母，用于 auth/订阅一体化展示 */
+function LetterIcon({
+  letter,
+  cls,
+  title,
+}: {
+  letter: string
+  cls: string
+  title: string
+}) {
   return (
     <span
-      className={`inline-flex items-center justify-center rounded px-1.5 h-4 text-[10px] font-semibold leading-none w-fit ${cls}`}
+      className={`inline-flex h-5 w-5 items-center justify-center rounded text-[11px] font-bold leading-none ring-1 ${cls}`}
       title={title}
     >
-      {short}
+      {letter}
     </span>
+  )
+}
+
+/** 认证方式 → 单字符图标。social=S(蓝), idc=I(紫), api_key=K(灰) */
+function AuthBadge({ method }: { method: string }) {
+  const lower = method.toLowerCase()
+  if (lower === 'social') {
+    return (
+      <LetterIcon
+        letter="S"
+        cls="bg-blue-500/15 text-blue-700 dark:text-blue-400 ring-blue-500/30"
+        title={`认证：social`}
+      />
+    )
+  }
+  if (lower === 'idc' || lower === 'builder-id' || lower === 'iam') {
+    return (
+      <LetterIcon
+        letter="I"
+        cls="bg-purple-500/15 text-purple-700 dark:text-purple-400 ring-purple-500/30"
+        title={`认证：${method}`}
+      />
+    )
+  }
+  if (lower === 'api_key' || lower === 'apikey') {
+    return (
+      <LetterIcon
+        letter="K"
+        cls="bg-slate-500/15 text-slate-700 dark:text-slate-400 ring-slate-500/30"
+        title={`认证：API Key`}
+      />
+    )
+  }
+  return (
+    <LetterIcon
+      letter={method.charAt(0).toUpperCase() || '?'}
+      cls="bg-muted text-muted-foreground ring-muted-foreground/30"
+      title={`认证：${method}`}
+    />
+  )
+}
+
+/** 订阅 → 单字符图标。PRO+/PRO=P(绿), Solo=S(蓝), Indie=I(紫), Team=T(橙), Free=F(黄) */
+function SubscriptionBadge({ title }: { title: string }) {
+  const upper = title.toUpperCase()
+  let letter = '?'
+  let cls = 'bg-muted text-muted-foreground ring-muted-foreground/30'
+  if (upper.includes('PRO')) {
+    // PRO+ 和 PRO 共用绿色 P，title 区分
+    letter = 'P'
+    cls =
+      'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 ring-emerald-500/30'
+  } else if (upper.includes('SOLO')) {
+    letter = 'S'
+    cls = 'bg-blue-500/15 text-blue-700 dark:text-blue-400 ring-blue-500/30'
+  } else if (upper.includes('INDIE') || upper.includes('INDIVIDUAL')) {
+    letter = 'I'
+    cls =
+      'bg-purple-500/15 text-purple-700 dark:text-purple-400 ring-purple-500/30'
+  } else if (upper.includes('TEAM') || upper.includes('BUSINESS')) {
+    letter = 'T'
+    cls = 'bg-orange-500/15 text-orange-700 dark:text-orange-400 ring-orange-500/30'
+  } else if (upper.includes('FREE') || upper.includes('TRIAL')) {
+    letter = 'F'
+    cls = 'bg-yellow-500/15 text-yellow-700 dark:text-yellow-400 ring-yellow-500/30'
+  }
+  return <LetterIcon letter={letter} cls={cls} title={`套餐：${title}`} />
+}
+
+/** 优先级方块：宽 4px 高 5（与 LetterIcon 等高），按数值取色——0 强调 / 数字越大越淡 */
+function PriorityChip({ priority }: { priority: number }) {
+  // 颜色映射：0=红（最高优先）, 1=橙, 2=黄, 3=绿, 4+=蓝/灰
+  const cls =
+    priority === 0
+      ? 'bg-red-500'
+      : priority === 1
+        ? 'bg-orange-500'
+        : priority === 2
+          ? 'bg-yellow-500'
+          : priority === 3
+            ? 'bg-emerald-500'
+            : priority === 4
+              ? 'bg-blue-500'
+              : 'bg-slate-400 dark:bg-slate-600'
+  return (
+    <span
+      className={`inline-block h-5 w-1 rounded-sm shrink-0 ${cls}`}
+      title={`优先级 ${priority}（数字越小越优先）`}
+    />
   )
 }
 
@@ -266,12 +375,14 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
         const c = row.original
         return (
           <div
-            className="inline-flex items-center gap-1.5 text-xs w-[160px]"
+            className="inline-flex items-center gap-1.5 text-xs w-[170px]"
             title={
-              (c.email ?? '') +
-              (c.allowOveruse ? '（已开启允许超额使用）' : '')
+              `优先级 ${c.priority}` +
+              (c.email ? ` · ${c.email}` : '') +
+              (c.allowOveruse ? ' · 已开启允许超额使用' : '')
             }
           >
+            <PriorityChip priority={c.priority} />
             {c.allowOveruse && (
               <span
                 className="inline-block h-2 w-2 rounded-full bg-orange-500 shrink-0"
@@ -360,31 +471,22 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
     },
     {
       accessorKey: 'authMethod',
-      header: '认证 / 套餐',
+      header: '认证',
       cell: ({ row }) => {
         const c = row.original
         return (
-          <div className="flex flex-col gap-0.5 text-xs whitespace-nowrap">
-            <span className="font-mono">
-              {c.authMethod ?? (
-                <span className="text-muted-foreground">—</span>
-              )}
-            </span>
-            {c.subscriptionTitle ? (
-              <SubscriptionBadge title={c.subscriptionTitle} />
+          <div className="flex items-center gap-1">
+            {c.authMethod ? (
+              <AuthBadge method={c.authMethod} />
             ) : (
-              <span className="text-[10px] text-muted-foreground">—</span>
+              <span className="text-xs text-muted-foreground">—</span>
+            )}
+            {c.subscriptionTitle && (
+              <SubscriptionBadge title={c.subscriptionTitle} />
             )}
           </div>
         )
       },
-    },
-    {
-      accessorKey: 'priority',
-      header: '优先级',
-      cell: ({ row }) => (
-        <span className="font-mono text-xs">{row.original.priority}</span>
-      ),
     },
     {
       id: 'balance',
@@ -416,20 +518,23 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
             : tone === 'yellow'
               ? 'text-yellow-600 dark:text-yellow-400'
               : 'text-emerald-600 dark:text-emerald-400'
+        // 显示规则：常规值原样（保留 1 位小数）；只有超额量用 K 简写
+        const fmt = (n: number) =>
+          Number.isInteger(n) ? String(n) : n.toFixed(1)
         return (
           <div
-            className="flex flex-col gap-0.5 min-w-[140px]"
+            className="flex flex-col gap-1 min-w-[150px]"
             title={`已用 ${totalUsed.toFixed(2)}（含超额 ${overage.toFixed(2)}），合计 ${pct.toFixed(1)}%`}
           >
             <div className={`text-xs font-mono whitespace-nowrap ${textCls}`}>
-              {formatK(totalUsed)} / {formatK(limit)}
+              {fmt(totalUsed)} / {fmt(limit)}
               {overage > 0 && (
                 <span className="ml-1 text-[10px] font-semibold text-red-600">
                   超 +{formatK(overage)}
                 </span>
               )}
             </div>
-            <ProgressBar pct={pct} tone={tone} />
+            <UsageBar pct={pct} tone={tone} />
           </div>
         )
       },
