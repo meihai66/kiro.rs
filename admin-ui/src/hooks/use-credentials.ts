@@ -287,10 +287,7 @@ export function useUpdateGlobalConfig() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['globalConfig'] })
       queryClient.invalidateQueries({ queryKey: ['proxyConfig'] })
-      toast.success('全局配置已更新')
-    },
-    onError: (error: any) => {
-      toast.error(error.response?.data?.error?.message || '更新失败')
+      // toast 由调用方提供，避免双重提示
     },
   })
 }

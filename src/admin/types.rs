@@ -1,6 +1,25 @@
 //! Admin API 类型定义
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// 三态反序列化助手：区分「字段缺省 = 不修改」和「字段为 null = 清空」。
+/// 默认 serde 把 null 直接反序列化成 None，与字段缺省无法区分；
+/// 这个 helper 把出现的字段（包括 null）包成 Some，缺省字段保持 None。
+///
+/// 用法：
+/// ```ignore
+/// #[serde(default, deserialize_with = "deserialize_double_option")]
+/// pub credential_rpm: Option<Option<u32>>,
+/// ```
+pub(crate) fn deserialize_double_option<'de, T, D>(
+    deserializer: D,
+) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: Deserializer<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
 
 // ============ 凭据状态 ============
 
@@ -645,7 +664,7 @@ pub struct CreateApiKeyRequest {
 pub struct UpdateApiKeyRequest {
     #[serde(default)]
     pub name: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_double_option")]
     pub description: Option<Option<String>>,
     #[serde(default)]
     pub enabled: Option<bool>,
@@ -879,6 +898,8 @@ pub struct GlobalConfigResponse {
     pub rate_limit_cooldown_max_secs: u64,
     /// 容量瓶颈型 429 的冷却（秒）
     pub capacity_pressure_cooldown_secs: u64,
+    /// 是否忽略上游 Retry-After，直接在 [min,max] 内随机出冷却
+    pub rate_limit_ignore_retry_after: bool,
     /// 错误日志开关
     pub error_log_enabled: bool,
     /// 错误日志最大保留条数（0=不限）
@@ -912,7 +933,9 @@ pub struct CompressionConfigResponse {
 pub struct UpdateGlobalConfigRequest {
     /// AWS Region（可选）
     pub region: Option<String>,
-    /// 单凭据目标请求速率（RPM，可选）
+    /// 单凭据目标请求速率（RPM，可选）。
+    /// `null` 表示清除（无限制），字段缺省表示不修改。
+    #[serde(default, deserialize_with = "deserialize_double_option")]
     pub credential_rpm: Option<Option<u32>>,
     /// Prompt Cache TTL（秒，可选，仅支持 300 或 3600）
     pub prompt_cache_ttl_seconds: Option<u64>,
@@ -944,6 +967,8 @@ pub struct UpdateGlobalConfigRequest {
     pub rate_limit_cooldown_max_secs: Option<u64>,
     /// 容量瓶颈型 429 的冷却（秒，可选）
     pub capacity_pressure_cooldown_secs: Option<u64>,
+    /// 忽略上游 Retry-After 直接随机（可选）
+    pub rate_limit_ignore_retry_after: Option<bool>,
     /// 错误日志开关
     pub error_log_enabled: Option<bool>,
     /// 错误日志最大保留条数

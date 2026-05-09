@@ -1055,12 +1055,40 @@ impl KiroProvider {
         } else {
             cfg.capacity_pressure_cooldown_secs
         };
-
-        let custom_duration = if is_capacity_pressure {
-            // 优先尊重上游 Retry-After；否则使用容量短冷却下限
-            Some(retry_after.unwrap_or_else(|| Duration::from_secs(capacity_secs)))
+        let configured_min_secs = if cfg.rate_limit_cooldown_min_secs == 0 {
+            DEFAULT_RATE_LIMIT_COOLDOWN_SECS
         } else {
-            retry_after
+            cfg.rate_limit_cooldown_min_secs
+        };
+        let configured_max_secs = {
+            let m = if cfg.rate_limit_cooldown_max_secs == 0 {
+                MAX_RATE_LIMIT_COOLDOWN_SECS
+            } else {
+                cfg.rate_limit_cooldown_max_secs
+            };
+            m.max(configured_min_secs) // 防御：max < min 时退化
+        };
+
+        // 关键：custom_duration 必须是 Some，否则 CooldownManager 会用
+        // RateLimitExceeded.default_duration() = 60s 这个写死值 + 1.5 倍递增，
+        // 完全无视配置。
+        let custom_duration = if is_capacity_pressure {
+            // 容量类：优先 Retry-After；否则用容量短冷却（不被 [min,max] 拉伸）
+            Some(retry_after.unwrap_or_else(|| Duration::from_secs(capacity_secs)))
+        } else if cfg.rate_limit_ignore_retry_after {
+            // 用户开启「忽略 Retry-After」：完全无视上游头，直接在 [min,max] 内随机
+            let secs = if configured_min_secs == configured_max_secs {
+                configured_min_secs
+            } else {
+                fastrand::u64(configured_min_secs..=configured_max_secs)
+            };
+            Some(Duration::from_secs(secs))
+        } else {
+            // 普通 429：上游带 Retry-After 已被 parse_retry_after clamp 到 [min,max]；
+            // 不带时用 configured_min_secs 作为基线，再 clamp（防御 min>max 等异常）
+            let base = retry_after
+                .unwrap_or_else(|| Duration::from_secs(configured_min_secs));
+            Some(self.clamp_rate_limit_cooldown(base))
         };
 
         let cooldown = self.token_manager.set_credential_cooldown_with_duration(
@@ -1728,6 +1756,49 @@ mod tests {
         assert_eq!(reason, CooldownReason::RateLimitExceeded);
         assert!(remaining <= Duration::from_secs(60));
         assert!(remaining > Duration::from_secs(50));
+    }
+
+    /// 开启 `rate_limit_ignore_retry_after` 后，即使上游带了 Retry-After
+    /// 也不应该使用，而是在 [min,max] 内随机
+    #[test]
+    fn test_handle_rate_limited_response_ignores_retry_after_when_toggled() {
+        let mut config = Config::default();
+        config.rate_limit_cooldown_min_secs = 15;
+        config.rate_limit_cooldown_max_secs = 30;
+        config.rate_limit_ignore_retry_after = true;
+        let credentials = KiroCredentials::default();
+        let provider = create_test_provider(config, credentials);
+
+        // 上游说要等 7200 秒，应被忽略；冷却必须落在 [15, 30]
+        for _ in 0..20 {
+            let cooldown = provider.handle_rate_limited_response(
+                1,
+                "Too many requests",
+                Some(Duration::from_secs(7200)),
+            );
+            assert!(
+                cooldown >= Duration::from_secs(15) && cooldown <= Duration::from_secs(30),
+                "cooldown {} 应在 [15, 30] 内",
+                cooldown.as_secs()
+            );
+        }
+    }
+
+    /// 回归：没有 Retry-After 时，普通 429 必须用配置的 min（之前会走
+    /// CooldownManager 默认的 60s + 1.5 倍递增，完全无视配置）
+    #[test]
+    fn test_handle_rate_limited_response_uses_configured_min_when_no_retry_after() {
+        let mut config = Config::default();
+        config.rate_limit_cooldown_min_secs = 15;
+        config.rate_limit_cooldown_max_secs = 30;
+        let credentials = KiroCredentials::default();
+        let provider = create_test_provider(config, credentials);
+
+        // 连续触发 5 次都应该是 15s，不会按 1.5 倍递增超过配置
+        for _ in 0..5 {
+            let cooldown = provider.handle_rate_limited_response(1, "Too many requests", None);
+            assert_eq!(cooldown, Duration::from_secs(15));
+        }
     }
 
     #[test]

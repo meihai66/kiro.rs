@@ -164,6 +164,12 @@ pub struct Config {
     #[serde(default = "default_capacity_pressure_cooldown_secs")]
     pub capacity_pressure_cooldown_secs: u64,
 
+    /// 是否忽略上游 Retry-After，直接在 [min, max] 内随机出冷却时长。
+    /// 默认 false（仍优先尊重上游）。开启后避开上游"被限号"集体长冷却的问题。
+    /// 仅作用于普通 429；容量类 429（INSUFFICIENT_MODEL_CAPACITY）仍走 capacity 短冷却。
+    #[serde(default)]
+    pub rate_limit_ignore_retry_after: bool,
+
     /// 错误日志总开关（关闭后不写库；接口仍可读历史日志）
     #[serde(default = "default_true")]
     pub error_log_enabled: bool,
@@ -456,6 +462,7 @@ impl Default for Config {
             rate_limit_cooldown_min_secs: default_rate_limit_cooldown_min_secs(),
             rate_limit_cooldown_max_secs: default_rate_limit_cooldown_max_secs(),
             capacity_pressure_cooldown_secs: default_capacity_pressure_cooldown_secs(),
+            rate_limit_ignore_retry_after: false,
             error_log_enabled: true,
             error_log_max_count: default_error_log_max_count(),
             error_log_max_age_days: default_error_log_max_age_days(),

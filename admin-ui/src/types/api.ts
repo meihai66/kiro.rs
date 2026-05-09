@@ -599,6 +599,7 @@ export interface GlobalConfigResponse {
   rateLimitCooldownMinSecs: number
   rateLimitCooldownMaxSecs: number
   capacityPressureCooldownSecs: number
+  rateLimitIgnoreRetryAfter: boolean
   errorLogEnabled: boolean
   errorLogMaxCount: number
   errorLogMaxAgeDays: number
@@ -637,6 +638,7 @@ export interface UpdateGlobalConfigRequest {
   rateLimitCooldownMinSecs?: number
   rateLimitCooldownMaxSecs?: number
   capacityPressureCooldownSecs?: number
+  rateLimitIgnoreRetryAfter?: boolean
   errorLogEnabled?: boolean
   errorLogMaxCount?: number
   errorLogMaxAgeDays?: number

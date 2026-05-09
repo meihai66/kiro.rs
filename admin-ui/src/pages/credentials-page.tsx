@@ -32,6 +32,7 @@ import {
   setCredentialAllowOveruse as setCredentialAllowOveruseApi,
   setCredentialDisabled as setCredentialDisabledApi,
   setCredentialPriority as setCredentialPriorityApi,
+  setCredentialRpm as setCredentialRpmApi,
   setOveragePreference,
 } from '@/api/credentials'
 import {
@@ -45,6 +46,7 @@ type BatchAction =
   | 'enable'
   | 'disable'
   | 'setPriority'
+  | 'setRpm'
   | 'overageOn'
   | 'overageOff'
   | 'allowOveruseOn'
@@ -771,6 +773,8 @@ export function CredentialsPage() {
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({})
   const [batchAction, setBatchAction] = useState<BatchAction>('enable')
   const [batchPriorityValue, setBatchPriorityValue] = useState(0)
+  // 批量 RPM 输入：空 / 0 都视为「清除覆盖（沿用全局）」
+  const [batchRpmValue, setBatchRpmValue] = useState('')
   const [rangeStart, setRangeStart] = useState('')
   const [rangeEnd, setRangeEnd] = useState('')
   const [visibleRows, setVisibleRows] = useState<CredentialStatusItem[]>([])
@@ -1270,6 +1274,18 @@ export function CredentialsPage() {
     else toast.warning(`成功 ${ok}，失败 ${fail}`)
   }
 
+  // 批量改 RPM 上限（rpm = null 表示清除覆盖，沿用全局）
+  const handleBatchSetRpm = async (rpm: number | null) => {
+    if (selectedIds.length === 0) return
+    const { ok, fail } = await runBatchConcurrent(selectedIds, (id) =>
+      setCredentialRpmApi(id, rpm)
+    )
+    queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    const label = rpm && rpm > 0 ? `RPM=${rpm}` : '清除 RPM 覆盖'
+    if (fail === 0) toast.success(`已对 ${ok} 个凭据${label === '清除 RPM 覆盖' ? '' : '设置'}${label}`)
+    else toast.warning(`成功 ${ok}，失败 ${fail}`)
+  }
+
   const [batchRunning, setBatchRunning] = useState(false)
   const runBatchAction = async () => {
     if (batchRunning) return
@@ -1289,6 +1305,12 @@ export function CredentialsPage() {
         case 'setPriority':
           await handleBatchSetPriority(batchPriorityValue)
           break
+        case 'setRpm': {
+          const trimmed = batchRpmValue.trim()
+          const n = trimmed ? parseInt(trimmed, 10) : 0
+          await handleBatchSetRpm(Number.isFinite(n) && n > 0 ? n : null)
+          break
+        }
         case 'overageOn':
           await handleBatchSetOverage('ENABLED')
           break
@@ -1477,49 +1499,48 @@ export function CredentialsPage() {
       {/* 顶栏 */}
       <div className="flex items-center justify-between mb-3 gap-3 flex-wrap shrink-0">
         <div className="flex items-center gap-2 flex-wrap">
-          <h1 className="text-2xl font-semibold mr-1">凭据管理</h1>
           {/* 统计框：总数 / 可用 / 成功率 / 成功 / 失败 */}
-          <div className="inline-flex items-center gap-3 rounded-md border bg-card px-2.5 py-1 text-xs">
-            <span className="inline-flex items-center gap-1">
+          <div className="inline-flex items-center gap-4 rounded-md border bg-card px-4 py-2 text-sm">
+            <span className="inline-flex items-center gap-1.5">
               <span className="text-muted-foreground">总数</span>
-              <span className="font-mono font-medium tabular-nums">
+              <span className="font-mono font-semibold tabular-nums">
                 {data?.total ?? 0}
               </span>
             </span>
-            <span className="h-3 w-px bg-border" />
-            <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-400">
+            <span className="h-4 w-px bg-border" />
+            <span className="inline-flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400">
               <span className="text-muted-foreground">可用</span>
-              <span className="font-mono font-medium tabular-nums">
+              <span className="font-mono font-semibold tabular-nums">
                 {data?.available ?? 0}
               </span>
             </span>
-            <span className="h-3 w-px bg-border" />
-            <span className="inline-flex items-center gap-1">
+            <span className="h-4 w-px bg-border" />
+            <span className="inline-flex items-center gap-1.5">
               <span className="text-muted-foreground">成功率</span>
-              <span className="font-mono font-medium tabular-nums">
+              <span className="font-mono font-semibold tabular-nums">
                 {statsSummary && statsSummary.totalRequests > 0
                   ? `${((statsSummary.totalSuccess / statsSummary.totalRequests) * 100).toFixed(1)}%`
                   : '—'}
               </span>
             </span>
-            <span className="h-3 w-px bg-border" />
-            <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-400">
+            <span className="h-4 w-px bg-border" />
+            <span className="inline-flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400">
               <span className="text-muted-foreground">成功</span>
-              <span className="font-mono font-medium tabular-nums">
+              <span className="font-mono font-semibold tabular-nums">
                 {statsSummary?.totalSuccess ?? 0}
               </span>
             </span>
-            <span className="h-3 w-px bg-border" />
+            <span className="h-4 w-px bg-border" />
             <span
               className={
-                'inline-flex items-center gap-1 ' +
+                'inline-flex items-center gap-1.5 ' +
                 ((statsSummary?.totalFail ?? 0) > 0
                   ? 'text-rose-700 dark:text-rose-400'
                   : 'text-muted-foreground')
               }
             >
               <span className="text-muted-foreground">失败</span>
-              <span className="font-mono font-medium tabular-nums">
+              <span className="font-mono font-semibold tabular-nums">
                 {statsSummary?.totalFail ?? 0}
               </span>
             </span>
@@ -1924,6 +1945,7 @@ export function CredentialsPage() {
           <option value="enable">启用</option>
           <option value="disable">禁用</option>
           <option value="setPriority">改优先级</option>
+          <option value="setRpm">改 RPM 上限</option>
           <option value="overageOn">账号超额开</option>
           <option value="overageOff">账号超额关</option>
           <option value="allowOveruseOn">允许超额:开</option>
@@ -1942,6 +1964,17 @@ export function CredentialsPage() {
               setBatchPriorityValue(Math.max(0, Number(e.target.value) || 0))
             }
             className="h-7 w-20 text-xs"
+          />
+        )}
+        {batchAction === 'setRpm' && (
+          <Input
+            type="number"
+            min={0}
+            placeholder="留空=清除"
+            value={batchRpmValue}
+            onChange={(e) => setBatchRpmValue(e.target.value)}
+            className="h-7 w-24 text-xs"
+            title="RPM 上限；留空 / 0 表示清除覆盖，沿用全局值"
           />
         )}
         <Button

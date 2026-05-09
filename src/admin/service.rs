@@ -1824,6 +1824,7 @@ impl AdminService {
             rate_limit_cooldown_min_secs: config.rate_limit_cooldown_min_secs,
             rate_limit_cooldown_max_secs: config.rate_limit_cooldown_max_secs,
             capacity_pressure_cooldown_secs: config.capacity_pressure_cooldown_secs,
+            rate_limit_ignore_retry_after: config.rate_limit_ignore_retry_after,
             error_log_enabled: config.error_log_enabled,
             error_log_max_count: config.error_log_max_count,
             error_log_max_age_days: config.error_log_max_age_days,
@@ -1986,6 +1987,10 @@ impl AdminService {
                     ));
                 }
                 config.capacity_pressure_cooldown_secs = v;
+            }
+
+            if let Some(v) = req.rate_limit_ignore_retry_after {
+                config.rate_limit_ignore_retry_after = v;
             }
 
             if let Some(v) = req.error_log_enabled {
@@ -2766,6 +2771,7 @@ mod tests {
             rate_limit_cooldown_min_secs: None,
             rate_limit_cooldown_max_secs: None,
             capacity_pressure_cooldown_secs: None,
+            rate_limit_ignore_retry_after: None,
             error_log_enabled: None,
             error_log_max_count: None,
             error_log_max_age_days: None,
@@ -2805,6 +2811,7 @@ mod tests {
             rate_limit_cooldown_min_secs: None,
             rate_limit_cooldown_max_secs: None,
             capacity_pressure_cooldown_secs: None,
+            rate_limit_ignore_retry_after: None,
             error_log_enabled: None,
             error_log_max_count: None,
             error_log_max_age_days: None,
@@ -2843,6 +2850,7 @@ mod tests {
             rate_limit_cooldown_min_secs: None,
             rate_limit_cooldown_max_secs: None,
             capacity_pressure_cooldown_secs: None,
+            rate_limit_ignore_retry_after: None,
             error_log_enabled: None,
             error_log_max_count: None,
             error_log_max_age_days: None,
@@ -2881,6 +2889,7 @@ mod tests {
             rate_limit_cooldown_min_secs: None,
             rate_limit_cooldown_max_secs: None,
             capacity_pressure_cooldown_secs: None,
+            rate_limit_ignore_retry_after: None,
             error_log_enabled: None,
             error_log_max_count: None,
             error_log_max_age_days: None,
@@ -2916,6 +2925,7 @@ mod tests {
             rate_limit_cooldown_min_secs: None,
             rate_limit_cooldown_max_secs: None,
             capacity_pressure_cooldown_secs: None,
+            rate_limit_ignore_retry_after: None,
             error_log_enabled: None,
             error_log_max_count: None,
             error_log_max_age_days: None,

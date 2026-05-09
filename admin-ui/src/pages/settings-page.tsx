@@ -69,6 +69,8 @@ export function SettingsPage() {
   const [rateLimitCooldownMin, setRateLimitCooldownMin] = useState('60')
   const [rateLimitCooldownMax, setRateLimitCooldownMax] = useState('300')
   const [capacityPressureCooldown, setCapacityPressureCooldown] = useState('8')
+  const [rateLimitIgnoreRetryAfter, setRateLimitIgnoreRetryAfter] =
+    useState(false)
 
   // 错误日志
   const [errorLogEnabled, setErrorLogEnabled] = useState(true)
@@ -117,6 +119,9 @@ export function SettingsPage() {
       setRateLimitCooldownMax(String(globalConfig.rateLimitCooldownMaxSecs ?? 300))
       setCapacityPressureCooldown(
         String(globalConfig.capacityPressureCooldownSecs ?? 8)
+      )
+      setRateLimitIgnoreRetryAfter(
+        globalConfig.rateLimitIgnoreRetryAfter ?? false
       )
       setErrorLogEnabled(globalConfig.errorLogEnabled ?? true)
       setErrorLogMaxCount(String(globalConfig.errorLogMaxCount ?? 50000))
@@ -251,6 +256,14 @@ export function SettingsPage() {
       parseInt(balanceAutoRefreshSecs, 10) || 0
     )
     if (newBalanceAutoRefreshSecs !== (globalConfig?.balanceAutoRefreshSecs ?? 0)) {
+      // 范围校验：合法值是 0 或 60~86400。后端拒收非法值；这里前置拦截避免静默 400。
+      if (
+        newBalanceAutoRefreshSecs !== 0 &&
+        (newBalanceAutoRefreshSecs < 60 || newBalanceAutoRefreshSecs > 86_400)
+      ) {
+        toast.error('余额自动刷新周期应为 0（禁用）或 60~86400 秒')
+        return
+      }
       globalPayload.balanceAutoRefreshSecs = newBalanceAutoRefreshSecs
       hasGlobalChanges = true
     }
@@ -268,6 +281,14 @@ export function SettingsPage() {
     const newCapCool = Math.max(1, parseInt(capacityPressureCooldown, 10) || 8)
     if (newCapCool !== (globalConfig?.capacityPressureCooldownSecs ?? 8)) {
       globalPayload.capacityPressureCooldownSecs = newCapCool
+      hasGlobalChanges = true
+    }
+
+    if (
+      rateLimitIgnoreRetryAfter !==
+      (globalConfig?.rateLimitIgnoreRetryAfter ?? false)
+    ) {
+      globalPayload.rateLimitIgnoreRetryAfter = rateLimitIgnoreRetryAfter
       hasGlobalChanges = true
     }
 
@@ -545,6 +566,22 @@ export function SettingsPage() {
                   setCapacityPressureCooldown,
                   '默认 8，范围 1~600'
                 )}
+              </div>
+              <div className="flex items-center justify-between pt-2 border-t">
+                <div>
+                  <label className="text-sm font-medium">
+                    忽略上游 Retry-After
+                  </label>
+                  <p className="text-xs text-muted-foreground">
+                    开启后普通 429 直接在 [最短, 最长] 内随机出冷却时长，
+                    不再尊重上游头。容量瓶颈型 429 仍走容量短冷却。
+                  </p>
+                </div>
+                <Switch
+                  checked={rateLimitIgnoreRetryAfter}
+                  onCheckedChange={setRateLimitIgnoreRetryAfter}
+                  disabled={isPending}
+                />
               </div>
             </CardContent>
           </Card>
