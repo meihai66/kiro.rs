@@ -38,7 +38,7 @@ function App() {
       <BrowserRouter basename="/admin">
         <Routes>
           <Route element={<AdminShell onLogout={handleLogout} />}>
-            <Route path="/" element={<Navigate to="/credentials" replace />} />
+            <Route path="/" element={<Navigate to="/stats" replace />} />
             <Route path="/credentials" element={<CredentialsPage />} />
             <Route path="/proxies" element={<ProxiesPage />} />
             <Route path="/api-keys" element={<ApiKeysPage />} />
@@ -46,7 +46,7 @@ function App() {
             <Route path="/stats" element={<StatsPage />} />
             <Route path="/error-logs" element={<ErrorLogsPage />} />
             <Route path="/settings" element={<SettingsPage />} />
-            <Route path="*" element={<Navigate to="/credentials" replace />} />
+            <Route path="*" element={<Navigate to="/stats" replace />} />
           </Route>
         </Routes>
       </BrowserRouter>

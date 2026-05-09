@@ -10,11 +10,11 @@ interface AdminShellProps {
 }
 
 const TABS = [
+  { to: '/stats', label: '统计', icon: BarChart3 },
   { to: '/credentials', label: '凭据', icon: Users },
   { to: '/proxies', label: '代理池', icon: Shield },
   { to: '/api-keys', label: '密钥', icon: KeyRound },
   { to: '/model-coverage', label: '模型', icon: BrainCircuit },
-  { to: '/stats', label: '统计', icon: BarChart3 },
   { to: '/error-logs', label: '错误日志', icon: AlertTriangle },
   { to: '/settings', label: '设置', icon: SettingsIcon },
 ]
