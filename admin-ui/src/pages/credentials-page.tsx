@@ -726,10 +726,10 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
               }
             >
               {c.overageStatus === 'ENABLED'
-                ? '超额开'
+                ? '关超额'
                 : c.overageStatus === 'DISABLED'
-                  ? '超额关'
-                  : '超额?'}
+                  ? '开超额'
+                  : '开超额'}
             </button>
             <Button
               size="sm"
@@ -786,8 +786,9 @@ export function CredentialsPage() {
   )
   const [overuseFilter, setOveruseFilter] = useState<'' | 'on' | 'off'>('')
   // 上游账号侧 overageStatus 筛选：ENABLED / DISABLED / unknown
+  // 桶简化为 ENABLED / DISABLED；DISABLED 包含 null/未知（按用户意愿）
   const [accountOverageFilter, setAccountOverageFilter] = useState<
-    Set<'ENABLED' | 'DISABLED' | 'unknown'>
+    Set<'ENABLED' | 'DISABLED'>
   >(() => new Set())
 
   const toggleStatusFilter = (v: StatusFilter) => {
@@ -945,17 +946,15 @@ export function CredentialsPage() {
     return { on, off }
   }, [allCredentials])
 
-  // 上游账号 overageStatus 计数
+  // 上游账号 overageStatus 计数（unknown 与 DISABLED 合并到"关"）
   const accountOverageCountMap = useMemo(() => {
     let enabled = 0
-    let disabled = 0
-    let unknown = 0
+    let disabled = 0 // 含 unknown
     allCredentials.forEach((c) => {
       if (c.overageStatus === 'ENABLED') enabled++
-      else if (c.overageStatus === 'DISABLED') disabled++
-      else unknown++
+      else disabled++
     })
-    return { enabled, disabled, unknown }
+    return { enabled, disabled }
   }, [allCredentials])
 
   // 应用筛选（多选 OR：空集合表示全部）
@@ -982,14 +981,10 @@ export function CredentialsPage() {
       // 允许超额：on/off 单选
       if (overuseFilter === 'on' && !c.allowOveruse) return false
       if (overuseFilter === 'off' && c.allowOveruse) return false
-      // 上游账号 overageStatus：选中的任一桶命中即通过
+      // 上游账号 overageStatus：选中的任一桶命中即通过；unknown 归为 "关(DISABLED)"
       if (accountOverageFilter.size > 0) {
-        const bucket: 'ENABLED' | 'DISABLED' | 'unknown' =
-          c.overageStatus === 'ENABLED'
-            ? 'ENABLED'
-            : c.overageStatus === 'DISABLED'
-              ? 'DISABLED'
-              : 'unknown'
+        const bucket: 'ENABLED' | 'DISABLED' =
+          c.overageStatus === 'ENABLED' ? 'ENABLED' : 'DISABLED'
         if (!accountOverageFilter.has(bucket)) return false
       }
       return true
@@ -1740,11 +1735,6 @@ export function CredentialsPage() {
                   value: 'DISABLED' as const,
                   label: '关',
                   count: accountOverageCountMap.disabled,
-                },
-                {
-                  value: 'unknown' as const,
-                  label: '未知',
-                  count: accountOverageCountMap.unknown,
                 },
               ]
             ).map((opt, i) => {
