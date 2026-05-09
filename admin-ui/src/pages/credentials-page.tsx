@@ -786,6 +786,10 @@ export function CredentialsPage() {
   )
   const [authFilters, setAuthFilters] = useState<Set<string>>(() => new Set())
   const [overuseFilter, setOveruseFilter] = useState<'' | 'on' | 'off'>('')
+  // 上游账号侧 overageStatus 筛选：ENABLED / DISABLED / unknown
+  const [accountOverageFilter, setAccountOverageFilter] = useState<
+    Set<'ENABLED' | 'DISABLED' | 'unknown'>
+  >(() => new Set())
 
   const toggleStatusFilter = (v: StatusFilter) => {
     setStatusFilters((prev) => {
@@ -967,6 +971,19 @@ export function CredentialsPage() {
     return { on, off }
   }, [allCredentials])
 
+  // 上游账号 overageStatus 计数
+  const accountOverageCountMap = useMemo(() => {
+    let enabled = 0
+    let disabled = 0
+    let unknown = 0
+    allCredentials.forEach((c) => {
+      if (c.overageStatus === 'ENABLED') enabled++
+      else if (c.overageStatus === 'DISABLED') disabled++
+      else unknown++
+    })
+    return { enabled, disabled, unknown }
+  }, [allCredentials])
+
   // 应用筛选（多选 OR：空集合表示全部）
   const credentials = useMemo(() => {
     return allCredentials.filter((c) => {
@@ -995,6 +1012,16 @@ export function CredentialsPage() {
       // 允许超额：on/off 单选
       if (overuseFilter === 'on' && !c.allowOveruse) return false
       if (overuseFilter === 'off' && c.allowOveruse) return false
+      // 上游账号 overageStatus：选中的任一桶命中即通过
+      if (accountOverageFilter.size > 0) {
+        const bucket: 'ENABLED' | 'DISABLED' | 'unknown' =
+          c.overageStatus === 'ENABLED'
+            ? 'ENABLED'
+            : c.overageStatus === 'DISABLED'
+              ? 'DISABLED'
+              : 'unknown'
+        if (!accountOverageFilter.has(bucket)) return false
+      }
       return true
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1005,6 +1032,7 @@ export function CredentialsPage() {
     priorityFilters,
     authFilters,
     overuseFilter,
+    accountOverageFilter,
     cachedBalanceMap,
     liveBalances,
   ])
@@ -1709,9 +1737,14 @@ export function CredentialsPage() {
           </div>
         )}
 
-        {/* 允许超额 */}
+        {/* 允许超额（凭据级开关） */}
         <div className="flex items-center gap-1">
-          <span className="text-muted-foreground mr-1">允许超额</span>
+          <span
+            className="text-muted-foreground mr-1"
+            title="本服务是否在余额耗尽时主动禁用（凭据级开关）"
+          >
+            允许超额
+          </span>
           <div className="inline-flex rounded-md border overflow-hidden">
             {(
               [
@@ -1754,6 +1787,70 @@ export function CredentialsPage() {
           </div>
         </div>
 
+        {/* 账号超额（上游账号侧 overageStatus） */}
+        <div className="flex items-center gap-1">
+          <span
+            className="text-muted-foreground mr-1"
+            title="上游账号 overageStatus（Kiro 侧账号是否允许产生超额账单）"
+          >
+            账号超额
+          </span>
+          <div className="inline-flex rounded-md border overflow-hidden">
+            {(
+              [
+                {
+                  value: 'ENABLED' as const,
+                  label: '开',
+                  count: accountOverageCountMap.enabled,
+                },
+                {
+                  value: 'DISABLED' as const,
+                  label: '关',
+                  count: accountOverageCountMap.disabled,
+                },
+                {
+                  value: 'unknown' as const,
+                  label: '未知',
+                  count: accountOverageCountMap.unknown,
+                },
+              ]
+            ).map((opt, i) => {
+              const active = accountOverageFilter.has(opt.value)
+              return (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => {
+                    setAccountOverageFilter((prev) => {
+                      const next = new Set(prev)
+                      if (next.has(opt.value)) next.delete(opt.value)
+                      else next.add(opt.value)
+                      return next
+                    })
+                  }}
+                  className={
+                    'h-7 px-3 text-xs transition-colors ' +
+                    (i > 0 ? 'border-l ' : '') +
+                    (active
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-background hover:bg-muted')
+                  }
+                >
+                  {opt.label}
+                  <span
+                    className={
+                      'ml-1 text-[10px] ' +
+                      (active ? 'opacity-90' : 'text-muted-foreground')
+                    }
+                  >
+                    ({opt.count})
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+        </div>
+
         <span className="text-muted-foreground">
           匹配 {credentials.length} / 共 {allCredentials.length}
         </span>
@@ -1761,7 +1858,8 @@ export function CredentialsPage() {
           usageLimitFilters.size > 0 ||
           priorityFilters.size > 0 ||
           authFilters.size > 0 ||
-          overuseFilter !== '') && (
+          overuseFilter !== '' ||
+          accountOverageFilter.size > 0) && (
           <Button
             size="sm"
             variant="ghost"
@@ -1772,6 +1870,7 @@ export function CredentialsPage() {
               setPriorityFilters(new Set())
               setAuthFilters(new Set())
               setOveruseFilter('')
+              setAccountOverageFilter(new Set())
             }}
           >
             清除筛选
