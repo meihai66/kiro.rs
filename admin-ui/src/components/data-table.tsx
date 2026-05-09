@@ -9,7 +9,7 @@ import {
   getSortedRowModel,
   useReactTable,
 } from '@tanstack/react-table'
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import {
   Table,
@@ -137,47 +137,40 @@ export function DataTable<TData>({
     data,
   ])
 
-  // 表格内部滚动：高度 = 视口剩余 - 底部分页栏 - 边距
-  // 不固定一个 calc 值，因为不同页面表格上方的过滤/标题占位高度不一样
-  const scrollRef = useRef<HTMLDivElement>(null)
-  const footerRef = useRef<HTMLDivElement>(null)
-  const [scrollMaxHeight, setScrollMaxHeight] = useState<number | null>(null)
-
-  useLayoutEffect(() => {
-    if (typeof window === 'undefined') return
-    const recalc = () => {
-      const el = scrollRef.current
-      if (!el) return
-      const top = el.getBoundingClientRect().top
-      const footerH = footerRef.current?.getBoundingClientRect().height ?? 0
-      // 留 16px 给页面底部 padding
-      const available = window.innerHeight - top - footerH - 16
-      setScrollMaxHeight(Math.max(240, Math.floor(available)))
-    }
-    recalc()
-    window.addEventListener('resize', recalc)
-    window.addEventListener('scroll', recalc, { passive: true })
-    const ro = new ResizeObserver(recalc)
-    if (scrollRef.current) ro.observe(scrollRef.current)
-    // 监听上方过滤/标题区高度变化（其会改变 scrollRef 的 top）
-    if (scrollRef.current?.parentElement) {
-      ro.observe(scrollRef.current.parentElement)
-    }
-    return () => {
-      window.removeEventListener('resize', recalc)
-      window.removeEventListener('scroll', recalc)
-      ro.disconnect()
-    }
-  }, [])
-
   return (
-    <div className="space-y-3">
+    <div className="flex flex-col flex-1 min-h-0 gap-2">
+      {/* 顶部工具栏：与"全选当前页"行一齐，分页选择放这里 */}
+      <div className="flex items-center justify-between text-sm text-muted-foreground shrink-0">
+        <div>
+          共 {table.getFilteredRowModel().rows.length} 条
+          {table.getSelectedRowModel().rows.length > 0 && (
+            <span className="ml-2">
+              · 已选 {table.getSelectedRowModel().rows.length}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-1">
+          <PageNumbers
+            pageIndex={table.getState().pagination.pageIndex}
+            pageCount={Math.max(table.getPageCount(), 1)}
+            onChange={(idx) => table.setPageIndex(idx)}
+          />
+          <select
+            className="ml-2 h-8 rounded border bg-background px-2 text-xs"
+            value={table.getState().pagination.pageSize}
+            onChange={(e) => table.setPageSize(Number(e.target.value))}
+          >
+            {[20, 50, 100, 200, 500, 1000].map((s) => (
+              <option key={s} value={s}>
+                每页 {s}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
       <div
-        ref={scrollRef}
-        className="rounded-md border overflow-auto"
-        style={
-          scrollMaxHeight ? { maxHeight: scrollMaxHeight } : undefined
-        }
+        className="rounded-md border overflow-auto flex-1 min-h-0"
       >
         <Table>
           <TableHeader className="sticky top-0 z-10 bg-background">
@@ -229,38 +222,6 @@ export function DataTable<TData>({
             )}
           </TableBody>
         </Table>
-      </div>
-
-      <div
-        ref={footerRef}
-        className="flex items-center justify-between text-sm text-muted-foreground"
-      >
-        <div>
-          共 {table.getFilteredRowModel().rows.length} 条
-          {table.getSelectedRowModel().rows.length > 0 && (
-            <span className="ml-2">
-              · 已选 {table.getSelectedRowModel().rows.length}
-            </span>
-          )}
-        </div>
-        <div className="flex items-center gap-1">
-          <PageNumbers
-            pageIndex={table.getState().pagination.pageIndex}
-            pageCount={Math.max(table.getPageCount(), 1)}
-            onChange={(idx) => table.setPageIndex(idx)}
-          />
-          <select
-            className="ml-2 h-8 rounded border bg-background px-2 text-xs"
-            value={table.getState().pagination.pageSize}
-            onChange={(e) => table.setPageSize(Number(e.target.value))}
-          >
-            {[20, 50, 100, 200, 500, 1000].map((s) => (
-              <option key={s} value={s}>
-                每页 {s}
-              </option>
-            ))}
-          </select>
-        </div>
       </div>
     </div>
   )

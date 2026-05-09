@@ -1473,9 +1473,9 @@ export function CredentialsPage() {
   }
 
   return (
-    <>
+    <div className="flex flex-col flex-1 min-h-0">
       {/* 顶栏 */}
-      <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
+      <div className="flex items-center justify-between mb-3 gap-3 flex-wrap shrink-0">
         <div className="flex items-center gap-2 flex-wrap">
           <h1 className="text-2xl font-semibold mr-1">凭据管理</h1>
           {/* 统计框：总数 / 可用 / 成功率 / 成功 / 失败 */}
@@ -1580,7 +1580,7 @@ export function CredentialsPage() {
       </div>
 
       {/* 筛选条 — 多选连续按钮组 */}
-      <div className="mb-3 flex flex-wrap items-center gap-3 text-xs">
+      <div className="mb-3 flex flex-wrap items-center gap-3 text-xs shrink-0">
         <div className="flex items-center gap-1">
           <span className="text-muted-foreground mr-1">状态</span>
           <div className="inline-flex rounded-md border overflow-hidden">
@@ -1828,7 +1828,7 @@ export function CredentialsPage() {
       </div>
 
       {/* 快捷选择 + 选中工具栏 */}
-      <div className="mb-3 flex flex-wrap items-center gap-2 rounded-md border bg-muted/30 px-3 py-2">
+      <div className="mb-3 flex flex-wrap items-center gap-2 rounded-md border bg-muted/30 px-3 py-2 shrink-0">
         <Button
           size="sm"
           variant="ghost"
@@ -2065,6 +2065,6 @@ export function CredentialsPage() {
           if (!open) setBindProxyId(null)
         }}
       />
-    </>
+    </div>
   )
 }

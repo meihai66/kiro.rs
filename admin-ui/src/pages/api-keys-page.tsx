@@ -241,8 +241,8 @@ export function ApiKeysPage() {
   )
 
   return (
-    <>
-      <div className="flex items-center justify-between mb-4">
+    <div className="flex flex-col flex-1 min-h-0">
+      <div className="flex items-center justify-between mb-4 shrink-0">
         <h1 className="text-2xl font-semibold">API Keys</h1>
         <div className="flex items-center gap-2">
           <Button variant="ghost" size="icon" onClick={() => refetch()}>
@@ -289,7 +289,7 @@ export function ApiKeysPage() {
           if (!open) setRevealKey(null)
         }}
       />
-    </>
+    </div>
   )
 }
 

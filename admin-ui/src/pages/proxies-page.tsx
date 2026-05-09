@@ -397,9 +397,9 @@ export function ProxiesPage() {
   const enabled = data?.enabled ?? false
 
   return (
-    <>
+    <div className="flex flex-col flex-1 min-h-0">
       {/* 顶栏 */}
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex items-center justify-between mb-4 shrink-0">
         <div className="flex items-center gap-3">
           <h1 className="text-2xl font-semibold">代理池</h1>
           {!enabled && (
@@ -637,7 +637,7 @@ export function ProxiesPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </>
+    </div>
   )
 }
 
