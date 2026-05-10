@@ -424,12 +424,14 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
       cell: ({ row }) => {
         const c = row.original
         const cls = classifyCredential(c)
+        // 状态列固定窄宽，长 reason 截断、悬浮看 title
+        const wrap = 'inline-block max-w-[112px] truncate align-middle'
         if (cls === 'disabled') {
           return (
             <Badge
               variant="destructive"
-              className="text-xs"
-              title={c.disabledReason ?? undefined}
+              className={`text-xs ${wrap}`}
+              title={c.disabledReason ?? '已禁用'}
             >
               已禁用{c.disabledReason ? ` · ${c.disabledReason}` : ''}
             </Badge>
@@ -439,7 +441,7 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
           const remaining = c.cooldownRemainingSecs ?? 0
           return (
             <Badge
-              className="bg-yellow-500/15 text-yellow-700 dark:text-yellow-400 text-xs"
+              className={`bg-yellow-500/15 text-yellow-700 dark:text-yellow-400 text-xs ${wrap}`}
               title={`429 限流冷却中，剩余约 ${remaining}s`}
             >
               限流 · {remaining}s
@@ -453,7 +455,7 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
             parts.push(`刷 ${c.refreshFailureCount}`)
           return (
             <Badge
-              className="bg-red-500/15 text-red-700 dark:text-red-400 text-xs"
+              className={`bg-red-500/15 text-red-700 dark:text-red-400 text-xs ${wrap}`}
               title="连续失败计数，成功一次后自动清零"
             >
               失败 · {parts.join(' / ')}

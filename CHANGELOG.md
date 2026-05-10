@@ -1,5 +1,10 @@
 # Changelog
 
+## [v1.1.44] - 2026-05-10
+
+### Changed
+- **凭据页状态列固定窄宽 + 长 reason 截断悬浮显示** — 「已禁用 / 限流 / 失败」三种状态 Badge 加 `inline-block max-w-[112px] truncate align-middle`，避免超长 `disabledReason` 把状态列撑开影响其他列布局；完整原因移到 `title` 悬浮 tooltip 中查看；已禁用无 reason 时 tooltip 默认显示「已禁用」(`admin-ui/src/pages/credentials-page.tsx`)
+
 ## [v1.1.43] - 2026-05-10
 
 ### Changed
