@@ -1,5 +1,11 @@
 # Changelog
 
+## [v1.1.46] - 2026-05-11
+
+### 新增
+
+- **凭据列表表头三态排序** — DataTable 表头加三态排序触发（默认 ↕ / 升 ↑ / 降 ↓），仅可排序列显示；凭据页启用优先级、状态（异常优先）、已用额度（含超额）、RPM、最后调用列排序，其他列（select、#、统计、认证、代理、操作）显式禁用排序 (`admin-ui/src/components/data-table.tsx`, `admin-ui/src/pages/credentials-page.tsx`)
+
 ## [v1.1.45] - 2026-05-10
 
 ### Changed
