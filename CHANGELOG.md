@@ -1,5 +1,12 @@
 # Changelog
 
+## [v1.1.45] - 2026-05-10
+
+### Changed
+- **默认 TLS 后端切到 native-tls（vendored openssl）** — `tlsBackend` 默认值从 `rustls` 改为 `native-tls`，并通过 Cargo `default = ["native-tls"]` + `reqwest/native-tls-vendored` 静态链接 OpenSSL，使出站 ClientHello 的 JA3/JA4 指纹更接近真实 Kiro IDE（Electron + Node OpenSSL）客户端，降低被上游指纹风控的概率；受限环境可 `--no-default-features` 仅保留 rustls (`Cargo.toml`, `src/model/config.rs`)
+- **`http_client::build_client` 显式分支两套 TLS 后端** — `TlsBackend::NativeTls` 走 `use_native_tls()`（仅在 `native-tls` feature 启用时可用），未启用 feature 时直接报错并提示改回 rustls 或重编；避免静默回落到与配置不符的后端 (`src/http_client.rs`)
+- **Dockerfile 调整为 vendored openssl 编译依赖** — 移除 `openssl-dev` / `openssl-libs-static`（系统 openssl 已不再需要），改装 `perl` + `make` 以支持 `openssl-src` 在 musl 下从源码编译 vendored OpenSSL (`Dockerfile`)
+
 ## [v1.1.44] - 2026-05-10
 
 ### Changed

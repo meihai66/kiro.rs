@@ -51,8 +51,25 @@ pub fn build_client(
 ) -> anyhow::Result<Client> {
     let mut builder = Client::builder().timeout(Duration::from_secs(timeout_secs));
 
-    if tls_backend == TlsBackend::Rustls {
-        builder = builder.use_rustls_tls();
+    match tls_backend {
+        TlsBackend::Rustls => {
+            builder = builder.use_rustls_tls();
+        }
+        TlsBackend::NativeTls => {
+            // native-tls + vendored openssl 让 ClientHello 指纹更接近真实 Kiro IDE
+            // 客户端（Electron Node OpenSSL）。仅在编译时启用 native-tls feature 时可用。
+            #[cfg(feature = "native-tls")]
+            {
+                builder = builder.use_native_tls();
+            }
+            #[cfg(not(feature = "native-tls"))]
+            {
+                anyhow::bail!(
+                    "此构建未包含 native-tls 后端（编译时缺 native-tls feature），\
+                     请把配置 tlsBackend 改为 rustls，或重新编译时启用 native-tls"
+                );
+            }
+        }
     }
 
     if let Some(proxy_config) = proxy {

@@ -1,6 +1,6 @@
 [package]
 name = "kiro-rs"
-version = "1.1.44"
+version = "1.1.45"
 edition = "2024"
 
 [profile.release]
@@ -8,7 +8,11 @@ lto = "thin"
 strip = true
 
 [features]
-default = []
+# 默认启用 native-tls（vendored openssl）：让 TLS ClientHello 指纹更接近真实
+# Kiro IDE 客户端（Electron + Node OpenSSL），降低被上游 JA3/JA4 风控的概率。
+# 不能编 openssl 源码的环境可用 `--no-default-features` 关掉，此时只剩 rustls。
+default = ["native-tls"]
+native-tls = ["reqwest/native-tls-vendored"]
 # 显式启用才允许打印潜在敏感信息（仅用于排障）
 sensitive-logs = []
 

@@ -1,5 +1,6 @@
 FROM rust:1.93-alpine AS chef
-RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static
+# musl-dev: musl 工具链；perl + make: vendored openssl 编译期需要
+RUN apk add --no-cache musl-dev perl make
 RUN cargo install cargo-chef
 WORKDIR /app
 

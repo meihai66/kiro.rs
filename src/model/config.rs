@@ -287,7 +287,10 @@ fn default_prompt_cache_ttl_seconds() -> u64 {
 }
 
 fn default_tls_backend() -> TlsBackend {
-    TlsBackend::Rustls
+    // 默认 native-tls（vendored openssl）：与真实 Kiro IDE 客户端
+    // （Electron + Node OpenSSL）TLS 指纹更接近，降低 JA3/JA4 风控概率。
+    // 受限环境可改 rustls，但需注意指纹差异。
+    TlsBackend::NativeTls
 }
 
 fn default_true() -> bool {
