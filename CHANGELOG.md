@@ -1,5 +1,14 @@
 # Changelog
 
+## [v1.1.43] - 2026-05-10
+
+### Changed
+- **凭据页表格分页/批量操作工具栏视觉重构** — 分页器从 Button 组件换成原生 `<button>` 拼接的连体按钮组（左右页箭头改为 `ChevronLeft`/`ChevronRight` 图标，省略号带左边框，当前页用 `bg-primary` 高亮）；每页大小选择器加 `Rows3` 图标包成带边框小盒；表头工具栏新增 `headerSlot` 插槽，凭据页搜索框迁移到表格右上而非筛选条上方 (`admin-ui/src/components/data-table.tsx`, `admin-ui/src/pages/credentials-page.tsx`)
+- **批量操作工具栏改为分组连体设计** — 「全选本页 / 反选 / 清空」合并为一个连体按钮组（带 `CheckSquare` / `SquareDot` / `Square` 图标）；「本页范围勾选」独立成带 `Target` 图标的小盒；「批量操作类型 + 参数输入」合并为另一个连体盒（前缀 `ListFilter` 图标 + 「批量」标签）；执行按钮加 `PlayCircle` 图标，已选数量改为带背景的 pill；已选计数改用带 `CheckCircle2` 的 Badge (`admin-ui/src/pages/credentials-page.tsx`)
+
+### Fixed
+- **筛选/搜索变更后批量选中漏打到隐藏行** — 状态 / 超额 / 优先级 / 账号超额 / 搜索关键字任一筛选条件变更时自动清空 `rowSelection`，避免之前选中的行被过滤掉后批量操作仍然作用到它们 (`admin-ui/src/pages/credentials-page.tsx`)
+
 ## [v1.1.42] - 2026-05-10
 
 ### Added

@@ -3,12 +3,18 @@ import {
   Activity,
   BarChart3,
   CheckCircle2,
+  CheckSquare,
   Clock,
   Database,
   Gauge,
   Loader2,
+  ListFilter,
   Percent,
+  PlayCircle,
   Plus,
+  Square,
+  SquareDot,
+  Target,
   TrendingUp,
   Upload,
   Wallet,
@@ -802,7 +808,11 @@ export function CredentialsPage() {
     Set<'ENABLED' | 'DISABLED'>
   >(() => new Set())
 
+  // 任何筛选条件变更都会清空批量选中，避免操作打到被过滤掉的行
+  const clearSelectionOnFilterChange = () => setRowSelection({})
+
   const toggleStatusFilter = (v: StatusFilter) => {
+    clearSelectionOnFilterChange()
     setStatusFilters((prev) => {
       const next = new Set(prev)
       if (next.has(v)) next.delete(v)
@@ -811,6 +821,7 @@ export function CredentialsPage() {
     })
   }
   const toggleUsageLimitFilter = (v: string) => {
+    clearSelectionOnFilterChange()
     setUsageLimitFilters((prev) => {
       const next = new Set(prev)
       if (next.has(v)) next.delete(v)
@@ -819,6 +830,7 @@ export function CredentialsPage() {
     })
   }
   const togglePriorityFilter = (v: number) => {
+    clearSelectionOnFilterChange()
     setPriorityFilters((prev) => {
       const next = new Set(prev)
       if (next.has(v)) next.delete(v)
@@ -1673,13 +1685,6 @@ export function CredentialsPage() {
 
       {/* 筛选条 — 多选连续按钮组 */}
       <div className="mb-3 flex flex-wrap items-center gap-3 text-xs shrink-0">
-        <Input
-          type="search"
-          placeholder="搜索 邮箱 / ID / 订阅"
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          className="h-7 w-56 text-xs"
-        />
         <div className="flex items-center gap-1">
           <span className="text-muted-foreground mr-1">状态</span>
           <div className="inline-flex rounded-md border overflow-hidden">
@@ -1816,9 +1821,10 @@ export function CredentialsPage() {
                 <button
                   key={opt.value}
                   type="button"
-                  onClick={() =>
+                  onClick={() => {
+                    clearSelectionOnFilterChange()
                     setOveruseFilter(active ? '' : (opt.value as 'on' | 'off'))
-                  }
+                  }}
                   className={
                     'h-7 px-3 text-xs transition-colors ' +
                     (i > 0 ? 'border-l ' : '') +
@@ -1871,6 +1877,7 @@ export function CredentialsPage() {
                   key={opt.value}
                   type="button"
                   onClick={() => {
+                    clearSelectionOnFilterChange()
                     setAccountOverageFilter((prev) => {
                       const next = new Set(prev)
                       if (next.has(opt.value)) next.delete(opt.value)
@@ -1929,50 +1936,59 @@ export function CredentialsPage() {
       </div>
 
       {/* 快捷选择 + 选中工具栏 */}
-      <div className="mb-3 flex flex-wrap items-center gap-2 rounded-md border bg-muted/30 px-3 py-2 shrink-0">
-        <Button
-          size="sm"
-          variant="ghost"
-          className="h-7 px-2 text-xs"
-          onClick={() => {
-            const next: RowSelectionState = { ...rowSelection }
-            visibleRows.forEach((c) => {
-              next[String(c.id)] = true
-            })
-            setRowSelection(next)
-          }}
-        >
-          全选当前页
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          className="h-7 px-2 text-xs"
-          onClick={() => {
-            const next: RowSelectionState = { ...rowSelection }
-            visibleRows.forEach((c) => {
-              const k = String(c.id)
-              if (next[k]) delete next[k]
-              else next[k] = true
-            })
-            setRowSelection(next)
-          }}
-        >
-          反选
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          className="h-7 px-2 text-xs"
-          onClick={() => setRowSelection({})}
-          disabled={selectedIds.length === 0}
-        >
-          取消选择
-        </Button>
+      <div className="mb-3 flex flex-wrap items-center gap-3 rounded-md border bg-muted/30 px-3 py-2 shrink-0">
+        {/* === 选择组：全选 / 反选 / 取消（连续按钮 + 范围勾选 + 已选计数） === */}
+        <div className="inline-flex h-8 items-stretch rounded-md border bg-background overflow-hidden shadow-sm">
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 px-2.5 text-xs hover:bg-muted transition-colors"
+            title="勾选当前页全部行"
+            onClick={() => {
+              const next: RowSelectionState = { ...rowSelection }
+              visibleRows.forEach((c) => {
+                next[String(c.id)] = true
+              })
+              setRowSelection(next)
+            }}
+          >
+            <CheckSquare className="h-3.5 w-3.5" />
+            全选本页
+          </button>
+          <span className="w-px bg-border" />
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 px-2.5 text-xs hover:bg-muted transition-colors"
+            title="反转当前页选择状态"
+            onClick={() => {
+              const next: RowSelectionState = { ...rowSelection }
+              visibleRows.forEach((c) => {
+                const k = String(c.id)
+                if (next[k]) delete next[k]
+                else next[k] = true
+              })
+              setRowSelection(next)
+            }}
+          >
+            <SquareDot className="h-3.5 w-3.5" />
+            反选
+          </button>
+          <span className="w-px bg-border" />
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 px-2.5 text-xs hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            title="清空所有勾选"
+            onClick={() => setRowSelection({})}
+            disabled={selectedIds.length === 0}
+          >
+            <Square className="h-3.5 w-3.5" />
+            清空
+          </button>
+        </div>
 
-        {/* 当前页行号范围选（不跨页） */}
-        <div className="flex items-center gap-1 text-xs">
-          <span className="text-muted-foreground">当前页第</span>
+        {/* 当前页范围勾选（独立小盒） */}
+        <div className="inline-flex h-8 items-center gap-1.5 rounded-md border bg-background px-2 text-xs shadow-sm">
+          <Target className="h-3.5 w-3.5 text-muted-foreground" />
+          <span className="text-muted-foreground">本页第</span>
           <Input
             type="number"
             min={1}
@@ -1980,9 +1996,9 @@ export function CredentialsPage() {
             placeholder="起"
             value={rangeStart}
             onChange={(e) => setRangeStart(e.target.value)}
-            className="h-7 w-16 text-xs"
+            className="h-6 w-12 px-1.5 text-xs border-0 bg-muted/40 focus-visible:ring-1"
           />
-          <span className="text-muted-foreground">到</span>
+          <span className="text-muted-foreground">~</span>
           <Input
             type="number"
             min={1}
@@ -1990,79 +2006,89 @@ export function CredentialsPage() {
             placeholder="止"
             value={rangeEnd}
             onChange={(e) => setRangeEnd(e.target.value)}
-            className="h-7 w-16 text-xs"
+            className="h-6 w-12 px-1.5 text-xs border-0 bg-muted/40 focus-visible:ring-1"
             onKeyDown={(e) => {
               if (e.key === 'Enter') applyIdRange()
             }}
           />
           <span className="text-muted-foreground">行</span>
-          <Button
-            size="sm"
-            variant="ghost"
-            className="h-7 px-2 text-xs"
+          <button
+            type="button"
             onClick={applyIdRange}
+            className="ml-0.5 h-6 px-1.5 text-xs rounded hover:bg-muted text-primary font-medium"
           >
             勾选
-          </Button>
+          </button>
         </div>
 
-        <span className="text-sm ml-1">
-          {selectedIds.length > 0 ? (
-            <Badge variant="secondary">已选 {selectedIds.length} 项</Badge>
-          ) : (
-            <span className="text-muted-foreground">未选中</span>
-          )}
-        </span>
+        {/* 已选计数 */}
+        {selectedIds.length > 0 ? (
+          <Badge
+            variant="secondary"
+            className="h-7 gap-1 text-xs px-2.5 font-mono tabular-nums"
+          >
+            <CheckCircle2 className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />
+            已选 {selectedIds.length}
+          </Badge>
+        ) : (
+          <span className="text-xs text-muted-foreground">未选中</span>
+        )}
 
         <span className="flex-1" />
 
-        {/* 批量操作下拉 + 数值输入 + 执行 */}
-        <select
-          value={batchAction}
-          onChange={(e) => setBatchAction(e.target.value as BatchAction)}
-          className="h-7 rounded border bg-background px-2 text-xs"
-        >
-          <option value="enable">启用</option>
-          <option value="disable">禁用</option>
-          <option value="setPriority">改优先级</option>
-          <option value="setRpm">改 RPM 上限</option>
-          <option value="overageOn">账号超额开</option>
-          <option value="overageOff">账号超额关</option>
-          <option value="allowOveruseOn">允许超额:开</option>
-          <option value="allowOveruseOff">允许超额:关</option>
-          <option value="verify">验活</option>
-          <option value="refreshToken">刷新</option>
-          <option value="queryBalance">查余额</option>
-          <option value="delete">删除(仅禁用)</option>
-        </select>
-        {batchAction === 'setPriority' && (
-          <Input
-            type="number"
-            min={0}
-            value={batchPriorityValue}
-            onChange={(e) =>
-              setBatchPriorityValue(Math.max(0, Number(e.target.value) || 0))
-            }
-            className="h-7 w-20 text-xs"
-          />
-        )}
-        {batchAction === 'setRpm' && (
-          <Input
-            type="number"
-            min={0}
-            placeholder="留空=清除"
-            value={batchRpmValue}
-            onChange={(e) => setBatchRpmValue(e.target.value)}
-            className="h-7 w-24 text-xs"
-            title="RPM 上限；留空 / 0 表示清除覆盖，沿用全局值"
-          />
-        )}
+        {/* === 执行组：操作类型 + 参数 + 执行按钮（视觉聚拢，分隔感强） === */}
+        <div className="inline-flex h-8 items-stretch rounded-md border bg-background overflow-hidden shadow-sm">
+          <div className="inline-flex items-center pl-2 pr-1 text-xs text-muted-foreground gap-1 border-r bg-muted/30">
+            <ListFilter className="h-3.5 w-3.5" />
+            批量
+          </div>
+          <select
+            value={batchAction}
+            onChange={(e) => setBatchAction(e.target.value as BatchAction)}
+            className="h-full bg-background px-2 text-xs border-0 focus:outline-none focus:ring-1 focus:ring-ring"
+          >
+            <option value="enable">启用</option>
+            <option value="disable">禁用</option>
+            <option value="setPriority">改优先级</option>
+            <option value="setRpm">改 RPM 上限</option>
+            <option value="overageOn">账号超额开</option>
+            <option value="overageOff">账号超额关</option>
+            <option value="allowOveruseOn">允许超额:开</option>
+            <option value="allowOveruseOff">允许超额:关</option>
+            <option value="verify">验活</option>
+            <option value="refreshToken">刷新</option>
+            <option value="queryBalance">查余额</option>
+            <option value="delete">删除(仅禁用)</option>
+          </select>
+          {batchAction === 'setPriority' && (
+            <Input
+              type="number"
+              min={0}
+              value={batchPriorityValue}
+              onChange={(e) =>
+                setBatchPriorityValue(Math.max(0, Number(e.target.value) || 0))
+              }
+              className="h-full w-20 text-xs border-0 border-l rounded-none focus-visible:ring-1"
+            />
+          )}
+          {batchAction === 'setRpm' && (
+            <Input
+              type="number"
+              min={0}
+              placeholder="留空=清除"
+              value={batchRpmValue}
+              onChange={(e) => setBatchRpmValue(e.target.value)}
+              className="h-full w-24 text-xs border-0 border-l rounded-none focus-visible:ring-1"
+              title="RPM 上限；留空 / 0 表示清除覆盖，沿用全局值"
+            />
+          )}
+        </div>
         <Button
           size="sm"
           variant={batchAction === 'delete' ? 'destructive' : 'default'}
-          className="h-7 px-3 text-xs"
+          className="h-8 px-3 text-xs gap-1 shadow-sm"
           onClick={() => runBatchAction()}
-          disabled={batchRunning}
+          disabled={batchRunning || selectedIds.length === 0}
           title={
             batchRunning
               ? '执行中…'
@@ -2073,15 +2099,16 @@ export function CredentialsPage() {
         >
           {batchRunning ? (
             <>
-              <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
               执行中
             </>
           ) : (
             <>
+              <PlayCircle className="h-3.5 w-3.5" />
               执行
               {selectedIds.length > 0 && (
-                <span className="ml-1 text-[10px] opacity-80">
-                  ({selectedIds.length})
+                <span className="ml-0.5 px-1 rounded bg-primary-foreground/20 text-[10px] tabular-nums font-mono">
+                  {selectedIds.length}
                 </span>
               )}
             </>
@@ -2099,6 +2126,18 @@ export function CredentialsPage() {
         emptyText="暂无凭据，请点击右上角导入或添加"
         onVisibleRowsChange={setVisibleRows}
         paginationStorageKey="credentials-table:pagination"
+        headerSlot={
+          <Input
+            type="search"
+            placeholder="搜索 邮箱 / ID / 订阅"
+            value={searchQuery}
+            onChange={(e) => {
+              clearSelectionOnFilterChange()
+              setSearchQuery(e.target.value)
+            }}
+            className="ml-2 h-8 w-56 text-xs"
+          />
+        }
       />
 
       {verifying && !verifyOpen && (

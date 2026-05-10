@@ -9,8 +9,9 @@ import {
   getSortedRowModel,
   useReactTable,
 } from '@tanstack/react-table'
+import type { ReactNode } from 'react'
 import { useEffect, useState } from 'react'
-import { Button } from '@/components/ui/button'
+import { ChevronLeft, ChevronRight, Rows3 } from 'lucide-react'
 import {
   Table,
   TableBody,
@@ -33,6 +34,8 @@ interface DataTableProps<TData> {
   /// 用于跨数据刷新持久化分页状态的 storageKey（保存到 sessionStorage）。
   /// 不传则使用本地组件 state（每次组件 unmount 会丢失）。
   paginationStorageKey?: string
+  /// 渲染到顶部工具栏「分页选择」右侧的额外节点（搜索框、视图切换等）
+  headerSlot?: ReactNode
 }
 
 function loadPagination(
@@ -65,6 +68,7 @@ export function DataTable<TData>({
   emptyText = '暂无数据',
   onVisibleRowsChange,
   paginationStorageKey,
+  headerSlot,
 }: DataTableProps<TData>) {
   const [sorting, setSorting] = useState<SortingState>([])
   const [pagination, setPagination] = useState<PaginationState>(() =>
@@ -139,33 +143,45 @@ export function DataTable<TData>({
 
   return (
     <div className="flex flex-col flex-1 min-h-0 gap-2">
-      {/* 顶部工具栏：与"全选当前页"行一齐，分页选择放这里 */}
-      <div className="flex items-center justify-between text-sm text-muted-foreground shrink-0">
-        <div>
-          共 {table.getFilteredRowModel().rows.length} 条
+      {/* 顶部工具栏：行计数 + 分页 + 每页大小 + 自定义 slot */}
+      <div className="flex items-center justify-between gap-3 text-sm shrink-0">
+        <div className="flex items-baseline gap-2 text-muted-foreground">
+          <span className="text-xs">共</span>
+          <span className="font-mono font-semibold tabular-nums text-foreground">
+            {table.getFilteredRowModel().rows.length}
+          </span>
+          <span className="text-xs">条</span>
           {table.getSelectedRowModel().rows.length > 0 && (
-            <span className="ml-2">
-              · 已选 {table.getSelectedRowModel().rows.length}
-            </span>
+            <>
+              <span className="h-3 w-px bg-border self-center" />
+              <span className="text-xs">已选</span>
+              <span className="font-mono font-semibold tabular-nums text-emerald-600 dark:text-emerald-400">
+                {table.getSelectedRowModel().rows.length}
+              </span>
+            </>
           )}
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-2">
           <PageNumbers
             pageIndex={table.getState().pagination.pageIndex}
             pageCount={Math.max(table.getPageCount(), 1)}
             onChange={(idx) => table.setPageIndex(idx)}
           />
-          <select
-            className="ml-2 h-8 rounded border bg-background px-2 text-xs"
-            value={table.getState().pagination.pageSize}
-            onChange={(e) => table.setPageSize(Number(e.target.value))}
-          >
-            {[20, 50, 100, 200, 500, 1000].map((s) => (
-              <option key={s} value={s}>
-                每页 {s}
-              </option>
-            ))}
-          </select>
+          <div className="inline-flex h-8 items-center gap-1 rounded-md border bg-background px-2 text-xs shadow-sm">
+            <Rows3 className="h-3.5 w-3.5 text-muted-foreground" />
+            <select
+              className="h-full bg-transparent text-xs border-0 focus:outline-none focus:ring-0 cursor-pointer pr-1 tabular-nums"
+              value={table.getState().pagination.pageSize}
+              onChange={(e) => table.setPageSize(Number(e.target.value))}
+            >
+              {[20, 50, 100, 200, 500, 1000].map((s) => (
+                <option key={s} value={s}>
+                  {s}/页
+                </option>
+              ))}
+            </select>
+          </div>
+          {headerSlot}
         </div>
       </div>
 
@@ -256,45 +272,49 @@ function PageNumbers({
     items.push(last)
   }
   return (
-    <div className="flex items-center gap-1">
-      <Button
-        variant="ghost"
-        size="sm"
-        className="h-8 w-8 p-0"
+    <div className="inline-flex h-8 items-center rounded-md border bg-background overflow-hidden shadow-sm">
+      <button
+        type="button"
+        className="inline-flex h-full w-8 items-center justify-center text-muted-foreground hover:bg-muted hover:text-foreground transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
         onClick={() => onChange(Math.max(0, pageIndex - 1))}
         disabled={pageIndex === 0}
+        title="上一页"
       >
-        ‹
-      </Button>
+        <ChevronLeft className="h-4 w-4" />
+      </button>
       {items.map((it, i) =>
         it === 'gap' ? (
           <span
             key={`gap-${i}`}
-            className="px-1 text-xs text-muted-foreground select-none"
+            className="px-1.5 text-xs text-muted-foreground select-none border-l"
           >
             …
           </span>
         ) : (
-          <Button
+          <button
             key={it}
-            variant={it === cur ? 'secondary' : 'ghost'}
-            size="sm"
-            className="h-8 min-w-8 px-2 text-xs"
+            type="button"
             onClick={() => onChange(it - 1)}
+            className={
+              'h-full min-w-8 px-2 text-xs border-l tabular-nums transition-colors ' +
+              (it === cur
+                ? 'bg-primary text-primary-foreground font-semibold'
+                : 'hover:bg-muted')
+            }
           >
             {it}
-          </Button>
+          </button>
         )
       )}
-      <Button
-        variant="ghost"
-        size="sm"
-        className="h-8 w-8 p-0"
+      <button
+        type="button"
+        className="inline-flex h-full w-8 items-center justify-center text-muted-foreground hover:bg-muted hover:text-foreground transition-colors border-l disabled:opacity-30 disabled:cursor-not-allowed"
         onClick={() => onChange(Math.min(pageCount - 1, pageIndex + 1))}
         disabled={pageIndex >= pageCount - 1}
+        title="下一页"
       >
-        ›
-      </Button>
+        <ChevronRight className="h-4 w-4" />
+      </button>
     </div>
   )
 }
