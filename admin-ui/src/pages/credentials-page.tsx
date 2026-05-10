@@ -1,5 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { CheckCircle2, Loader2, Plus, Upload, Wallet } from 'lucide-react'
+import {
+  Activity,
+  BarChart3,
+  CheckCircle2,
+  Clock,
+  Database,
+  Gauge,
+  Loader2,
+  Percent,
+  Plus,
+  TrendingUp,
+  Upload,
+  Wallet,
+  XCircle,
+  Zap,
+} from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { ColumnDef, RowSelectionState } from '@tanstack/react-table'
 import { toast } from 'sonner'
@@ -281,7 +296,6 @@ interface CellContext {
   testingProxyIds: Set<string>
   /** 全局 credentialRpm（凭据级未覆盖时作为"上限"展示） */
   globalCredentialRpm: number | null
-  onViewBalance: (id: number, force: boolean) => void
   onForceRefresh: (id: number) => void
   onBindProxy: (id: number) => void
   onUnbindProxy: (id: number) => void
@@ -643,7 +657,7 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
                 : 'text-emerald-600 dark:text-emerald-400'
         return (
           <div
-            className="flex flex-col gap-1 min-w-[110px]"
+            className="flex flex-col gap-1 min-w-[74px]"
             title={
               cap
                 ? `实时 RPM ${c.rpm}；上限 ${cap}/min（${capSource}）`
@@ -691,14 +705,6 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
               onClick={() => ctx.onToggleDisabled(c)}
             >
               {c.disabled ? '启用' : '禁用'}
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-7 px-2 text-xs"
-              onClick={() => ctx.onViewBalance(c.id, true)}
-            >
-              查余额
             </Button>
             <Button
               size="sm"
@@ -789,6 +795,7 @@ export function CredentialsPage() {
     () => new Set()
   )
   const [overuseFilter, setOveruseFilter] = useState<'' | 'on' | 'off'>('')
+  const [searchQuery, setSearchQuery] = useState('')
   // 上游账号侧 overageStatus 筛选：ENABLED / DISABLED / unknown
   // 桶简化为 ENABLED / DISABLED；DISABLED 包含 null/未知（按用户意愿）
   const [accountOverageFilter, setAccountOverageFilter] = useState<
@@ -991,6 +998,19 @@ export function CredentialsPage() {
           c.overageStatus === 'ENABLED' ? 'ENABLED' : 'DISABLED'
         if (!accountOverageFilter.has(bucket)) return false
       }
+      // 关键字模糊搜索：id / email / accountEmail / subscriptionTitle 任一子串命中
+      const q = searchQuery.trim().toLowerCase()
+      if (q) {
+        const haystack = [
+          String(c.id),
+          c.email ?? '',
+          c.accountEmail ?? '',
+          c.subscriptionTitle ?? '',
+        ]
+          .join('\n')
+          .toLowerCase()
+        if (!haystack.includes(q)) return false
+      }
       return true
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1001,6 +1021,7 @@ export function CredentialsPage() {
     priorityFilters,
     overuseFilter,
     accountOverageFilter,
+    searchQuery,
     cachedBalanceMap,
     liveBalances,
   ])
@@ -1171,7 +1192,6 @@ export function CredentialsPage() {
         proxyTestResults,
         testingProxyIds,
         globalCredentialRpm,
-        onViewBalance: handleViewBalance,
         onForceRefresh: handleForceRefresh,
         onBindProxy: (id) => setBindProxyId(id),
         onUnbindProxy: handleUnbindProxy,
@@ -1500,56 +1520,88 @@ export function CredentialsPage() {
       <div className="flex items-center justify-between mb-3 gap-3 flex-wrap shrink-0">
         <div className="flex items-center gap-2 flex-wrap">
           {/* 统计框：总数 / 可用 / 成功率 / 成功 / 失败 */}
-          <div className="inline-flex items-center gap-4 rounded-md border bg-card px-4 py-2 text-sm">
-            <span className="inline-flex items-center gap-1.5">
-              <span className="text-muted-foreground">总数</span>
-              <span className="font-mono font-semibold tabular-nums">
-                {data?.total ?? 0}
-              </span>
-            </span>
-            <span className="h-4 w-px bg-border" />
-            <span className="inline-flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400">
-              <span className="text-muted-foreground">可用</span>
-              <span className="font-mono font-semibold tabular-nums">
-                {data?.available ?? 0}
-              </span>
-            </span>
-            <span className="h-4 w-px bg-border" />
-            <span className="inline-flex items-center gap-1.5">
-              <span className="text-muted-foreground">成功率</span>
-              <span className="font-mono font-semibold tabular-nums">
-                {statsSummary && statsSummary.totalRequests > 0
-                  ? `${((statsSummary.totalSuccess / statsSummary.totalRequests) * 100).toFixed(1)}%`
-                  : '—'}
-              </span>
-            </span>
-            <span className="h-4 w-px bg-border" />
-            <span className="inline-flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400">
-              <span className="text-muted-foreground">成功</span>
-              <span className="font-mono font-semibold tabular-nums">
-                {statsSummary?.totalSuccess ?? 0}
-              </span>
-            </span>
-            <span className="h-4 w-px bg-border" />
-            <span
-              className={
-                'inline-flex items-center gap-1.5 ' +
-                ((statsSummary?.totalFail ?? 0) > 0
-                  ? 'text-rose-700 dark:text-rose-400'
-                  : 'text-muted-foreground')
-              }
-            >
-              <span className="text-muted-foreground">失败</span>
-              <span className="font-mono font-semibold tabular-nums">
-                {statsSummary?.totalFail ?? 0}
-              </span>
-            </span>
-          </div>
+          {(() => {
+            const totalReq = statsSummary?.totalRequests ?? 0
+            const totalOk = statsSummary?.totalSuccess ?? 0
+            const totalErr = statsSummary?.totalFail ?? 0
+            const successRate = totalReq > 0 ? (totalOk / totalReq) * 100 : null
+            const rateColor =
+              successRate === null
+                ? 'text-muted-foreground'
+                : successRate >= 99
+                  ? 'text-emerald-700 dark:text-emerald-400'
+                  : successRate >= 95
+                    ? 'text-sky-700 dark:text-sky-400'
+                    : successRate >= 80
+                      ? 'text-amber-700 dark:text-amber-400'
+                      : 'text-rose-700 dark:text-rose-400'
+            return (
+              <div className="inline-flex items-center gap-4 rounded-md border bg-card px-4 py-2 text-sm shadow-sm">
+                <span className="inline-flex items-center gap-1.5" title="凭据总数">
+                  <Database className="h-3.5 w-3.5 text-muted-foreground" />
+                  <span className="text-muted-foreground text-xs">总数</span>
+                  <span className="font-mono font-semibold tabular-nums text-base leading-none">
+                    {data?.total ?? 0}
+                  </span>
+                </span>
+                <span className="h-5 w-px bg-border" />
+                <span
+                  className="inline-flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400"
+                  title="可用凭据数"
+                >
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                  <span className="text-muted-foreground text-xs">可用</span>
+                  <span className="font-mono font-semibold tabular-nums text-base leading-none">
+                    {data?.available ?? 0}
+                  </span>
+                </span>
+                <span className="h-5 w-px bg-border" />
+                <span
+                  className={`inline-flex items-center gap-1.5 ${rateColor}`}
+                  title={`成功率（成功 ${totalOk} / 总 ${totalReq}）`}
+                >
+                  <Percent className="h-3.5 w-3.5" />
+                  <span className="text-muted-foreground text-xs">成功率</span>
+                  <span className="font-mono font-semibold tabular-nums text-base leading-none">
+                    {successRate === null ? '—' : `${successRate.toFixed(1)}%`}
+                  </span>
+                </span>
+                <span className="h-5 w-px bg-border" />
+                <span
+                  className="inline-flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400"
+                  title="累计成功请求"
+                >
+                  <TrendingUp className="h-3.5 w-3.5" />
+                  <span className="text-muted-foreground text-xs">成功</span>
+                  <span className="font-mono font-semibold tabular-nums text-base leading-none">
+                    {totalOk.toLocaleString()}
+                  </span>
+                </span>
+                <span className="h-5 w-px bg-border" />
+                <span
+                  className={
+                    'inline-flex items-center gap-1.5 ' +
+                    (totalErr > 0
+                      ? 'text-rose-700 dark:text-rose-400'
+                      : 'text-muted-foreground')
+                  }
+                  title="累计失败请求"
+                >
+                  <XCircle className="h-3.5 w-3.5" />
+                  <span className="text-muted-foreground text-xs">失败</span>
+                  <span className="font-mono font-semibold tabular-nums text-base leading-none">
+                    {totalErr.toLocaleString()}
+                  </span>
+                </span>
+              </div>
+            )
+          })()}
           {/* 内联实时指标 pill —— 紧凑、与 badge 同一行，避免多占一行 */}
           <span
             className="inline-flex items-center gap-1 rounded-md border bg-card px-2 py-0.5 text-xs"
             title="服务运行时长"
           >
+            <Clock className="h-3 w-3 text-muted-foreground" />
             <span className="text-muted-foreground">运行</span>
             <span className="font-mono font-medium">
               {statsSummary ? formatUptime(statsSummary.uptimeSecs) : '—'}
@@ -1559,27 +1611,46 @@ export function CredentialsPage() {
             className="inline-flex items-center gap-1 rounded-md border bg-card px-2 py-0.5 text-xs"
             title="累计请求数"
           >
+            <BarChart3 className="h-3 w-3 text-muted-foreground" />
             <span className="text-muted-foreground">请求</span>
             <span className="font-mono font-medium">
-              {statsSummary?.totalRequests ?? 0}
+              {(statsSummary?.totalRequests ?? 0).toLocaleString()}
             </span>
           </span>
           <span
             className={
               'inline-flex items-center gap-1 rounded-md border bg-card px-2 py-0.5 text-xs ' +
               (totalInFlight > 0
-                ? 'text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
+                ? 'text-emerald-600 dark:text-emerald-400 border-emerald-500/40 bg-emerald-50/40 dark:bg-emerald-950/20'
                 : '')
             }
             title="当前并发请求数"
           >
+            <Activity
+              className={
+                'h-3 w-3 ' +
+                (totalInFlight > 0
+                  ? 'text-emerald-600 dark:text-emerald-400 animate-pulse'
+                  : 'text-muted-foreground')
+              }
+            />
             <span className="text-muted-foreground">并发</span>
             <span className="font-mono font-medium">{totalInFlight}</span>
           </span>
           <span
-            className="inline-flex items-center gap-1 rounded-md border bg-card px-2 py-0.5 text-xs"
+            className={
+              'inline-flex items-center gap-1 rounded-md border bg-card px-2 py-0.5 text-xs ' +
+              (totalRpm > 0
+                ? 'text-sky-700 dark:text-sky-400 border-sky-500/40'
+                : '')
+            }
             title="实时 RPM 总和"
           >
+            {totalRpm > 0 ? (
+              <Zap className="h-3 w-3 text-sky-600 dark:text-sky-400" />
+            ) : (
+              <Gauge className="h-3 w-3 text-muted-foreground" />
+            )}
             <span className="text-muted-foreground">RPM</span>
             <span className="font-mono font-medium">{totalRpm}</span>
           </span>
@@ -1602,6 +1673,13 @@ export function CredentialsPage() {
 
       {/* 筛选条 — 多选连续按钮组 */}
       <div className="mb-3 flex flex-wrap items-center gap-3 text-xs shrink-0">
+        <Input
+          type="search"
+          placeholder="搜索 邮箱 / ID / 订阅"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          className="h-7 w-56 text-xs"
+        />
         <div className="flex items-center gap-1">
           <span className="text-muted-foreground mr-1">状态</span>
           <div className="inline-flex rounded-md border overflow-hidden">
@@ -1830,7 +1908,8 @@ export function CredentialsPage() {
           usageLimitFilters.size > 0 ||
           priorityFilters.size > 0 ||
           overuseFilter !== '' ||
-          accountOverageFilter.size > 0) && (
+          accountOverageFilter.size > 0 ||
+          searchQuery.trim() !== '') && (
           <Button
             size="sm"
             variant="ghost"
@@ -1841,6 +1920,7 @@ export function CredentialsPage() {
               setPriorityFilters(new Set())
               setOveruseFilter('')
               setAccountOverageFilter(new Set())
+              setSearchQuery('')
             }}
           >
             清除筛选

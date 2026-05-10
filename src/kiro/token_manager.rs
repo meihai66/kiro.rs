@@ -175,6 +175,56 @@ fn is_invalid_grant_error(err: &anyhow::Error) -> bool {
     err.to_string().contains("invalid_grant")
 }
 
+/// 在错误响应 JSON 里替换"错误原因"字段的值，保留外层结构。
+///
+/// 覆盖位置（命中任一即算成功）：
+/// - 顶层 `message` / `Message` / `error_description` / `errorMessage` / `detail` / `msg` / `reason`
+/// - 嵌套 `error.message` / `error.Message` / `error.errorMessage`（Anthropic / 通用 SDK 风格）
+///
+/// 返回 `None` 表示：不是 JSON 或没有任何已知字段命中（调用方应回退到整段替换）。
+fn replace_error_message_field(body: &str, new_message: &str) -> Option<String> {
+    const TOP_KEYS: &[&str] = &[
+        "message",
+        "Message",
+        "error_description",
+        "errorMessage",
+        "detail",
+        "msg",
+        "reason",
+    ];
+    const NESTED_KEYS: &[&str] = &["message", "Message", "errorMessage"];
+
+    let mut v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let mut replaced = false;
+
+    if let serde_json::Value::Object(map) = &mut v {
+        for key in TOP_KEYS {
+            if let Some(slot) = map.get_mut(*key)
+                && slot.is_string()
+            {
+                *slot = serde_json::Value::String(new_message.to_string());
+                replaced = true;
+            }
+        }
+        if let Some(serde_json::Value::Object(err_map)) = map.get_mut("error") {
+            for key in NESTED_KEYS {
+                if let Some(slot) = err_map.get_mut(*key)
+                    && slot.is_string()
+                {
+                    *slot = serde_json::Value::String(new_message.to_string());
+                    replaced = true;
+                }
+            }
+        }
+    }
+
+    if replaced {
+        serde_json::to_string(&v).ok()
+    } else {
+        None
+    }
+}
+
 fn is_temporarily_suspended_error(err: &anyhow::Error) -> bool {
     err.to_string().contains("TEMPORARILY_SUSPENDED")
 }
@@ -1159,7 +1209,12 @@ impl MultiTokenManager {
         None
     }
 
-    /// 命中"错误内容替换"规则时返回替换文本；规则形如 `pattern===replacement`
+    /// 命中"错误内容替换"规则时返回替换后的错误体；规则形如 `pattern===replacement`
+    ///
+    /// 替换语义（v1.1.42 起）：
+    /// - 优先解析为 JSON，把 `message` / `error.message` 等"错误原因"字段的值替换为 `replacement`，
+    ///   保留 JSON 外层结构（type/code/status 等不动），客户端拿到的仍是合法 JSON
+    /// - 若不是 JSON、或找不到任何已知 message 字段，回退为「整段替换」（旧行为）
     pub fn match_error_replacement(&self, body: &str) -> Option<String> {
         let cfg = self.config.read();
         for rule in &cfg.error_replace_rules {
@@ -1170,7 +1225,10 @@ impl MultiTokenManager {
             if let Some((pat, repl)) = line.split_once("===") {
                 let pat = pat.trim();
                 if !pat.is_empty() && body.contains(pat) {
-                    return Some(repl.to_string());
+                    return Some(
+                        replace_error_message_field(body, repl)
+                            .unwrap_or_else(|| repl.to_string()),
+                    );
                 }
             }
         }
@@ -3337,6 +3395,22 @@ impl MultiTokenManager {
     /// - `Ok(u64)` - 新凭据 ID
     /// - `Err(_)` - 验证失败或添加失败
     pub async fn add_credential(&self, new_cred: KiroCredentials) -> anyhow::Result<u64> {
+        self.add_credential_inner(new_cred, true).await
+    }
+
+    /// 添加新凭据但跳过 refresh / usage 验证（Admin API）
+    ///
+    /// 用于「暂不绑定代理」场景：尚无可用代理槽时强制走上游验证只会失败，
+    /// 改为直接落库，由调用方负责把凭据置为禁用，待手动绑定代理后再激活。
+    pub async fn add_credential_unverified(&self, new_cred: KiroCredentials) -> anyhow::Result<u64> {
+        self.add_credential_inner(new_cred, false).await
+    }
+
+    async fn add_credential_inner(
+        &self,
+        new_cred: KiroCredentials,
+        verify: bool,
+    ) -> anyhow::Result<u64> {
         let config = self.config.read().clone();
         // 1. 基本验证
         validate_credential_secret(&new_cred)?;
@@ -3358,21 +3432,29 @@ impl MultiTokenManager {
             anyhow::bail!("凭据已存在（refreshToken 或 kiroApiKey 重复）");
         }
 
-        // 3. 尝试验证凭据有效性
-        let proxy = self.effective_proxy_for_cred(&new_cred)?;
-        let mut validated_cred = if new_cred.is_api_key_credential() {
-            let token = new_cred
-                .kiro_api_key
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("缺少 kiroApiKey"))?;
-            let usage = get_usage_limits(&new_cred, &config, &token, proxy.as_ref()).await?;
+        // 3. 尝试验证凭据有效性（verify=false 时跳过，避免没绑代理就触发上游调用）
+        let mut validated_cred = if !verify {
             let mut cred = new_cred.clone();
             cred.access_token = None;
             cred.expires_at = None;
-            cred.subscription_title = usage.subscription_title().map(|s| s.to_string());
+            cred.subscription_title = None;
             cred
         } else {
-            refresh_token(&new_cred, &config, proxy.as_ref()).await?
+            let proxy = self.effective_proxy_for_cred(&new_cred)?;
+            if new_cred.is_api_key_credential() {
+                let token = new_cred
+                    .kiro_api_key
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("缺少 kiroApiKey"))?;
+                let usage = get_usage_limits(&new_cred, &config, &token, proxy.as_ref()).await?;
+                let mut cred = new_cred.clone();
+                cred.access_token = None;
+                cred.expires_at = None;
+                cred.subscription_title = usage.subscription_title().map(|s| s.to_string());
+                cred
+            } else {
+                refresh_token(&new_cred, &config, proxy.as_ref()).await?
+            }
         };
 
         // 4. 分配新 ID
@@ -3754,6 +3836,65 @@ mod tests {
         let credentials = KiroCredentials::default();
         let tm = TokenManager::new(config, credentials, None);
         assert!(tm.credentials().access_token.is_none());
+    }
+
+    #[test]
+    fn test_replace_error_message_field_top_level_message() {
+        let body = r#"{"type":"error","code":429,"message":"Too many requests"}"#;
+        let out = replace_error_message_field(body, "请稍后重试").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["message"], "请稍后重试");
+        assert_eq!(v["type"], "error"); // 外层结构保留
+        assert_eq!(v["code"], 429);
+    }
+
+    #[test]
+    fn test_replace_error_message_field_nested_anthropic_style() {
+        let body = r#"{"type":"error","error":{"type":"rate_limit_error","message":"Rate limit hit"}}"#;
+        let out = replace_error_message_field(body, "已限流").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["error"]["message"], "已限流");
+        assert_eq!(v["error"]["type"], "rate_limit_error"); // 同级 type 不动
+        assert_eq!(v["type"], "error"); // 顶层 type 不动
+    }
+
+    #[test]
+    fn test_replace_error_message_field_returns_none_for_non_json() {
+        assert!(replace_error_message_field("not a json body", "x").is_none());
+    }
+
+    #[test]
+    fn test_replace_error_message_field_returns_none_when_no_known_field() {
+        // JSON 但无 message / error.message 等已知字段 → 调用方应回退整段替换
+        let body = r#"{"type":"error","code":500,"foo":"bar"}"#;
+        assert!(replace_error_message_field(body, "x").is_none());
+    }
+
+    #[test]
+    fn test_match_error_replacement_keeps_json_shell() {
+        let mut config = Config::default();
+        config.error_replace_rules =
+            vec!["MONTHLY_REQUEST_COUNT===请稍后重试".to_string()];
+        let mut cred = KiroCredentials::default();
+        cred.refresh_token = Some("dummy".repeat(40));
+        let mgr = MultiTokenManager::new(config, vec![cred], None, None, false).unwrap();
+        let body = r#"{"error":{"type":"throttling","message":"MONTHLY_REQUEST_COUNT exceeded"}}"#;
+        let out = mgr.match_error_replacement(body).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["error"]["message"], "请稍后重试");
+        assert_eq!(v["error"]["type"], "throttling"); // 关键：原结构保留
+    }
+
+    #[test]
+    fn test_match_error_replacement_falls_back_to_whole_body_replace() {
+        let mut config = Config::default();
+        config.error_replace_rules = vec!["bad===unauthorized".to_string()];
+        let mut cred = KiroCredentials::default();
+        cred.refresh_token = Some("dummy".repeat(40));
+        let mgr = MultiTokenManager::new(config, vec![cred], None, None, false).unwrap();
+        // 非 JSON：命中即整段替换（旧行为）
+        let out = mgr.match_error_replacement("token is bad").unwrap();
+        assert_eq!(out, "unauthorized");
     }
 
     #[test]

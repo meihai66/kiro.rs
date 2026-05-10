@@ -772,15 +772,17 @@ export function SettingsPage() {
             </CardHeader>
             <CardContent className="space-y-2">
               <p className="text-xs text-muted-foreground">
-                响应错误体命中 <code>pattern</code> 时，把整段错误内容替换为{' '}
-                <code>replacement</code> 后再返回给客户端（仅影响输出，内部禁用/重试逻辑用原始体）。
+                响应错误体命中 <code>pattern</code> 时，优先把 JSON 里的错误原因字段（{' '}
+                <code>message</code> / <code>error.message</code> 等）的值替换为{' '}
+                <code>replacement</code>，保留外层 JSON 结构再返回给客户端；不是 JSON 或找不到字段则整段替换。
                 <br />
                 每行一条，格式：<code>pattern===replacement</code>；从上往下匹配，第一条命中即停止。
+                仅影响返回给客户端的错误体，内部禁用/重试逻辑用原始体。
               </p>
               <textarea
                 className="w-full h-32 rounded-md border bg-background p-2 text-sm font-mono"
                 placeholder={
-                  '示例：\nMONTHLY_REQUEST_COUNT==={"type":"error","error":{"type":"rate_limit_error","message":"请稍后重试"}}\nbearer token included in the request is invalid==={"error":"unauthorized"}'
+                  '示例：\nMONTHLY_REQUEST_COUNT===请稍后重试，月度请求次数已达上限\nbearer token included in the request is invalid===上游凭据失效，已切换其他凭据'
                 }
                 value={errorReplaceRulesText}
                 onChange={(e) => setErrorReplaceRulesText(e.target.value)}

@@ -1080,16 +1080,28 @@ impl AdminService {
             runtime_only: false,
         };
 
-        // 调用 token_manager 添加凭据（验证阶段会走 prepick_slot 对应的代理）
-        let credential_id = self
-            .token_manager
-            .add_credential(new_cred)
-            .await
-            .map_err(|e| self.classify_add_error(e))?;
+        // 调用 token_manager 添加凭据
+        // - 已绑定/即将绑定代理 → 正常验证（refresh + usage），网络错时自动切代理重试 3 次
+        // - 「暂不绑定代理」(should_disable_after_create) → 跳过上游验证，
+        //   否则在没有代理可用时调上游必失败（被墙环境直连必 fail）。
+        //   待用户手动 bind 代理后会通过其它路径（manual_bind / 启用）触发刷新。
+        let mut effective_slot = prepick_slot.clone();
+        let credential_id = if should_disable_after_create {
+            self.token_manager
+                .add_credential_unverified(new_cred)
+                .await
+                .map_err(|e| self.classify_add_error(e))?
+        } else {
+            let (result, final_slot) = self
+                .add_credential_with_proxy_retry(new_cred, prepick_slot.clone(), 3)
+                .await;
+            effective_slot = final_slot;
+            result?
+        };
 
         // ===== 凭据建好后，把代理槽真正绑上去 =====
         if let Some(pool) = &self.proxy_pool {
-            if let Some(slot_id) = prepick_slot {
+            if let Some(slot_id) = effective_slot {
                 // manual_bind 是幂等的，把 credential_id push 进 boundCredentialIds
                 if let Err(e) = pool.manual_bind(&slot_id, credential_id) {
                     // 极少发生：并发导入挤占同一槽位
@@ -1124,7 +1136,10 @@ impl AdminService {
             }
         }
 
-        if let Err(e) = self.token_manager.get_usage_limits_for(credential_id).await {
+        // 暂不绑代理时跳过订阅查询：同样会触发上游调用，没代理必失败，徒增噪音日志。
+        if !should_disable_after_create
+            && let Err(e) = self.token_manager.get_usage_limits_for(credential_id).await
+        {
             tracing::warn!("添加凭据后获取订阅等级失败（不影响凭据添加）: {}", e);
         }
 
@@ -1328,6 +1343,89 @@ impl AdminService {
         } else {
             AdminServiceError::InternalError(msg)
         }
+    }
+
+    /// 调用 token_manager.add_credential，遇到「经代理调上游网络失败」时
+    /// 把当前代理标记冷却 5 分钟、从池里挑下一条 idle 代理重试，最多 `max_attempts` 次。
+    /// 非网络错（凭据无效、限流、AWS 4xx/5xx 等）立即返回，不重试。
+    ///
+    /// 返回 `(Result<credential_id>, 最终用过的 slot_id)` —— 调用方用最终 slot 去 manual_bind 占槽。
+    async fn add_credential_with_proxy_retry(
+        &self,
+        new_cred: KiroCredentials,
+        initial_slot: Option<String>,
+        max_attempts: usize,
+    ) -> (Result<u64, AdminServiceError>, Option<String>) {
+        let warning_hours = self.config.read().proxy_expiry_warning_hours;
+        let mut current_slot = initial_slot;
+        let mut tried: HashSet<String> = HashSet::new();
+        let mut last_err: Option<AdminServiceError> = None;
+        let attempts = max_attempts.max(1);
+
+        for attempt in 1..=attempts {
+            if let Some(s) = &current_slot {
+                tried.insert(s.clone());
+            }
+            let mut cred = new_cred.clone();
+            cred.proxy_slot_id = current_slot.clone();
+
+            match self.token_manager.add_credential(cred).await {
+                Ok(id) => {
+                    if let (Some(pool), Some(slot)) =
+                        (&self.proxy_pool, current_slot.as_deref())
+                    {
+                        pool.clear_recent_failure(slot);
+                    }
+                    return (Ok(id), current_slot);
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    if !looks_like_proxy_network_failure(&msg) {
+                        // 非网络错：凭据无效 / AWS 限流 / 4xx5xx 等，重试无意义
+                        return (Err(self.classify_add_error(e)), current_slot);
+                    }
+                    if let (Some(pool), Some(slot)) =
+                        (&self.proxy_pool, current_slot.as_deref())
+                    {
+                        pool.mark_recent_failure(slot);
+                        tracing::warn!(
+                            slot,
+                            attempt,
+                            attempts,
+                            "导入凭据：经代理调上游网络失败，标记冷却 5 分钟并尝试切换代理: {}",
+                            msg
+                        );
+                    } else {
+                        tracing::warn!(
+                            attempt,
+                            attempts,
+                            "导入凭据：上游网络失败，无代理可切换: {}",
+                            msg
+                        );
+                    }
+                    last_err = Some(self.classify_add_error(e));
+                    if attempt == attempts {
+                        break;
+                    }
+                    // 从池里挑下一条（过滤已试过的 + 冷却中的）
+                    let next = self
+                        .proxy_pool
+                        .as_ref()
+                        .and_then(|p| p.pick_idle_candidate_excluding(warning_hours, &tried));
+                    match next {
+                        Some(s) => current_slot = Some(s),
+                        None => break, // 池里没有可换的代理了
+                    }
+                }
+            }
+        }
+
+        (
+            Err(last_err.unwrap_or_else(|| {
+                AdminServiceError::InternalError("代理重试失败：未知错误".into())
+            })),
+            current_slot,
+        )
     }
 
     /// 分类删除凭据错误
@@ -1543,94 +1641,77 @@ impl AdminService {
             runtime_only: false,
         };
 
-        match self.token_manager.add_credential(new_cred).await {
-            Ok(credential_id) => {
-                let mut reason: Option<String> = None;
-                if let Some(slot_id) = embedded_slot_id.as_deref() {
-                    // 内嵌代理：强制绑定到我们刚加入的槽
-                    if let Some(pool) = &self.proxy_pool {
-                        match pool.manual_bind(slot_id, credential_id) {
-                            Ok(()) => {
-                                let _ = self
-                                    .token_manager
-                                    .set_proxy_slot(credential_id, Some(slot_id.to_string()));
-                                tracing::info!(
-                                    credential_id,
-                                    slot_id,
-                                    "批量导入：内嵌代理已绑定"
-                                );
-                            }
-                            Err(e) => {
-                                pool.push_alert(
-                                    AlertLevel::Warn,
-                                    format!(
-                                        "批量导入：凭据 #{} 内嵌代理 {} 绑定失败（{}），已置 disabled",
-                                        credential_id, slot_id, e
-                                    ),
-                                );
-                                let _ = self.token_manager.set_proxy_slot(credential_id, None);
-                                let _ = self.token_manager.set_disabled(credential_id, true);
-                                reason = Some(format!("内嵌代理绑定失败（{}），已置 disabled", e));
-                            }
-                        }
-                    }
-                } else if let Some(pool) = &self.proxy_pool {
-                    // 真正占槽：先尝试 prepick 的，若并发被抢占则再 auto_bind 一次
-                    let bound = match prepick_slot.as_deref() {
-                        Some(slot) => pool
-                            .manual_bind(slot, credential_id)
-                            .map(|()| slot.to_string())
-                            .or_else(|_| pool.auto_bind(credential_id, warning_hours)),
-                        None => pool.auto_bind(credential_id, warning_hours),
-                    };
-                    match bound {
-                        Ok(slot) => {
-                            let _ = self
-                                .token_manager
-                                .set_proxy_slot(credential_id, Some(slot));
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                credential_id,
-                                "批量导入：绑定代理失败，凭据置 disabled: {}",
-                                e
-                            );
-                            pool.push_alert(
-                                AlertLevel::Warn,
-                                format!(
-                                    "批量导入：凭据 #{} 绑定代理失败（{}），已置 disabled",
-                                    credential_id, e
-                                ),
-                            );
-                            let _ = self.token_manager.set_proxy_slot(credential_id, None);
-                            let _ = self.token_manager.set_disabled(credential_id, true);
-                            reason = Some(format!("已添加但未绑定代理（{}），已置 disabled", e));
-                        }
-                    }
-                }
-                // 配置开启时：新凭据默认置 disabled，避免未验证就进调度
-                if reason.is_none()
-                    && self.config.read().import_disabled_by_default
-                {
-                    let _ = self.token_manager.set_disabled(credential_id, true);
-                    reason =
-                        Some("按「导入默认禁用」配置已置 disabled，验证后请手动启用".to_string());
-                }
-                ImportItemResult {
+        // 调 helper：网络错时自动切代理重试 3 次（坏代理被标 5 分钟冷却，后续不再被 prepick 选中）
+        let (verify_result, effective_slot) = self
+            .add_credential_with_proxy_retry(new_cred, prepick_slot.clone(), 3)
+            .await;
+        let credential_id = match verify_result {
+            Ok(id) => id,
+            Err(e) => {
+                return ImportItemResult {
                     index,
                     fingerprint,
-                    action: ImportAction::Added,
-                    reason,
-                    credential_id: Some(credential_id),
+                    action: ImportAction::Invalid,
+                    reason: Some(e.to_string()),
+                    credential_id: None,
+                };
+            }
+        };
+
+        let mut reason: Option<String> = None;
+        if let Some(pool) = &self.proxy_pool {
+            // 用最终成功验证的 slot 去占槽（可能是内嵌也可能是重试中切换到的）
+            let bound = match effective_slot.as_deref() {
+                Some(slot) => pool
+                    .manual_bind(slot, credential_id)
+                    .map(|()| slot.to_string())
+                    .or_else(|_| pool.auto_bind(credential_id, warning_hours)),
+                None => pool.auto_bind(credential_id, warning_hours),
+            };
+            match bound {
+                Ok(slot) => {
+                    let _ = self
+                        .token_manager
+                        .set_proxy_slot(credential_id, Some(slot.clone()));
+                    if effective_slot.as_deref() != Some(slot.as_str()) {
+                        tracing::info!(
+                            credential_id,
+                            slot,
+                            "批量导入：占槽时切换到 {}",
+                            slot
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        credential_id,
+                        "批量导入：绑定代理失败，凭据置 disabled: {}",
+                        e
+                    );
+                    pool.push_alert(
+                        AlertLevel::Warn,
+                        format!(
+                            "批量导入：凭据 #{} 绑定代理失败（{}），已置 disabled",
+                            credential_id, e
+                        ),
+                    );
+                    let _ = self.token_manager.set_proxy_slot(credential_id, None);
+                    let _ = self.token_manager.set_disabled(credential_id, true);
+                    reason = Some(format!("已添加但未绑定代理（{}），已置 disabled", e));
                 }
             }
-            Err(e) => ImportItemResult {
-                index,
-                fingerprint,
-                action: ImportAction::Invalid,
-                reason: Some(e.to_string()),
-                credential_id: None,
-            },
+        }
+        // 配置开启时：新凭据默认置 disabled，避免未验证就进调度
+        if reason.is_none() && self.config.read().import_disabled_by_default {
+            let _ = self.token_manager.set_disabled(credential_id, true);
+            reason = Some("按「导入默认禁用」配置已置 disabled，验证后请手动启用".to_string());
+        }
+        ImportItemResult {
+            index,
+            fingerprint,
+            action: ImportAction::Added,
+            reason,
+            credential_id: Some(credential_id),
         }
     }
 
@@ -2687,6 +2768,20 @@ fn ts_to_dt(n: i64) -> Option<chrono::DateTime<Utc>> {
     } else {
         Utc.timestamp_opt(n, 0).single()
     }
+}
+
+/// 判断 anyhow 错误消息是否「经代理调上游网络失败」——
+/// 用于决定要不要标记代理冷却 + 重试切代理。
+/// 仅匹配 reqwest / 网络层错误（target URL 没到达），不包含 AWS 4xx/5xx 业务错。
+fn looks_like_proxy_network_failure(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    lower.contains("error sending request")
+        || lower.contains("error trying to connect")
+        || lower.contains("connection")
+        || lower.contains("timeout")
+        || lower.contains("timed out")
+        || lower.contains("dns error")
+        || lower.contains("operation timed out")
 }
 
 #[cfg(test)]

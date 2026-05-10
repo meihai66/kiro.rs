@@ -127,8 +127,12 @@ pub struct Config {
     #[serde(default)]
     pub auto_disable_patterns: Vec<String>,
 
-    /// 错误内容替换规则：每条形如 `pattern===replacement`，命中 pattern 时把整段错误体换成 replacement
-    /// 一行一条；空字符串忽略；只影响返回给客户端的错误体，不影响内部禁用/重试逻辑
+    /// 错误内容替换规则：每条形如 `pattern===replacement`
+    ///
+    /// 命中 pattern 时优先把响应 JSON 里的错误原因字段（`message` / `error.message` 等）的值整体换成 replacement，
+    /// 保留外层结构；若不是 JSON 或找不到 message 字段则整段替换。
+    ///
+    /// 一行一条；空字符串忽略；只影响返回给客户端的错误体，不影响内部禁用/重试逻辑。
     #[serde(default)]
     pub error_replace_rules: Vec<String>,
 

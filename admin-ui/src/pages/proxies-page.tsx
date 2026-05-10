@@ -105,6 +105,9 @@ export function ProxiesPage() {
   const [importOpen, setImportOpen] = useState(false)
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({})
   const [showAlerts, setShowAlerts] = useState(false)
+  const [statusFilter, setStatusFilter] =
+    useState<'all' | 'available' | 'expiring' | 'expired' | 'full'>('all')
+  const [searchQuery, setSearchQuery] = useState('')
   const [slotsDialogOpen, setSlotsDialogOpen] = useState(false)
   const [extendDialogOpen, setExtendDialogOpen] = useState(false)
   const [batchSlotsValue, setBatchSlotsValue] = useState(1)
@@ -120,6 +123,49 @@ export function ProxiesPage() {
   )
 
   const proxies = data?.proxies ?? []
+
+  // 与统计卡口径对齐：「即将过期」含 status=expiring 与 active 但 <24h
+  const isExpiringSoon = (p: ProxyEntryItem) =>
+    p.status === 'expiring' || (p.status === 'active' && p.remainingSecs < 86400)
+
+  const statusCounts = useMemo(
+    () => ({
+      all: proxies.length,
+      available: proxies.filter((p) => p.status === 'active' || p.status === 'expiring').length,
+      expiring: proxies.filter(isExpiringSoon).length,
+      expired: proxies.filter((p) => p.status === 'expired').length,
+      full: proxies.filter((p) => p.status === 'full').length,
+    }),
+    [proxies]
+  )
+
+  const filteredProxies = useMemo(() => {
+    let list = proxies
+    switch (statusFilter) {
+      case 'available':
+        list = list.filter((p) => p.status === 'active' || p.status === 'expiring')
+        break
+      case 'expiring':
+        list = list.filter(isExpiringSoon)
+        break
+      case 'expired':
+        list = list.filter((p) => p.status === 'expired')
+        break
+      case 'full':
+        list = list.filter((p) => p.status === 'full')
+        break
+    }
+    const q = searchQuery.trim().toLowerCase()
+    if (q) {
+      list = list.filter((p) => {
+        const haystack = [p.id, p.url, p.username ?? '', p.label ?? '']
+          .join('\n')
+          .toLowerCase()
+        return haystack.includes(q)
+      })
+    }
+    return list
+  }, [proxies, statusFilter, searchQuery])
 
   const columns: ColumnDef<ProxyEntryItem, unknown>[] = useMemo(
     () => [
@@ -472,6 +518,45 @@ export function ProxiesPage() {
         />
       </div>
 
+      {/* 状态筛选 + 搜索 */}
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        {(
+          [
+            { key: 'all', label: '全部' },
+            { key: 'available', label: '可用' },
+            { key: 'expiring', label: '即将过期' },
+            { key: 'expired', label: '已过期' },
+            { key: 'full', label: '已满' },
+          ] as const
+        ).map(({ key, label }) => (
+          <Button
+            key={key}
+            variant={statusFilter === key ? 'default' : 'outline'}
+            size="sm"
+            onClick={() => {
+              if (statusFilter !== key) setRowSelection({})
+              setStatusFilter(key)
+            }}
+          >
+            {label}
+            <span className="ml-2 text-xs opacity-70">{statusCounts[key]}</span>
+          </Button>
+        ))}
+        <Input
+          type="search"
+          placeholder="搜索 IP / 端口 / 账号 / 备注"
+          value={searchQuery}
+          onChange={(e) => {
+            setRowSelection({})
+            setSearchQuery(e.target.value)
+          }}
+          className="ml-2 h-8 w-64 text-xs"
+        />
+        <span className="text-xs text-muted-foreground">
+          匹配 {filteredProxies.length} / 共 {proxies.length}
+        </span>
+      </div>
+
       {/* 告警面板 */}
       {showAlerts && alertsData && (
         <Card className="mb-4">
@@ -553,13 +638,15 @@ export function ProxiesPage() {
       {/* 表格 */}
       <DataTable
         columns={columns}
-        data={proxies}
+        data={filteredProxies}
         rowSelection={rowSelection}
         onRowSelectionChange={setRowSelection}
         getRowId={(row) => row.id}
         emptyText={
           enabled
-            ? '代理池为空，点击"批量导入"添加代理'
+            ? statusFilter === 'all'
+              ? '代理池为空，点击"批量导入"添加代理'
+              : '当前筛选下没有代理'
             : '代理池未启用'
         }
       />

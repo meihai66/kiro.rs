@@ -1,5 +1,17 @@
 # Changelog
 
+## [v1.1.42] - 2026-05-10
+
+### Added
+- **导入凭据自动切代理重试 + 坏代理 5 分钟冷却** — 批量/单个导入凭据时，经代理调上游网络失败会自动把当前代理标 5 分钟冷却并从池里换下一条空闲代理重试，最多 3 次；冷却仅作用于自动选择路径（`pick_idle_candidate` / `auto_bind`），不影响手动绑定，避免少数坏代理被反复挑中、把后续凭据全部拖下水 (`src/admin/service.rs`, `src/kiro/proxy_pool.rs`)
+- **「暂不绑定代理」导入跳过上游验证** — 选择不绑代理导入时直接落库并置 disabled，不再因为没代理触发上游必失败的 refresh / usage 调用，待手动绑定代理后再激活；新增 `add_credential_unverified` API (`src/admin/service.rs`, `src/kiro/token_manager.rs`)
+- **凭据/代理列表关键字搜索** — 凭据页支持邮箱 / ID / 订阅模糊搜索，代理页支持 IP / 端口 / 账号 / 备注模糊搜索，并新增按状态（全部 / 可用 / 即将过期 / 已过期 / 已满）筛选 + 实时计数 (`admin-ui/src/pages/credentials-page.tsx`, `admin-ui/src/pages/proxies-page.tsx`)
+
+### Changed
+- **错误内容替换规则保留 JSON 外层结构** — `errorReplaceRules` 命中时优先把响应 JSON 里的 `message` / `error.message` / `error_description` / `errorMessage` / `detail` / `msg` / `reason` 等字段值替换为 `replacement`，保留 `type` / `code` / `status` 等外层字段；不是 JSON 或没命中已知字段时回退为整段替换。规则配置示例同步简化为「文案直接写明文」(`src/kiro/token_manager.rs`, `src/model/config.rs`, `admin-ui/src/pages/settings-page.tsx`)
+- **凭据页统计卡视觉升级** — 总数 / 可用 / 成功率 / 成功 / 失败配色与图标分级（成功率按 99/95/80% 分段着色），数值千分位格式化，并发 pill 在活跃时高亮 + 图标脉冲动画 (`admin-ui/src/pages/credentials-page.tsx`)
+- **凭据行去除「查余额」按钮** — 余额改由 RPM/余额列点击查看，行内操作区精简 (`admin-ui/src/pages/credentials-page.tsx`)
+
 ## [v1.1.41] - 2026-05-10
 
 ### Fixed

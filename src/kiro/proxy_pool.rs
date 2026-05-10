@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
@@ -122,6 +122,10 @@ pub enum AlertLevel {
 
 const ALERT_BUFFER_CAP: usize = 100;
 
+/// 代理"最近失败"冷却时长：被标记后 5 分钟内不会被自动 prepick / auto_bind 选中。
+/// 防止批量导入时少数坏代理被反复挑中、把后续凭据全部拖下水。
+const RECENT_FAILURE_COOLDOWN: Duration = Duration::from_secs(300);
+
 /// 代理池（共享、线程安全）
 pub struct ProxyPool {
     entries: RwLock<Vec<ProxyEntry>>,
@@ -129,6 +133,9 @@ pub struct ProxyPool {
     alerts: RwLock<std::collections::VecDeque<ProxyAlert>>,
     /// SQLite 持久化（启动期注入；启用后写入走 SQL 而非 JSON）
     store: RwLock<Option<Arc<crate::storage::Store>>>,
+    /// 内存里的"最近失败"标记（slot_id → 失败时刻），进程重启自动清空。
+    /// 仅作用于自动选择路径（pick_idle_candidate / auto_bind），不影响 manual_bind。
+    recent_failures: RwLock<HashMap<String, Instant>>,
 }
 
 #[allow(dead_code)]
@@ -140,6 +147,7 @@ impl ProxyPool {
             file_path: RwLock::new(None),
             alerts: RwLock::new(std::collections::VecDeque::with_capacity(ALERT_BUFFER_CAP)),
             store: RwLock::new(None),
+            recent_failures: RwLock::new(HashMap::new()),
         })
     }
 
@@ -151,6 +159,7 @@ impl ProxyPool {
             file_path: RwLock::new(None),
             alerts: RwLock::new(std::collections::VecDeque::with_capacity(ALERT_BUFFER_CAP)),
             store: RwLock::new(Some(store)),
+            recent_failures: RwLock::new(HashMap::new()),
         }))
     }
 
@@ -175,7 +184,56 @@ impl ProxyPool {
             file_path: RwLock::new(Some(path.to_path_buf())),
             alerts: RwLock::new(std::collections::VecDeque::with_capacity(ALERT_BUFFER_CAP)),
             store: RwLock::new(None),
+            recent_failures: RwLock::new(HashMap::new()),
         }))
+    }
+
+    /// 标记代理"最近失败"——5 分钟内不会被自动 prepick / auto_bind 选中。
+    /// 用于网络层失败（reqwest 连不上代理或经代理访问目标失败），避免坏代理被反复挑中。
+    pub fn mark_recent_failure(&self, slot_id: &str) {
+        self.recent_failures
+            .write()
+            .insert(slot_id.to_string(), Instant::now());
+    }
+
+    /// 清除"最近失败"标记（验证成功后调用，可选）
+    pub fn clear_recent_failure(&self, slot_id: &str) {
+        self.recent_failures.write().remove(slot_id);
+    }
+
+    /// 是否在失败冷却内
+    fn is_in_failure_cooldown(&self, slot_id: &str) -> bool {
+        self.recent_failures
+            .read()
+            .get(slot_id)
+            .is_some_and(|t| t.elapsed() < RECENT_FAILURE_COOLDOWN)
+    }
+
+    /// 仅查询：返回最优空闲代理 ID，过滤已试过的 + 冷却中的
+    pub fn pick_idle_candidate_excluding(
+        &self,
+        min_validity_hours: i64,
+        exclude: &std::collections::HashSet<String>,
+    ) -> Option<String> {
+        let now = Utc::now();
+        let entries = self.entries.read();
+        entries
+            .iter()
+            .filter(|e| {
+                e.has_free_slot()
+                    && (e.expires_at - now).num_hours() > min_validity_hours
+                    && !exclude.contains(&e.id)
+                    && !self.is_in_failure_cooldown(&e.id)
+            })
+            .max_by(|a, b| {
+                let by_avail = a.available_slots().cmp(&b.available_slots());
+                if by_avail == std::cmp::Ordering::Equal {
+                    a.expires_at.cmp(&b.expires_at)
+                } else {
+                    by_avail
+                }
+            })
+            .map(|e| e.id.clone())
     }
 
     /// 启动期注入 SQLite store（之后写入走 SQL 而非 JSON）
@@ -252,7 +310,9 @@ impl ProxyPool {
         entries
             .iter()
             .filter(|e| {
-                e.has_free_slot() && (e.expires_at - now).num_hours() > min_validity_hours
+                e.has_free_slot()
+                    && (e.expires_at - now).num_hours() > min_validity_hours
+                    && !self.is_in_failure_cooldown(&e.id)
             })
             .max_by(|a, b| {
                 let by_avail = a.available_slots().cmp(&b.available_slots());
@@ -280,7 +340,7 @@ impl ProxyPool {
             let now = Utc::now();
             let mut entries = self.entries.write();
 
-            // 在写锁内选择候选并直接绑定
+            // 在写锁内选择候选并直接绑定（跳过最近失败冷却中的代理）
             let chosen_idx = entries
                 .iter()
                 .enumerate()
@@ -288,6 +348,7 @@ impl ProxyPool {
                     e.has_free_slot()
                         && (e.expires_at - now).num_hours() > min_validity_hours
                         && !e.bound_credential_ids.contains(&credential_id)
+                        && !self.is_in_failure_cooldown(&e.id)
                 })
                 .max_by(|(_, a), (_, b)| {
                     let by_avail = a.available_slots().cmp(&b.available_slots());
@@ -782,6 +843,55 @@ mod tests {
         // 自动绑定凭据 1：剩余槽位 2 优先（p2、p3），其中到期更远的 p3 胜出
         let chosen = pool.auto_bind(1, 24).unwrap();
         assert_eq!(chosen, "p3");
+    }
+
+    #[test]
+    fn test_pick_idle_candidate_skips_recent_failures() {
+        let pool = ProxyPool::empty();
+        pool.entries
+            .write()
+            .extend([fresh_entry("p1", 2, 200), fresh_entry("p2", 2, 100)]);
+
+        // 默认会挑 p1（剩余槽相同，到期更远）
+        assert_eq!(pool.pick_idle_candidate(24), Some("p1".to_string()));
+
+        // 标记 p1 最近失败 → pick 应跳到 p2
+        pool.mark_recent_failure("p1");
+        assert_eq!(pool.pick_idle_candidate(24), Some("p2".to_string()));
+
+        // 清除冷却 → 又能挑回 p1
+        pool.clear_recent_failure("p1");
+        assert_eq!(pool.pick_idle_candidate(24), Some("p1".to_string()));
+    }
+
+    #[test]
+    fn test_auto_bind_skips_recent_failures() {
+        let pool = ProxyPool::empty();
+        pool.entries
+            .write()
+            .extend([fresh_entry("p1", 1, 200), fresh_entry("p2", 1, 100)]);
+        pool.mark_recent_failure("p1");
+        // p1 在冷却中 → auto_bind 必须挑 p2
+        let chosen = pool.auto_bind(1, 24).unwrap();
+        assert_eq!(chosen, "p2");
+    }
+
+    #[test]
+    fn test_pick_idle_candidate_excluding_filters_both() {
+        let pool = ProxyPool::empty();
+        pool.entries.write().extend([
+            fresh_entry("p1", 1, 200),
+            fresh_entry("p2", 1, 150),
+            fresh_entry("p3", 1, 100),
+        ]);
+        pool.mark_recent_failure("p2");
+        let mut tried = std::collections::HashSet::new();
+        tried.insert("p1".to_string());
+        // p1 已试 + p2 冷却 → 只剩 p3
+        assert_eq!(
+            pool.pick_idle_candidate_excluding(24, &tried),
+            Some("p3".to_string())
+        );
     }
 
     #[test]
