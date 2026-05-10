@@ -11,7 +11,14 @@ import {
 } from '@tanstack/react-table'
 import type { ReactNode } from 'react'
 import { useEffect, useState } from 'react'
-import { ChevronLeft, ChevronRight, Rows3 } from 'lucide-react'
+import {
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
+  ChevronsUpDown,
+  Rows3,
+} from 'lucide-react'
 import {
   Table,
   TableBody,
@@ -192,20 +199,57 @@ export function DataTable<TData>({
           <TableHeader className="sticky top-0 z-10 bg-background">
             {table.getHeaderGroups().map((hg) => (
               <TableRow key={hg.id}>
-                {hg.headers.map((header) => (
-                  <TableHead
-                    key={header.id}
-                    colSpan={header.colSpan}
-                    className="whitespace-nowrap bg-background"
-                  >
-                    {header.isPlaceholder
-                      ? null
-                      : flexRender(
-                          header.column.columnDef.header,
-                          header.getContext()
+                {hg.headers.map((header) => {
+                  if (header.isPlaceholder) {
+                    return (
+                      <TableHead
+                        key={header.id}
+                        colSpan={header.colSpan}
+                        className="whitespace-nowrap bg-background"
+                      />
+                    )
+                  }
+                  const content = flexRender(
+                    header.column.columnDef.header,
+                    header.getContext()
+                  )
+                  const canSort = header.column.getCanSort()
+                  if (!canSort) {
+                    return (
+                      <TableHead
+                        key={header.id}
+                        colSpan={header.colSpan}
+                        className="whitespace-nowrap bg-background"
+                      >
+                        {content}
+                      </TableHead>
+                    )
+                  }
+                  const sortDir = header.column.getIsSorted()
+                  return (
+                    <TableHead
+                      key={header.id}
+                      colSpan={header.colSpan}
+                      className="whitespace-nowrap bg-background"
+                    >
+                      <button
+                        type="button"
+                        onClick={header.column.getToggleSortingHandler()}
+                        className="inline-flex items-center gap-1 hover:text-foreground transition-colors select-none"
+                        title="点击切换排序"
+                      >
+                        <span>{content}</span>
+                        {sortDir === 'asc' ? (
+                          <ChevronUp className="h-3 w-3 text-foreground" />
+                        ) : sortDir === 'desc' ? (
+                          <ChevronDown className="h-3 w-3 text-foreground" />
+                        ) : (
+                          <ChevronsUpDown className="h-3 w-3 opacity-40" />
                         )}
-                  </TableHead>
-                ))}
+                      </button>
+                    </TableHead>
+                  )
+                })}
               </TableRow>
             ))}
           </TableHeader>

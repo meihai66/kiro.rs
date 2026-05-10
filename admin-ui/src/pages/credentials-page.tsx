@@ -391,8 +391,10 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
       enableSorting: false,
     },
     {
-      accessorKey: 'email',
-      header: '邮箱',
+      id: 'priority',
+      accessorFn: (row) => row.priority,
+      header: '优先级 / 邮箱',
+      sortDescFirst: false,
       cell: ({ row }) => {
         const c = row.original
         return (
@@ -421,6 +423,18 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
     {
       id: 'status',
       header: '状态',
+      // 排序：异常优先（disabled=0、failing=1、rateLimited=2、normal=3）
+      accessorFn: (row) => {
+        const cls = classifyCredential(row)
+        return cls === 'disabled'
+          ? 0
+          : cls === 'failing'
+            ? 1
+            : cls === 'rateLimited'
+              ? 2
+              : 3
+      },
+      sortDescFirst: false,
       cell: ({ row }) => {
         const c = row.original
         const cls = classifyCredential(c)
@@ -472,6 +486,7 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
     {
       id: 'reqStats',
       header: '统计',
+      enableSorting: false,
       cell: ({ row }) => {
         const c = row.original
         return (
@@ -496,6 +511,7 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
     {
       accessorKey: 'authMethod',
       header: '认证',
+      enableSorting: false,
       cell: ({ row }) => {
         const c = row.original
         return (
@@ -515,6 +531,18 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
     {
       id: 'balance',
       header: '已用 / 额度',
+      // 排序：按已用绝对值（含超额）；无额度数据视为 -1 排在最后
+      accessorFn: (row) => {
+        const live = ctx.liveBalanceMap.get(row.id)
+        const cached = ctx.cachedBalanceMap.get(row.id)
+        const limit = live?.usageLimit ?? cached?.usageLimit ?? 0
+        if (limit <= 0) return -1
+        const remaining = live?.remaining ?? cached?.remaining ?? 0
+        const baseUsed = Math.min(limit, Math.max(0, limit - remaining))
+        const overage = remaining < 0 ? -remaining : 0
+        return baseUsed + overage
+      },
+      sortUndefined: 'last',
       cell: ({ row }) => {
         const id = row.original.id
         const live = ctx.liveBalanceMap.get(id)
@@ -566,6 +594,7 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
     {
       id: 'proxy',
       header: '代理',
+      enableSorting: false,
       cell: ({ row }) => {
         const c = row.original
         const slot = c.proxySlotId
@@ -693,6 +722,8 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
     {
       id: 'lastUsed',
       header: '最后调用',
+      accessorFn: (row) =>
+        row.lastUsedAt ? new Date(row.lastUsedAt).getTime() : 0,
       cell: ({ row }) => (
         <span className="text-xs text-muted-foreground whitespace-nowrap">
           {formatLastUsed(row.original.lastUsedAt)}
