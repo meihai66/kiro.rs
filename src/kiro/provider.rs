@@ -248,7 +248,6 @@ impl KiroProvider {
             .acquire_context_for_credential(credential_id)
             .await?;
 
-        ctx.rpm.record();
         let _in_flight_guard = InFlightGuard::new(ctx.in_flight.clone());
 
         let config = self.token_manager.config();
@@ -278,6 +277,7 @@ impl KiroProvider {
             let body = response.text().await.unwrap_or_default();
             anyhow::bail!("test-chat 上游 {} 错误: {}", status, body);
         }
+        ctx.rpm.record();
         Ok(ApiCallResult {
             response,
             credential_id,
@@ -340,8 +340,7 @@ impl KiroProvider {
                 }
             };
 
-            // 实时指标：进 in_flight + 记 rpm（guard drop 时自动 dec）
-            ctx.rpm.record();
+            // 实时指标：进 in_flight（guard drop 时自动 dec）。RPM 仅在请求成功后再记录。
             let _in_flight_guard = InFlightGuard::new(ctx.in_flight.clone());
 
             let config = self.token_manager.config();
@@ -420,6 +419,7 @@ impl KiroProvider {
 
             // 成功响应
             if status.is_success() {
+                ctx.rpm.record();
                 self.token_manager.report_success(ctx.id);
                 tracing::info!(
                     credential_id = %ctx.id,
@@ -647,8 +647,7 @@ impl KiroProvider {
                 }
             };
 
-            // 实时指标：进 in_flight + 记 rpm（guard drop 时自动 dec）
-            ctx.rpm.record();
+            // 实时指标：进 in_flight（guard drop 时自动 dec）。RPM 仅在请求成功后再记录。
             let _in_flight_guard = InFlightGuard::new(ctx.in_flight.clone());
 
             let config = self.token_manager.config();
@@ -733,6 +732,7 @@ impl KiroProvider {
 
             // 成功响应
             if status.is_success() {
+                ctx.rpm.record();
                 self.token_manager.report_success(ctx.id);
                 tracing::info!(
                     credential_id = %ctx.id,

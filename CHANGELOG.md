@@ -1,5 +1,11 @@
 # Changelog
 
+## [v1.1.47] - 2026-05-11
+
+### 修复
+
+- **RPM 仅在请求成功后记录** — 将 `ctx.rpm.record()` 调用从请求发起前移到收到上游成功响应（`status.is_success()` 分支 / `test-chat` 上游 2xx 之后）才执行，避免被上游拒绝、网络失败、token 刷新失败等未真正消耗配额的请求虚增 RPM 指标；in_flight 仍在请求发起时进入并由 guard 自动 drop (`src/kiro/provider.rs`)
+
 ## [v1.1.46] - 2026-05-11
 
 ### 新增
