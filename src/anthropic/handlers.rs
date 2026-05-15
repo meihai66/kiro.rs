@@ -8,7 +8,7 @@ use crate::kiro::parser::decoder::EventStreamDecoder;
 use crate::token;
 use anyhow::Error;
 use axum::{
-    Extension, Json as JsonExtractor,
+    Extension,
     body::Body,
     extract::{OriginalUri, State},
     http::{StatusCode, header},
@@ -1041,8 +1041,33 @@ pub async fn post_messages(
     OriginalUri(uri): OriginalUri,
     State(state): State<AppState>,
     auth_slot: Option<Extension<AuthSlot>>,
-    JsonExtractor(mut payload): JsonExtractor<MessagesRequest>,
+    body: Bytes,
 ) -> Response {
+    // 手动反序列化：失败时记录 warn 日志，便于排查客户端请求参数问题
+    // （Axum 的 Json 提取器在反序列化失败时会在进入 handler 之前返回 400，
+    //  没有任何业务日志，导致难以定位是哪条请求、缺哪个字段。）
+    let mut payload: MessagesRequest = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(err) => {
+            tracing::warn!(
+                path = %uri.path(),
+                body_bytes = body.len(),
+                line = err.line(),
+                column = err.column(),
+                error = %err,
+                "请求 JSON 反序列化失败（请检查 model/max_tokens/messages 等字段类型与必填性）"
+            );
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::new(
+                    "invalid_request_error",
+                    format!("请求 JSON 解析失败: {}", err),
+                )),
+            )
+                .into_response();
+        }
+    };
+
     // 从 ApiKey 配置取 cache 比例模拟（命中 0..0 时 None=不模拟）
     let cache_sim_pct: Option<u32> = auth_slot.as_ref().and_then(|Extension(slot)| {
         slot.lock()
@@ -1872,10 +1897,29 @@ fn override_thinking_from_model_name(payload: &mut MessagesRequest) {
 /// POST /v1/messages/count_tokens
 ///
 /// 计算消息的 token 数量。
-pub async fn count_tokens(
-    OriginalUri(uri): OriginalUri,
-    JsonExtractor(payload): JsonExtractor<CountTokensRequest>,
-) -> impl IntoResponse {
+pub async fn count_tokens(OriginalUri(uri): OriginalUri, body: Bytes) -> Response {
+    let payload: CountTokensRequest = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(err) => {
+            tracing::warn!(
+                path = %uri.path(),
+                body_bytes = body.len(),
+                line = err.line(),
+                column = err.column(),
+                error = %err,
+                "count_tokens 请求 JSON 反序列化失败"
+            );
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::new(
+                    "invalid_request_error",
+                    format!("请求 JSON 解析失败: {}", err),
+                )),
+            )
+                .into_response();
+        }
+    };
+
     tracing::info!(
         path = %uri.path(),
         model = %payload.model,
@@ -1893,6 +1937,7 @@ pub async fn count_tokens(
     Json(CountTokensResponse {
         input_tokens: total_tokens.max(1) as i32,
     })
+    .into_response()
 }
 
 /// 截断字符串中间部分，保留头尾各 `keep` 个字符
