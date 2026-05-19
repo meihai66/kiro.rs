@@ -58,6 +58,8 @@ export function SettingsPage() {
   const [maxRetriesPerCred, setMaxRetriesPerCred] = useState('2')
   const [maxTotalRetries, setMaxTotalRetries] = useState('3')
   const [allCoolingBailSecs, setAllCoolingBailSecs] = useState('2')
+  const [modelUnavailableBreakerEnabled, setModelUnavailableBreakerEnabled] =
+    useState(true)
 
   // 导入凭据默认禁用
   const [importDisabledByDefault, setImportDisabledByDefault] = useState(true)
@@ -112,6 +114,9 @@ export function SettingsPage() {
       setMaxTotalRetries(String(globalConfig.maxTotalRetries ?? 3))
       setAllCoolingBailSecs(
         String(globalConfig.allCredentialsCooldownBailThresholdSecs ?? 2)
+      )
+      setModelUnavailableBreakerEnabled(
+        globalConfig.modelUnavailableBreakerEnabled ?? true
       )
       setImportDisabledByDefault(globalConfig.importDisabledByDefault ?? true)
       setBalanceAutoRefreshSecs(String(globalConfig.balanceAutoRefreshSecs ?? 0))
@@ -240,6 +245,15 @@ export function SettingsPage() {
       (globalConfig?.allCredentialsCooldownBailThresholdSecs ?? 2)
     ) {
       globalPayload.allCredentialsCooldownBailThresholdSecs = newCoolingBailSecs
+      hasGlobalChanges = true
+    }
+
+    if (
+      modelUnavailableBreakerEnabled !==
+      (globalConfig?.modelUnavailableBreakerEnabled ?? true)
+    ) {
+      globalPayload.modelUnavailableBreakerEnabled =
+        modelUnavailableBreakerEnabled
       hasGlobalChanges = true
     }
 
@@ -525,6 +539,24 @@ export function SettingsPage() {
                   setAllCoolingBailSecs,
                   '默认 2；最短可用等待 ≤ 该值则短睡再试，> 则立即 429'
                 )}
+              </div>
+              <div className="flex items-center justify-between pt-2 border-t">
+                <div>
+                  <label className="text-sm font-medium">
+                    MODEL_TEMPORARILY_UNAVAILABLE 全局熔断
+                  </label>
+                  <p className="text-xs text-muted-foreground">
+                    开启后上游连续返回 <code>MODEL_TEMPORARILY_UNAVAILABLE</code>{' '}
+                    达到阈值时，临时禁用所有凭据 5 分钟。
+                    <br />
+                    关闭后仅依赖单凭据故障转移和重试，不会因此熔断全部凭据。
+                  </p>
+                </div>
+                <Switch
+                  checked={modelUnavailableBreakerEnabled}
+                  onCheckedChange={setModelUnavailableBreakerEnabled}
+                  disabled={isPending}
+                />
               </div>
             </CardContent>
           </Card>

@@ -1902,6 +1902,7 @@ impl AdminService {
             max_total_retries: config.max_total_retries,
             all_credentials_cooldown_bail_threshold_secs: config
                 .all_credentials_cooldown_bail_threshold_secs,
+            model_unavailable_breaker_enabled: config.model_unavailable_breaker_enabled,
             import_disabled_by_default: config.import_disabled_by_default,
             balance_auto_refresh_secs: config.balance_auto_refresh_secs,
             rate_limit_cooldown_min_secs: config.rate_limit_cooldown_min_secs,
@@ -2034,6 +2035,10 @@ impl AdminService {
                 config.all_credentials_cooldown_bail_threshold_secs = v;
             }
 
+            if let Some(v) = req.model_unavailable_breaker_enabled {
+                config.model_unavailable_breaker_enabled = v;
+            }
+
             if let Some(v) = req.import_disabled_by_default {
                 config.import_disabled_by_default = v;
             }
@@ -2144,6 +2149,12 @@ impl AdminService {
                 Some(config.max_total_retries),
                 Some(config.all_credentials_cooldown_bail_threshold_secs),
             );
+        }
+
+        // 热更新 MODEL_TEMPORARILY_UNAVAILABLE 全局熔断开关
+        if let Some(v) = req.model_unavailable_breaker_enabled {
+            self.token_manager
+                .update_model_unavailable_breaker_enabled(v);
         }
 
         // 热更新 default_endpoint
@@ -2881,6 +2892,7 @@ mod tests {
             max_retries_per_credential: None,
             max_total_retries: None,
             all_credentials_cooldown_bail_threshold_secs: None,
+            model_unavailable_breaker_enabled: None,
             import_disabled_by_default: None,
             balance_auto_refresh_secs: None,
             rate_limit_cooldown_min_secs: None,
@@ -2921,6 +2933,7 @@ mod tests {
             max_retries_per_credential: None,
             max_total_retries: None,
             all_credentials_cooldown_bail_threshold_secs: None,
+            model_unavailable_breaker_enabled: None,
             import_disabled_by_default: None,
             balance_auto_refresh_secs: None,
             rate_limit_cooldown_min_secs: None,
@@ -2960,6 +2973,7 @@ mod tests {
             max_retries_per_credential: None,
             max_total_retries: None,
             all_credentials_cooldown_bail_threshold_secs: None,
+            model_unavailable_breaker_enabled: None,
             import_disabled_by_default: None,
             balance_auto_refresh_secs: None,
             rate_limit_cooldown_min_secs: None,
@@ -2999,6 +3013,7 @@ mod tests {
             max_retries_per_credential: None,
             max_total_retries: None,
             all_credentials_cooldown_bail_threshold_secs: None,
+            model_unavailable_breaker_enabled: None,
             import_disabled_by_default: None,
             balance_auto_refresh_secs: None,
             rate_limit_cooldown_min_secs: None,
@@ -3035,6 +3050,7 @@ mod tests {
             max_retries_per_credential: None,
             max_total_retries: None,
             all_credentials_cooldown_bail_threshold_secs: None,
+            model_unavailable_breaker_enabled: None,
             import_disabled_by_default: None,
             balance_auto_refresh_secs: None,
             rate_limit_cooldown_min_secs: None,

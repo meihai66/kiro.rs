@@ -1,5 +1,12 @@
 # Changelog
 
+## [v1.1.51] - 2026-05-20
+
+### 新增
+
+- **`MODEL_TEMPORARILY_UNAVAILABLE` 全局熔断开关** — 新增 `Config.model_unavailable_breaker_enabled`（默认 `true`，向后兼容现有行为）；关闭后即使上游连续返回该错误也不会触发全局禁用所有凭据，仅依赖单凭据故障转移和重试。`token_manager::report_model_unavailable` 在开关关闭时短路返回 `false` 且不累计计数；新增 `update_model_unavailable_breaker_enabled` 热更新方法，关闭时同步重置内部计数避免再开启时立刻触发 (`src/model/config.rs`, `src/kiro/token_manager.rs`, `src/admin/service.rs`, `src/admin/types.rs`)
+- **Admin 设置页全局熔断开关** — 「请求重试与故障转移」卡片底部新增 `MODEL_TEMPORARILY_UNAVAILABLE 全局熔断` Switch，可在不重启服务的前提下切换该熔断策略 (`admin-ui/src/pages/settings-page.tsx`, `admin-ui/src/types/api.ts`)
+
 ## [v1.1.50] - 2026-05-19
 
 ### 修复

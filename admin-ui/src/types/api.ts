@@ -594,6 +594,7 @@ export interface GlobalConfigResponse {
   maxRetriesPerCredential: number
   maxTotalRetries: number
   allCredentialsCooldownBailThresholdSecs: number
+  modelUnavailableBreakerEnabled: boolean
   importDisabledByDefault: boolean
   balanceAutoRefreshSecs: number
   rateLimitCooldownMinSecs: number
@@ -633,6 +634,7 @@ export interface UpdateGlobalConfigRequest {
   maxRetriesPerCredential?: number
   maxTotalRetries?: number
   allCredentialsCooldownBailThresholdSecs?: number
+  modelUnavailableBreakerEnabled?: boolean
   importDisabledByDefault?: boolean
   balanceAutoRefreshSecs?: number
   rateLimitCooldownMinSecs?: number

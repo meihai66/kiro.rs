@@ -2584,7 +2584,15 @@ impl MultiTokenManager {
     ///
     /// 累计达到阈值后禁用所有凭据，5分钟后自动恢复
     /// 返回是否触发了全局禁用
+    ///
+    /// 若 `Config.model_unavailable_breaker_enabled = false`，直接返回 false 且不计数，
+    /// 由调用方继续按单凭据故障转移/重试路径处理。
     pub fn report_model_unavailable(&self) -> bool {
+        if !self.config.read().model_unavailable_breaker_enabled {
+            tracing::debug!("MODEL_TEMPORARILY_UNAVAILABLE 全局熔断已关闭，跳过计数");
+            return false;
+        }
+
         let count = self.model_unavailable_count.fetch_add(1, Ordering::SeqCst) + 1;
         tracing::warn!(
             "MODEL_TEMPORARILY_UNAVAILABLE 错误（{}/{}）",
@@ -2597,6 +2605,16 @@ impl MultiTokenManager {
             true
         } else {
             false
+        }
+    }
+
+    /// 热更新「MODEL_TEMPORARILY_UNAVAILABLE 全局熔断开关」
+    ///
+    /// 关闭时会重置内部累计计数，避免开关再次开启后立刻触发。
+    pub fn update_model_unavailable_breaker_enabled(&self, enabled: bool) {
+        self.config.write().model_unavailable_breaker_enabled = enabled;
+        if !enabled {
+            self.model_unavailable_count.store(0, Ordering::SeqCst);
         }
     }
 

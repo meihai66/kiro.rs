@@ -204,6 +204,12 @@ pub struct Config {
     #[serde(default = "default_all_credentials_cooldown_bail_threshold_secs")]
     pub all_credentials_cooldown_bail_threshold_secs: u64,
 
+    /// 是否启用 MODEL_TEMPORARILY_UNAVAILABLE 全局熔断。
+    /// 默认 true：上游连续返回该错误达到内部阈值后，临时禁用所有凭据，5 分钟后自动恢复。
+    /// 关闭后即使上游连续返回此错误也不会触发全局禁用，仅依赖单凭据故障转移和重试。
+    #[serde(default = "default_true")]
+    pub model_unavailable_breaker_enabled: bool,
+
     /// 配置文件路径（运行时元数据，不写入 JSON）
     #[serde(skip)]
     config_path: Option<PathBuf>,
@@ -464,6 +470,7 @@ impl Default for Config {
             max_total_retries: default_max_total_retries(),
             all_credentials_cooldown_bail_threshold_secs:
                 default_all_credentials_cooldown_bail_threshold_secs(),
+            model_unavailable_breaker_enabled: true,
             import_disabled_by_default: true,
             balance_auto_refresh_secs: 0,
             rate_limit_cooldown_min_secs: default_rate_limit_cooldown_min_secs(),
