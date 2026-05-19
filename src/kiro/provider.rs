@@ -204,6 +204,17 @@ impl KiroProvider {
                     tm.update_balance_cache(id, remaining);
                     tracing::debug!("凭据 #{} 余额缓存已刷新: {:.2}", id, remaining);
                     if remaining < 1.0 {
+                        tm.record_disable_event(
+                            id,
+                            crate::kiro::token_manager::DisableReason::InsufficientBalance,
+                            None,
+                            format!("余额不足 ({:.2} < 1.0)，已主动禁用", remaining),
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        );
                         tm.mark_insufficient_balance(id);
                         tracing::warn!("凭据 #{} 余额不足 ({:.2})，已主动禁用", id, remaining);
                     }
@@ -447,6 +458,17 @@ impl KiroProvider {
                     credential_id = ctx.id,
                     pattern = %pattern,
                     "MCP 错误响应命中自动禁用规则，凭据被永久禁用"
+                );
+                self.token_manager.record_disable_event(
+                    ctx.id,
+                    crate::kiro::token_manager::DisableReason::AccountSuspended,
+                    Some(status.as_u16()),
+                    format!("MCP 命中自动禁用规则 \"{}\"", pattern),
+                    Some(request_body.to_string()),
+                    Some(body.clone()),
+                    Some("/mcp".to_string()),
+                    None,
+                    None,
                 );
                 self.token_manager.mark_account_suspended(ctx.id);
                 last_error = Some(anyhow::anyhow!(
@@ -764,6 +786,17 @@ impl KiroProvider {
                     credential_id = ctx.id,
                     pattern = %pattern,
                     "错误响应命中自动禁用规则，凭据被永久禁用"
+                );
+                self.token_manager.record_disable_event(
+                    ctx.id,
+                    crate::kiro::token_manager::DisableReason::AccountSuspended,
+                    Some(status.as_u16()),
+                    format!("{} 命中自动禁用规则 \"{}\"", api_type, pattern),
+                    Some(final_body_for_log.clone()),
+                    Some(body.clone()),
+                    Some("/v1/messages".to_string()),
+                    None,
+                    user_id.map(|s| s.to_string()),
                 );
                 self.token_manager.mark_account_suspended(ctx.id);
                 last_error = Some(anyhow::anyhow!(

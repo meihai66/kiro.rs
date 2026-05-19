@@ -537,6 +537,7 @@ impl AdminService {
                 error_kind: s.error_kind,
                 model: s.model,
                 summary: s.summary,
+                disable_reason: s.disable_reason,
             })
             .collect();
 
@@ -578,6 +579,7 @@ impl AdminService {
             response_body: row.response_body,
             user_id: row.user_id,
             request_id: row.request_id,
+            disable_reason: row.disable_reason,
         })
     }
 
@@ -2113,6 +2115,19 @@ impl AdminService {
             self.token_manager.update_region(config.region.clone());
         }
 
+        // 热更新「错误响应自动禁用规则」到 token_manager
+        // （token_manager 持有的是 Config 的独立副本，不同步则需重启才生效）
+        if req.auto_disable_patterns.is_some() {
+            self.token_manager
+                .update_auto_disable_patterns(config.auto_disable_patterns.clone());
+        }
+
+        // 热更新「错误内容替换规则」到 token_manager
+        if req.error_replace_rules.is_some() {
+            self.token_manager
+                .update_error_replace_rules(config.error_replace_rules.clone());
+        }
+
         // 热更新 credential_rpm
         if req.credential_rpm.is_some() {
             self.token_manager
@@ -2152,8 +2167,13 @@ impl AdminService {
 
         // 热更新压缩配置到运行时 Arc<RwLock<CompressionConfig>>
         if let Some(c) = &req.compression {
-            let mut runtime = self.compression_config.write();
-            Self::apply_compression_fields(&mut runtime, c);
+            let snapshot = {
+                let mut runtime = self.compression_config.write();
+                Self::apply_compression_fields(&mut runtime, c);
+                runtime.clone()
+            };
+            // 同步刷新 token 估算用的图片配置
+            crate::token::update_image_config(snapshot);
         }
 
         Ok(())

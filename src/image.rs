@@ -245,18 +245,30 @@ pub fn process_image_to_format(
     })
 }
 
-/// 从 base64 数据计算图片 token（不缩放）
+/// 从 base64 数据计算图片 token（不实际缩放图片，仅按缩放后的目标尺寸算 token）
+///
+/// 复用 `process_image()` 的缩放规则（`image_max_long_edge` / `image_max_pixels_single|multi`），
+/// 让 token 估算与实际转发的图片口径一致。
 ///
 /// 返回 (tokens, width, height)，解析失败返回 None
-pub fn estimate_image_tokens(base64_data: &str) -> Option<(u64, u32, u32)> {
+pub fn estimate_image_tokens(
+    base64_data: &str,
+    config: &CompressionConfig,
+    image_count: usize,
+) -> Option<(u64, u32, u32)> {
     let bytes = BASE64.decode(base64_data).ok()?;
     let reader = ImageReader::new(Cursor::new(&bytes))
         .with_guessed_format()
         .ok()?;
     let (width, height) = reader.into_dimensions().ok()?;
 
-    // 应用 Anthropic 缩放规则计算 token
-    let (scaled_w, scaled_h) = apply_scaling_rules(width, height, 1568, 1_150_000);
+    let max_pixels = if image_count >= config.image_multi_threshold {
+        config.image_max_pixels_multi
+    } else {
+        config.image_max_pixels_single
+    };
+    let (scaled_w, scaled_h) =
+        apply_scaling_rules(width, height, config.image_max_long_edge, max_pixels);
     let tokens = calculate_tokens(scaled_w, scaled_h);
 
     Some((tokens, width, height))

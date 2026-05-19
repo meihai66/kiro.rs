@@ -12,7 +12,7 @@ use crate::anthropic::types::{
     CountTokensRequest, CountTokensResponse, Message, SystemMessage, Tool,
 };
 use crate::http_client::{ProxyConfig, build_client};
-use crate::model::config::TlsBackend;
+use crate::model::config::{CompressionConfig, TlsBackend};
 use parking_lot::RwLock;
 use std::sync::OnceLock;
 
@@ -40,6 +40,12 @@ static COUNT_TOKENS_CONFIG: OnceLock<CountTokensConfig> = OnceLock::new();
 /// 代理配置的运行时可变存储（热更新时同步刷新）
 static COUNT_TOKENS_PROXY: OnceLock<RwLock<Option<ProxyConfig>>> = OnceLock::new();
 
+/// 图片估算用的压缩配置（与转发实际使用的 CompressionConfig 同源）
+///
+/// 用于让 `estimate_image_tokens` 复用 `process_image` 的缩放规则，使
+/// 本地 token 估算口径与发出去的图片一致。热更新由 admin 写配置时同步触发。
+static IMAGE_COMPRESSION_CONFIG: OnceLock<RwLock<CompressionConfig>> = OnceLock::new();
+
 /// 初始化 count_tokens 配置
 ///
 /// 应在应用启动时调用一次
@@ -54,6 +60,26 @@ pub fn update_proxy(proxy: Option<ProxyConfig>) {
     if let Some(lock) = COUNT_TOKENS_PROXY.get() {
         *lock.write() = proxy;
     }
+}
+
+/// 初始化图片估算用的压缩配置（应在启动时调用一次）
+pub fn init_image_config(config: CompressionConfig) {
+    let _ = IMAGE_COMPRESSION_CONFIG.set(RwLock::new(config));
+}
+
+/// 热更新图片估算用的压缩配置（admin 改配置时调用）
+pub fn update_image_config(config: CompressionConfig) {
+    if let Some(lock) = IMAGE_COMPRESSION_CONFIG.get() {
+        *lock.write() = config;
+    }
+}
+
+/// 读取当前图片估算配置，未初始化时返回默认
+fn current_image_config() -> CompressionConfig {
+    IMAGE_COMPRESSION_CONFIG
+        .get()
+        .map(|lock| lock.read().clone())
+        .unwrap_or_default()
 }
 
 /// 获取当前代理配置
@@ -194,11 +220,18 @@ fn estimate_messages_tokens(messages: &[Message]) -> u64 {
         return 0;
     }
 
+    // 预先扫描整批消息得到 image 总数，用于决定单图/多图像素阈值
+    let config = current_image_config();
+    let image_count: usize = messages
+        .iter()
+        .map(|m| count_image_blocks(&m.content))
+        .sum();
+
     messages
         .iter()
         .map(|msg| {
             count_tokens(&msg.role)
-                + count_message_content_tokens(&msg.content)
+                + count_content_with_ctx(&msg.content, &config, image_count)
                 + TOKENS_PER_MESSAGE
         })
         .sum()
@@ -209,8 +242,50 @@ fn count_serialized_value_tokens(value: &serde_json::Value) -> u64 {
     count_tokens(&json)
 }
 
-fn estimate_content_block_tokens(obj: &serde_json::Map<String, serde_json::Value>) -> u64 {
+/// 递归统计 Value 中 image content block 的数量
+fn count_image_blocks(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Array(arr) => arr.iter().map(count_image_blocks).sum(),
+        serde_json::Value::Object(obj) => {
+            if obj.get("type").and_then(|v| v.as_str()) == Some("image") {
+                1
+            } else if let Some(content) = obj.get("content") {
+                count_image_blocks(content)
+            } else {
+                0
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// 带 image 估算上下文的递归 token 计算
+fn count_content_with_ctx(
+    value: &serde_json::Value,
+    config: &CompressionConfig,
+    image_count: usize,
+) -> u64 {
+    match value {
+        serde_json::Value::Null => 0,
+        serde_json::Value::String(s) => count_tokens(s),
+        serde_json::Value::Array(arr) => arr
+            .iter()
+            .map(|v| count_content_with_ctx(v, config, image_count))
+            .sum(),
+        serde_json::Value::Object(obj) => {
+            estimate_content_block_with_ctx(obj, config, image_count)
+        }
+        _ => 0,
+    }
+}
+
+fn estimate_content_block_with_ctx(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    config: &CompressionConfig,
+    image_count: usize,
+) -> u64 {
     // image 块：使用 Anthropic 官方公式 (W*H+375)/750
+    // 按项目 CompressionConfig 的缩放规则得到目标尺寸，与实际转发的图片口径一致
     // 解析失败时退回为按 base64 字符串字数粗估，避免完全漏算
     if obj.get("type").and_then(|v| v.as_str()) == Some("image") {
         let data = obj
@@ -218,7 +293,8 @@ fn estimate_content_block_tokens(obj: &serde_json::Map<String, serde_json::Value
             .and_then(|s| s.get("data"))
             .and_then(|d| d.as_str())
             .unwrap_or("");
-        if let Some((tokens, _, _)) = crate::image::estimate_image_tokens(data) {
+        if let Some((tokens, _, _)) = crate::image::estimate_image_tokens(data, config, image_count)
+        {
             return tokens;
         }
         return count_tokens(data);
@@ -237,7 +313,7 @@ fn estimate_content_block_tokens(obj: &serde_json::Map<String, serde_json::Value
     }
 
     if let Some(content) = obj.get("content") {
-        return count_message_content_tokens(content);
+        return count_content_with_ctx(content, config, image_count);
     }
 
     0
@@ -284,12 +360,10 @@ pub(crate) fn count_tool_definition_tokens(_tool: &Tool) -> u64 {
 }
 
 /// 计算消息内容的 tokens
+///
+/// 公开 API：不知道整批请求的 image 数量，按单图阈值估算（够 cache_tracker 等
+/// "单 block" 场景；批量场景请走 `count_all_tokens` 入口，那里会预扫得到真实 image_count）。
 pub(crate) fn count_message_content_tokens(value: &serde_json::Value) -> u64 {
-    match value {
-        serde_json::Value::Null => 0,
-        serde_json::Value::String(s) => count_tokens(s),
-        serde_json::Value::Array(arr) => arr.iter().map(count_message_content_tokens).sum(),
-        serde_json::Value::Object(obj) => estimate_content_block_tokens(obj),
-        _ => 0,
-    }
+    let config = current_image_config();
+    count_content_with_ctx(value, &config, 1)
 }

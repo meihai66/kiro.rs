@@ -480,8 +480,8 @@ impl Store {
         conn.execute(
             "INSERT INTO error_logs(at, credential_id, endpoint, status_code, upstream_status, \
              error_kind, model, summary, request_method, request_path, request_headers, \
-             response_headers, request_body, response_body, user_id, request_id) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+             response_headers, request_body, response_body, user_id, request_id, disable_reason) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 log.at.to_rfc3339(),
                 log.credential_id.map(|v| v as i64),
@@ -499,6 +499,7 @@ impl Store {
                 log.response_body.as_deref(),
                 log.user_id.as_deref(),
                 log.request_id.as_deref(),
+                log.disable_reason.as_deref(),
             ],
         )?;
         Ok(conn.last_insert_rowid())
@@ -570,7 +571,7 @@ impl Store {
         // 列表
         let list_sql = format!(
             "SELECT id, at, credential_id, endpoint, status_code, upstream_status, error_kind, \
-             model, summary FROM error_logs{} ORDER BY id DESC LIMIT ?{} OFFSET ?{}",
+             model, summary, disable_reason FROM error_logs{} ORDER BY id DESC LIMIT ?{} OFFSET ?{}",
             where_sql,
             args.len() + 1,
             args.len() + 2,
@@ -596,6 +597,7 @@ impl Store {
                 error_kind: r.get(6)?,
                 model: r.get(7)?,
                 summary: r.get(8)?,
+                disable_reason: r.get(9)?,
             })
         })?;
         let items: Vec<ErrorLogSummary> = rows.collect::<rusqlite::Result<_>>()?;
@@ -608,7 +610,8 @@ impl Store {
         let mut stmt = conn.prepare(
             "SELECT id, at, credential_id, endpoint, status_code, upstream_status, error_kind, \
              model, summary, request_method, request_path, request_headers, response_headers, \
-             request_body, response_body, user_id, request_id FROM error_logs WHERE id = ?1",
+             request_body, response_body, user_id, request_id, disable_reason \
+             FROM error_logs WHERE id = ?1",
         )?;
         let mut rows = stmt.query(params![id])?;
         if let Some(r) = rows.next()? {
@@ -633,6 +636,7 @@ impl Store {
                 response_body: r.get(14)?,
                 user_id: r.get(15)?,
                 request_id: r.get(16)?,
+                disable_reason: r.get(17)?,
             }))
         } else {
             Ok(None)
@@ -717,6 +721,8 @@ pub struct ErrorLogInsert {
     pub response_body: Option<String>,
     pub user_id: Option<String>,
     pub request_id: Option<String>,
+    /// 凭据被禁用时的原因（AccountSuspended / AuthenticationFailed 等）；非禁用事件为 None
+    pub disable_reason: Option<String>,
 }
 
 /// 列表查询过滤条件
@@ -741,6 +747,7 @@ pub struct ErrorLogSummary {
     pub error_kind: String,
     pub model: Option<String>,
     pub summary: String,
+    pub disable_reason: Option<String>,
 }
 
 /// 详情（含完整请求/响应体）
@@ -763,6 +770,7 @@ pub struct ErrorLogRow {
     pub response_body: Option<String>,
     pub user_id: Option<String>,
     pub request_id: Option<String>,
+    pub disable_reason: Option<String>,
 }
 
 // ============ row mappers ============

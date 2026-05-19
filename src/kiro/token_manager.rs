@@ -693,6 +693,22 @@ pub enum DisableReason {
     QuotaExceeded,
 }
 
+impl DisableReason {
+    /// 落到 error_logs.disable_reason 列的中文描述（便于排障时直接阅读）
+    pub fn as_log_str(&self) -> &'static str {
+        match self {
+            DisableReason::FailureLimit => "连续失败次数过多",
+            DisableReason::RefreshFailureLimit => "Token 刷新连续失败",
+            DisableReason::AuthenticationFailed => "认证失败",
+            DisableReason::AccountSuspended => "账户暂停",
+            DisableReason::InsufficientBalance => "余额不足",
+            DisableReason::ModelUnavailable => "模型暂时不可用",
+            DisableReason::Manual => "手动禁用",
+            DisableReason::QuotaExceeded => "额度已用尽",
+        }
+    }
+}
+
 /// 单个凭据条目的状态
 #[allow(dead_code)]
 struct CredentialEntry {
@@ -1270,6 +1286,82 @@ impl MultiTokenManager {
     /// 热更新默认 endpoint
     pub fn update_default_endpoint(&self, default_endpoint: String) {
         self.config.write().default_endpoint = default_endpoint;
+    }
+
+    /// 热更新错误响应自动禁用规则（替换式）
+    pub fn update_auto_disable_patterns(&self, patterns: Vec<String>) {
+        self.config.write().auto_disable_patterns = patterns;
+    }
+
+    /// 热更新错误内容替换规则（替换式）
+    pub fn update_error_replace_rules(&self, rules: Vec<String>) {
+        self.config.write().error_replace_rules = rules;
+    }
+
+    /// 把一次「凭据被自动禁用」事件落到 error_logs 表。
+    ///
+    /// 若 store 未注入或写入失败，仅打 warn 日志，不会向调用方传播错误。
+    /// summary 控制在 200 字符以内；request_body / response_body 由调用方自行决定是否截断
+    /// （与现有错误日志一致）。
+    ///
+    /// # 参数
+    /// - `credential_id`: 被禁用的凭据 ID
+    /// - `reason`: 禁用原因（落到 disable_reason 列，error_kind 固定为 "credential_disabled"）
+    /// - `upstream_status`: 触发禁用的上游 HTTP 状态码（可空）
+    /// - `summary`: 简短描述（含命中的 pattern 或异常字符串）
+    /// - `request_body` / `response_body`: 触发禁用的请求与响应（可空）
+    /// - `request_path` / `model` / `user_id`: 关联请求信息（可空）
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_disable_event(
+        &self,
+        credential_id: u64,
+        reason: DisableReason,
+        upstream_status: Option<u16>,
+        summary: impl Into<String>,
+        request_body: Option<String>,
+        response_body: Option<String>,
+        request_path: Option<String>,
+        model: Option<String>,
+        user_id: Option<String>,
+    ) {
+        let Some(store) = self.store.read().clone() else {
+            return;
+        };
+        let summary = {
+            let s: String = summary.into();
+            if s.chars().count() > 200 {
+                let head: String = s.chars().take(200).collect();
+                format!("{}…", head)
+            } else {
+                s
+            }
+        };
+        let insert = crate::storage::ErrorLogInsert {
+            at: chrono::Utc::now(),
+            credential_id: Some(credential_id),
+            endpoint: None,
+            // 「凭据被禁用」事件本身没有给客户端返回的 status_code，
+            // 这里复用 upstream_status 作为兜底（无上游响应时填 0）
+            status_code: upstream_status.unwrap_or(0),
+            upstream_status,
+            error_kind: "credential_disabled".to_string(),
+            model,
+            summary,
+            request_method: None,
+            request_path,
+            request_headers: None,
+            response_headers: None,
+            request_body,
+            response_body,
+            user_id,
+            request_id: None,
+            disable_reason: Some(reason.as_log_str().to_string()),
+        };
+        tokio::spawn(async move {
+            if let Err(e) = store.insert_error_log(&insert) {
+                tracing::warn!(error = %e, "写入凭据禁用事件日志失败");
+            }
+        });
     }
 
     /// 热更新重试相关配置（max_retries_per_credential / max_total_retries /
@@ -2095,6 +2187,17 @@ impl MultiTokenManager {
                             }
                             Err(err) => {
                                 if is_invalid_grant_error(&err) {
+                                    self.record_disable_event(
+                                        id,
+                                        DisableReason::AuthenticationFailed,
+                                        None,
+                                        format!("Token 刷新失败（invalid_grant）: {}", err),
+                                        None,
+                                        None,
+                                        None,
+                                        None,
+                                        None,
+                                    );
                                     self.mark_authentication_failed(id);
                                     tracing::warn!(
                                         credential_id = id,
@@ -3190,6 +3293,17 @@ impl MultiTokenManager {
                         credential_id = id,
                         "凭据命中 overages 限额，自动禁用并标记 InsufficientBalance"
                     );
+                    self.record_disable_event(
+                        id,
+                        DisableReason::InsufficientBalance,
+                        None,
+                        format!("overages 限额: {}", msg),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    );
                     self.mark_insufficient_balance(id);
                 }
                 Err(e)
@@ -3281,6 +3395,20 @@ impl MultiTokenManager {
                             Ok(creds) => creds,
                             Err(err) => {
                                 if is_invalid_grant_error(&err) {
+                                    self.record_disable_event(
+                                        id,
+                                        DisableReason::AuthenticationFailed,
+                                        None,
+                                        format!(
+                                            "余额查询前 Token 刷新失败（invalid_grant）: {}",
+                                            err
+                                        ),
+                                        None,
+                                        None,
+                                        None,
+                                        None,
+                                        None,
+                                    );
                                     self.mark_authentication_failed(id);
                                 }
                                 return Err(err);
@@ -3372,8 +3500,30 @@ impl MultiTokenManager {
             }
             Err(err) => {
                 if is_invalid_grant_error(&err) {
+                    self.record_disable_event(
+                        id,
+                        DisableReason::AuthenticationFailed,
+                        None,
+                        format!("getUsageLimits 失败（invalid_grant）: {}", err),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    );
                     self.mark_authentication_failed(id);
                 } else if is_temporarily_suspended_error(&err) {
+                    self.record_disable_event(
+                        id,
+                        DisableReason::AccountSuspended,
+                        None,
+                        format!("getUsageLimits 失败（TEMPORARILY_SUSPENDED）: {}", err),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    );
                     self.mark_account_suspended(id);
                 }
                 Err(err)

@@ -349,6 +349,8 @@ async fn main() {
 
     // 创建共享的压缩配置（供 Anthropic 路由和 Admin API 共用，支持热更新）
     let compression_config = Arc::new(RwLock::new(config.read().compression.clone()));
+    // 同步初始化 token 估算用的图片配置（与 compression_config 同源）
+    crate::token::init_image_config(compression_config.read().clone());
     let prompt_cache_runtime = Arc::new(RwLock::new(anthropic::PromptCacheRuntime::new(
         config.read().prompt_cache_ttl_seconds,
         config.read().prompt_cache_accounting_enabled,

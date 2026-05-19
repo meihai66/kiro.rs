@@ -581,6 +581,7 @@ fn record_error_log(
         response_body: Some(response_body),
         user_id: ctx.user_id.map(|s| s.to_string()),
         request_id: None,
+        disable_reason: None,
     };
 
     tokio::spawn(async move {

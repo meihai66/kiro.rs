@@ -118,6 +118,8 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
     add_column_if_missing(conn, "credentials", "allow_overuse", "INTEGER NOT NULL DEFAULT 0")?;
     add_column_if_missing(conn, "credentials", "rpm", "INTEGER")?;
     add_column_if_missing(conn, "credentials", "last_overage_status", "TEXT")?;
+    // 凭据自动禁用事件落 error_logs 时记录禁用原因（AccountSuspended/AuthenticationFailed 等）
+    add_column_if_missing(conn, "error_logs", "disable_reason", "TEXT")?;
     Ok(())
 }
 

@@ -769,6 +769,8 @@ pub struct ErrorLogSummaryItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disable_reason: Option<String>,
 }
 
 /// 列表响应
@@ -814,6 +816,8 @@ pub struct ErrorLogDetail {
     pub user_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disable_reason: Option<String>,
 }
 
 /// 列表查询参数（解析自 ?... query string）
