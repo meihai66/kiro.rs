@@ -1,5 +1,15 @@
 # Changelog
 
+## [v1.1.50] - 2026-05-19
+
+### 修复
+
+- **`auto_disable_patterns` / `error_replace_rules` 热更新失效** — `token_manager` 持有的是 admin Config 的独立副本，需通过显式 `update_*` 方法同步；之前这两项漏了同步路径，导致 Admin 页修改后必须重启服务才生效。新增 `update_auto_disable_patterns` / `update_error_replace_rules`，并在 `update_global_config` 中同步调用 (`src/kiro/token_manager.rs`, `src/admin/service.rs`)
+
+### 新增
+
+- **凭据自动禁用事件落 `error_logs`** — 凭据因命中 `auto_disable_patterns` / `TEMPORARILY_SUSPENDED` / `invalid_grant` / overages 限额 / 余额刷新 < 1.0 被自动禁用时写入 `error_logs`：`error_kind="credential_disabled"`，新增 `disable_reason` 列（中文描述）；命中 `auto_disable_patterns` 的两条同时记录完整 request/response body，便于按 `credential_id` 回查禁用证据 (`src/kiro/provider.rs`, `src/kiro/token_manager.rs`, `src/storage/mod.rs`, `src/storage/migration.rs`, `src/admin/types.rs`)
+
 ## [v1.1.49] - 2026-05-19
 
 ### 修复
