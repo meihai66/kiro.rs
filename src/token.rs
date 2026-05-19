@@ -194,8 +194,14 @@ fn estimate_messages_tokens(messages: &[Message]) -> u64 {
         return 0;
     }
 
-    let json = serde_json::to_string(messages).unwrap_or_default();
-    count_tokens(&json) + messages.len() as u64 * TOKENS_PER_MESSAGE
+    messages
+        .iter()
+        .map(|msg| {
+            count_tokens(&msg.role)
+                + count_message_content_tokens(&msg.content)
+                + TOKENS_PER_MESSAGE
+        })
+        .sum()
 }
 
 fn count_serialized_value_tokens(value: &serde_json::Value) -> u64 {
@@ -204,6 +210,20 @@ fn count_serialized_value_tokens(value: &serde_json::Value) -> u64 {
 }
 
 fn estimate_content_block_tokens(obj: &serde_json::Map<String, serde_json::Value>) -> u64 {
+    // image 块：使用 Anthropic 官方公式 (W*H+375)/750
+    // 解析失败时退回为按 base64 字符串字数粗估，避免完全漏算
+    if obj.get("type").and_then(|v| v.as_str()) == Some("image") {
+        let data = obj
+            .get("source")
+            .and_then(|s| s.get("data"))
+            .and_then(|d| d.as_str())
+            .unwrap_or("");
+        if let Some((tokens, _, _)) = crate::image::estimate_image_tokens(data) {
+            return tokens;
+        }
+        return count_tokens(data);
+    }
+
     if let Some(text) = obj.get("text").and_then(|v| v.as_str()) {
         return count_tokens(text);
     }

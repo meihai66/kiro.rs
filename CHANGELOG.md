@@ -1,5 +1,15 @@
 # Changelog
 
+## [v1.1.49] - 2026-05-19
+
+### 修复
+
+- **`/v1/messages` 入口手动反序列化 + 记录解析失败日志** — 由 `axum::Json` 提取器改为 `body: Bytes` + `serde_json::from_slice`，反序列化失败时 `warn!` 记录 path/body_bytes/line/column/error，并返回标准 Anthropic `ErrorResponse` JSON（替代 axum 默认纯文本响应）；`count_tokens` 端点同步改造，便于排查客户端缺字段 / 类型错误等参数问题 (`src/anthropic/handlers.rs`)
+
+### 优化
+
+- **本地 token 估算改为按消息字段累加 + image 块走官方公式** — `estimate_messages_tokens` 不再把整个 messages 数组 `serde_json::to_string` 后再 tokenize（避免把 JSON 引号 / 字段名一起算进去导致虚高），改为遍历每条消息独立计算 `role` + content + `TOKENS_PER_MESSAGE`；`estimate_content_block_tokens` 对 image 块优先走 `image::estimate_image_tokens` 的 Anthropic 官方公式 `(W*H+375)/750`，解析失败时退回 base64 字符串字数粗估，避免完全漏算 (`src/token.rs`)
+
 ## [v1.1.47] - 2026-05-11
 
 ### 修复
