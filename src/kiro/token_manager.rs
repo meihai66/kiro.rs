@@ -732,6 +732,9 @@ struct CredentialEntry {
     success_count: u64,
     /// 最后一次 API 调用时间（RFC3339 格式）
     last_used_at: Option<String>,
+    /// 上次被 `acquire_context` 选中的时刻（用于 LRU 选号；None=从未被选中，最优）。
+    /// 仅供进程内排序，重启清零；并发安全由 `entries` 的外层 Mutex 保证。
+    last_acquired_at: Option<std::time::Instant>,
     /// refreshToken 的 SHA-256 哈希缓存（避免 snapshot 重复计算）
     refresh_token_hash: Option<String>,
     /// 当前并发请求数（实时）
@@ -1103,6 +1106,7 @@ impl MultiTokenManager {
                     fingerprint,
                     success_count: 0,
                     last_used_at: None,
+                    last_acquired_at: None,
                     refresh_token_hash,
                     in_flight: Arc::new(AtomicU32::new(0)),
                     rpm: RpmTracker::new(),
@@ -1384,6 +1388,36 @@ impl MultiTokenManager {
         }
     }
 
+    /// 热更新 429 限流冷却相关运行时参数。
+    ///
+    /// token_manager 持有 Config 的独立副本（provider.rs 读 cfg 走的就是这份），
+    /// 因此 admin 写入磁盘后必须显式同步过来，否则修改要重启才生效。
+    pub fn update_rate_limit_runtime(
+        &self,
+        rate_limit_cooldown_min_secs: Option<u64>,
+        rate_limit_cooldown_max_secs: Option<u64>,
+        capacity_pressure_cooldown_secs: Option<u64>,
+        rate_limit_ignore_retry_after: Option<bool>,
+        rate_limit_disable_cooldown: Option<bool>,
+    ) {
+        let mut cfg = self.config.write();
+        if let Some(v) = rate_limit_cooldown_min_secs {
+            cfg.rate_limit_cooldown_min_secs = v;
+        }
+        if let Some(v) = rate_limit_cooldown_max_secs {
+            cfg.rate_limit_cooldown_max_secs = v;
+        }
+        if let Some(v) = capacity_pressure_cooldown_secs {
+            cfg.capacity_pressure_cooldown_secs = v;
+        }
+        if let Some(v) = rate_limit_ignore_retry_after {
+            cfg.rate_limit_ignore_retry_after = v;
+        }
+        if let Some(v) = rate_limit_disable_cooldown {
+            cfg.rate_limit_disable_cooldown = v;
+        }
+    }
+
     /// 热更新单凭据目标请求速率（RPM）
     pub fn update_credential_rpm(&self, rpm: Option<u32>) {
         // 更新 config 中的 credential_rpm
@@ -1408,6 +1442,22 @@ impl MultiTokenManager {
     /// 获取可用凭据数量
     pub fn available_count(&self) -> usize {
         self.entries.lock().iter().filter(|e| !e.disabled).count()
+    }
+
+    /// 按给定 ID 列表取出完整凭据数据（含 refresh_token / client_secret 等敏感字段）。
+    ///
+    /// 仅供 Admin 导出功能使用。结果顺序与入参 `ids` 一致；不存在的 ID 会被忽略
+    /// （上层据此回报"跳过"原因）。
+    pub fn export_credentials_by_ids(&self, ids: &[u64]) -> Vec<KiroCredentials> {
+        let entries = self.entries.lock();
+        ids.iter()
+            .filter_map(|id| {
+                entries
+                    .iter()
+                    .find(|e| e.id == *id)
+                    .map(|e| e.credentials.clone())
+            })
+            .collect()
     }
 
     /// 输出一份"为什么当前没有可用凭据"的诊断信息（用于排障）
@@ -1514,47 +1564,46 @@ impl MultiTokenManager {
     }
 
     /// 选择最佳凭据（两级排序：使用次数最少 + 余额最多；完全相同则轮询）
-    fn select_best_candidate_id(&self, candidate_ids: &[u64]) -> Option<u64> {
-        if candidate_ids.is_empty() {
+    /// LRU 选号：从 `candidates` 里挑出"距离上次被选中最久"的那个（None = 从未被选中，最优）。
+    ///
+    /// 仅依赖本地 `last_acquired_at`（在 `acquire_context` 选中那一刻更新），与远端
+    /// 余额接口的 `recent_usage` 解耦——后者刷新延迟可达 10~30 分钟，不适合做实时分流。
+    ///
+    /// 入参 `candidates` 形如 `(id, last_acquired_at)`；调用方负责在持有 entries 锁时
+    /// 收集这两个字段，以避免本方法再上锁。完全并列时用全局 `selection_rr` 兜底轮询，
+    /// 防止首项独占。
+    fn select_best_candidate_id(
+        &self,
+        candidates: &[(u64, Option<std::time::Instant>)],
+    ) -> Option<u64> {
+        if candidates.is_empty() {
             return None;
         }
 
+        // 第一优先级：从未被选中（None）的优先；都用过则取 last_acquired_at 最早的那个
+        let oldest = candidates
+            .iter()
+            .map(|(_, t)| *t)
+            .min_by(|a, b| match (a, b) {
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, Some(_)) => std::cmp::Ordering::Less,
+                (Some(_), None) => std::cmp::Ordering::Greater,
+                (Some(x), Some(y)) => x.cmp(y),
+            })?;
+
+        let tied: Vec<u64> = candidates
+            .iter()
+            .filter(|(_, t)| *t == oldest)
+            .map(|(id, _)| *id)
+            .collect();
+
+        if tied.len() == 1 {
+            return Some(tied[0]);
+        }
+
+        // 兜底：完全并列（最常见于"全是 None / 全是从未用过"）走轮询
         let rr = self.selection_rr.fetch_add(1, Ordering::Relaxed) as usize;
-        let cache = self.balance_cache.lock();
-
-        let mut scored: Vec<(u64, u32, f64)> = Vec::with_capacity(candidate_ids.len());
-        for &id in candidate_ids {
-            let (usage, balance, initialized) = cache
-                .get(&id)
-                .map(|c| (c.recent_usage, c.remaining, c.initialized))
-                .unwrap_or((0, 0.0, false));
-            // 未初始化的凭据视为使用次数最大，避免被优先选中
-            let effective_usage = if initialized { usage } else { u32::MAX };
-            // NaN 余额归一化为 0.0，避免 total_cmp 将 NaN 视为最大值
-            let effective_balance = if balance.is_finite() { balance } else { 0.0 };
-            scored.push((id, effective_usage, effective_balance));
-        }
-
-        // 第一优先级：使用次数最少
-        let min_usage = scored.iter().map(|(_, usage, _)| *usage).min()?;
-        scored.retain(|(_, usage, _)| *usage == min_usage);
-
-        // 第二优先级：余额最多（使用次数相同）
-        let mut max_balance = scored.first().map(|(_, _, b)| *b).unwrap_or(0.0);
-        for &(_, _, balance) in &scored {
-            if balance > max_balance {
-                max_balance = balance;
-            }
-        }
-        scored.retain(|(_, _, balance)| *balance == max_balance);
-
-        if scored.len() == 1 {
-            return Some(scored[0].0);
-        }
-
-        // 兜底：完全相同则轮询，避免总选第一个
-        let index = rr % scored.len();
-        Some(scored[index].0)
+        Some(tied[rr % tied.len()])
     }
 
     /// 获取 API 调用上下文
@@ -1696,13 +1745,27 @@ impl MultiTokenManager {
                 );
             }
 
-            let candidate_infos: Vec<(u64, u32, bool)> = {
+            // 把"收集候选 → LRU 选号 → 更新 last_acquired_at → 取 credentials"全部放进
+            // 同一个 entries 锁内完成，避免在锁外做 select 时拿到过期快照——否则高并发
+            // 下多个请求会看到同一个"最旧的号"，瞬时把流量打偏到单号上。
+            //
+            // cooldown / rate_limiter 检查放在锁外（它们各自维护独立的锁，不需要 entries
+            // 持有）。这两个检查未通过时凭据已被标记为"刚选过"，下一轮会被往后排，对均匀
+            // 分配更有利。
+            let (id, credentials) = {
                 let mut entries = self.entries.lock();
 
-                let mut candidates: Vec<(u64, u32, bool)> = entries
+                let mut candidates: Vec<(u64, u32, bool, Option<std::time::Instant>)> = entries
                     .iter()
                     .filter(|e| !e.disabled && !tried_ids.contains(&e.id))
-                    .map(|e| (e.id, e.credentials.priority, e.credentials.runtime_only))
+                    .map(|e| {
+                        (
+                            e.id,
+                            e.credentials.priority,
+                            e.credentials.runtime_only,
+                            e.last_acquired_at,
+                        )
+                    })
                     .collect();
 
                 // 没有可用凭据：如果是"自动禁用导致全灭"，做一次类似重启的自愈
@@ -1720,13 +1783,23 @@ impl MultiTokenManager {
                             e.auto_heal_reason = None;
                             e.disable_reason = None;
                             e.failure_count = 0;
+                            // 自愈"等价于重启"语义：清掉 LRU 时间戳，让自愈后的凭据按
+                            // "从未用过"重新加入轮转，避免靠旧时间戳被错误排在队尾或队首
+                            e.last_acquired_at = None;
                         }
                     }
 
                     candidates = entries
                         .iter()
                         .filter(|e| !e.disabled && !tried_ids.contains(&e.id))
-                        .map(|e| (e.id, e.credentials.priority, e.credentials.runtime_only))
+                        .map(|e| {
+                            (
+                                e.id,
+                                e.credentials.priority,
+                                e.credentials.runtime_only,
+                                e.last_acquired_at,
+                            )
+                        })
                         .collect();
                 }
 
@@ -1744,28 +1817,35 @@ impl MultiTokenManager {
                     );
                 }
 
-                candidates
-            };
+                // 按优先级选出候选集合；同优先级时，优先选择仅运行时的环境变量凭据，再做 LRU 选择
+                let min_priority = candidates
+                    .iter()
+                    .map(|(_, p, _, _)| *p)
+                    .min()
+                    .unwrap_or(0);
+                let prefer_runtime_only = candidates
+                    .iter()
+                    .any(|(_, p, runtime_only, _)| *p == min_priority && *runtime_only);
+                let candidates_for_select: Vec<(u64, Option<std::time::Instant>)> = candidates
+                    .iter()
+                    .filter(|(_, p, runtime_only, _)| {
+                        *p == min_priority && (!prefer_runtime_only || *runtime_only)
+                    })
+                    .map(|(id, _, _, last_acq)| (*id, *last_acq))
+                    .collect();
+                let id = self
+                    .select_best_candidate_id(&candidates_for_select)
+                    .ok_or_else(|| anyhow::anyhow!("没有可用凭据"))?;
 
-            // 按优先级选出候选集合；同优先级时，优先选择仅运行时的环境变量凭据，再做负载均衡选择
-            let min_priority = candidate_infos
-                .iter()
-                .map(|(_, p, _)| *p)
-                .min()
-                .unwrap_or(0);
-            let prefer_runtime_only = candidate_infos
-                .iter()
-                .any(|(_, p, runtime_only)| *p == min_priority && *runtime_only);
-            let candidate_ids: Vec<u64> = candidate_infos
-                .iter()
-                .filter(|(_, p, runtime_only)| {
-                    *p == min_priority && (!prefer_runtime_only || *runtime_only)
-                })
-                .map(|(id, _, _)| *id)
-                .collect();
-            let id = self
-                .select_best_candidate_id(&candidate_ids)
-                .ok_or_else(|| anyhow::anyhow!("没有可用凭据"))?;
+                // LRU 关键点：选中那一刻就更新 last_acquired_at（仍持 entries 锁），
+                // 后续并发请求立即能看到该号"刚被选过"，自然轮转到别的号。
+                let entry = entries
+                    .iter_mut()
+                    .find(|e| e.id == id)
+                    .ok_or_else(|| anyhow::anyhow!("凭据 #{} 不存在", id))?;
+                entry.last_acquired_at = Some(std::time::Instant::now());
+                (id, entry.credentials.clone())
+            };
 
             // 冷却/速率限制：把“临时不可用”的凭据视为本轮不可选，从而自然分流到其他凭据。
             if let Some((reason, remaining)) = self.cooldown_manager.check_cooldown(id) {
@@ -1797,15 +1877,6 @@ impl MultiTokenManager {
                 cooling_skipped += 1;
                 continue;
             }
-
-            let credentials = {
-                let entries = self.entries.lock();
-                entries
-                    .iter()
-                    .find(|e| e.id == id)
-                    .map(|e| e.credentials.clone())
-                    .ok_or_else(|| anyhow::anyhow!("凭据 #{} 不存在", id))?
-            };
 
             // 尝试获取/刷新 Token
             match self.try_ensure_token(id, &credentials).await {
@@ -3009,20 +3080,34 @@ impl MultiTokenManager {
     }
 
     /// 设置凭据 Region（Admin API）
+    /// Patch 式更新 Region / API Region：
+    /// - 外层 `None` = 该字段不变
+    /// - 外层 `Some(None)` = 清除该字段
+    /// - 外层 `Some(Some(s))` = 设置为 s
+    ///
+    /// 两个字段独立，可以只改其中一个，避免批量操作误清空另一个。
     pub fn set_region(
         &self,
         id: u64,
-        region: Option<String>,
-        api_region: Option<String>,
+        region: Option<Option<String>>,
+        api_region: Option<Option<String>>,
     ) -> anyhow::Result<()> {
+        if region.is_none() && api_region.is_none() {
+            // 啥都没传，no-op
+            return Ok(());
+        }
         {
             let mut entries = self.entries.lock();
             let entry = entries
                 .iter_mut()
                 .find(|e| e.id == id)
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
-            entry.credentials.region = region;
-            entry.credentials.api_region = api_region;
+            if let Some(patch) = region {
+                entry.credentials.region = patch;
+            }
+            if let Some(patch) = api_region {
+                entry.credentials.api_region = patch;
+            }
         }
         self.persist_credentials()?;
         Ok(())
@@ -3672,6 +3757,7 @@ impl MultiTokenManager {
                 fingerprint,
                 success_count: 0,
                 last_used_at: None,
+                last_acquired_at: None,
                 refresh_token_hash: entry_secret_hash,
                 in_flight: Arc::new(AtomicU32::new(0)),
                 rpm: RpmTracker::new(),
@@ -4288,8 +4374,78 @@ mod tests {
         assert_eq!(manager.available_count(), 2);
     }
 
+    /// 高并发下 LRU 仍能均匀分配：100 个并发 acquire 跨 4 个号，
+    /// 每个号被选中次数都应该接近 100/4=25。
+    ///
+    /// 这是对"持锁选号+立即更新时间戳"修复的回归测试——
+    /// 如果改回"锁外 select + 锁内更新"的旧结构，并发请求会拿到过期快照，
+    /// 大量请求会瞬时偏向同一个最旧号，分布严重不均。
+    ///
+    /// 用 multi_thread runtime 确保 spawn 出的 100 个 task 真正在不同 OS 线程上
+    /// 并发抢锁，而不是 current_thread 下的协作式调度（那种环境下争用极少，
+    /// 测试可能给出错误的安全感）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_multi_token_manager_acquire_context_lru_distributes_under_concurrency() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let config = Config::default();
+        let mut creds = Vec::new();
+        for i in 1..=4 {
+            let mut c = KiroCredentials::default();
+            c.access_token = Some(format!("t{}", i));
+            c.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+            creds.push(c);
+        }
+
+        let manager =
+            Arc::new(MultiTokenManager::new(config, creds, None, None, false).unwrap());
+
+        // 4 个号的命中计数（id 从 1 开始）
+        let counters: Arc<[AtomicU32; 4]> = Arc::new([
+            AtomicU32::new(0),
+            AtomicU32::new(0),
+            AtomicU32::new(0),
+            AtomicU32::new(0),
+        ]);
+
+        let total = 100usize;
+        let mut handles = Vec::with_capacity(total);
+        for _ in 0..total {
+            let m = Arc::clone(&manager);
+            let c = Arc::clone(&counters);
+            handles.push(tokio::spawn(async move {
+                let ctx = m.acquire_context().await.unwrap();
+                c[(ctx.id - 1) as usize].fetch_add(1, Ordering::Relaxed);
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let counts: Vec<u32> = (0..4).map(|i| counters[i].load(Ordering::Relaxed)).collect();
+        let min = *counts.iter().min().unwrap();
+        let max = *counts.iter().max().unwrap();
+        let sum: u32 = counts.iter().sum();
+
+        assert_eq!(sum as usize, total, "全部请求都应记入计数：{:?}", counts);
+        // 完美均匀时 25/25/25/25；允许 ±5 容差，足以容纳调度抖动但能 catch
+        // "偏向单号"的回归（典型偏向场景下 max-min 会 >= 30）
+        assert!(
+            max - min <= 5,
+            "并发分配应均匀（max={}, min={}, counts={:?}）",
+            max,
+            min,
+            counts
+        );
+    }
+
+    /// LRU 选号：连续 acquire 时应"等了最久的优先"被再次选中。
+    ///
+    /// 两个凭据均未被用过时第一次走轮询；之后下一次 acquire 必须挑到
+    /// 上一次没被选中的那个（因为它的 last_acquired_at 仍然是 None / 更旧）。
     #[tokio::test]
-    async fn test_multi_token_manager_acquire_context_prefers_higher_balance_when_usage_equal() {
+    async fn test_multi_token_manager_acquire_context_lru_prefers_least_recently_acquired() {
         let config = Config::default();
         let mut cred1 = KiroCredentials::default();
         cred1.access_token = Some("t1".to_string());
@@ -4301,12 +4457,20 @@ mod tests {
         let manager =
             MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
 
-        // 两个凭据使用次数都为 0 时，应优先选择余额更高的
-        manager.update_balance_cache(1, 100.0);
-        manager.update_balance_cache(2, 200.0);
-
-        let ctx = manager.acquire_context().await.unwrap();
-        assert_eq!(ctx.id, 2);
+        let ctx1 = manager.acquire_context().await.unwrap();
+        // 让两次 acquire 之间留出足够时间差，避免 CI 繁忙时 Instant 精度抖动
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let ctx2 = manager.acquire_context().await.unwrap();
+        assert_ne!(
+            ctx1.id, ctx2.id,
+            "第二次 acquire 应当选中上一次没被选中的号（LRU）"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        let ctx3 = manager.acquire_context().await.unwrap();
+        assert_eq!(
+            ctx3.id, ctx1.id,
+            "第三次 acquire 应当再回到第一次的号（它已经成为'等最久'的那一个）"
+        );
     }
 
     #[tokio::test]

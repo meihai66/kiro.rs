@@ -27,7 +27,8 @@ use super::types::{
     AddCredentialRequest, AddCredentialResponse, BalanceResponse, BatchProxyExtendRequest,
     BatchProxyDeleteRequest, BatchProxyItemResult, BatchProxyResponse, BatchProxySlotsRequest,
     BatchProxyUnbindRequest, BindProxyRequest, CachedBalanceItem, CachedBalancesResponse,
-    CredentialStatusItem, CredentialsStatusResponse, ImportAction, ImportItemResult,
+    CredentialStatusItem, CredentialsStatusResponse, ExportCredentialsRequest,
+    ExportCredentialsResponse, ExportSkippedItem, ImportAction, ImportItemResult,
     ImportProxiesRequest, ImportProxiesResponse, ImportProxyItemResult, ImportSummary,
     ImportTokenJsonRequest, ImportTokenJsonResponse, ProxyAlertItem, ProxyAlertsResponse,
     ProxyConfigResponse, ProxyEntryItem, ProxyListResponse, TokenJsonItem, TokenJsonProxyItem,
@@ -713,21 +714,28 @@ impl AdminService {
     }
 
     /// 设置凭据 Region
+    /// Patch 语义：
+    /// - 字段为 `None`（请求体里缺省）= 保持原值不变
+    /// - `Some(None)` / `Some(Some(""))` = 清除该字段
+    /// - `Some(Some("xxx"))` = 设置为 "xxx"
     pub fn set_region(
         &self,
         id: u64,
-        region: Option<String>,
-        api_region: Option<String>,
+        region: Option<Option<String>>,
+        api_region: Option<Option<String>>,
     ) -> Result<(), AdminServiceError> {
-        // trim 后空字符串转 None
-        let region = region
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-        let api_region = api_region
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+        // 对每个字段：外层 Some 才表示要修改；内层 Some(s) 经 trim 后空串等同清除
+        let normalize = |patch: Option<Option<String>>| -> Option<Option<String>> {
+            patch.map(|inner| {
+                inner
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            })
+        };
+        let region_patch = normalize(region);
+        let api_region_patch = normalize(api_region);
         self.token_manager
-            .set_region(id, region, api_region)
+            .set_region(id, region_patch, api_region_patch)
             .map_err(|e| self.classify_error(e, id))
     }
 
@@ -1443,6 +1451,91 @@ impl AdminService {
         }
     }
 
+    /// 批量导出选中凭据为 token.json 兼容格式
+    ///
+    /// 输出 `items` 直接可作为 `import-token-json` 的 `items` 字段（接口也接受
+    /// 顶层数组），实现"导出→重新导入"闭环。
+    ///
+    /// 仅导出可重新导入的凭据：
+    /// - 必须有 `refresh_token`（api_key 模式无法走 OAuth 导入流程，记入 `skipped`）
+    /// - IdC 凭据会携带 `clientId` / `clientSecret`
+    /// - 代理绑定不跟随导出（按用户偏好，导入后重新绑定）
+    pub fn export_credentials(
+        &self,
+        req: ExportCredentialsRequest,
+    ) -> ExportCredentialsResponse {
+        let creds = self.token_manager.export_credentials_by_ids(&req.credential_ids);
+        let returned_ids: HashSet<u64> = creds.iter().filter_map(|c| c.id).collect();
+
+        let mut items: Vec<TokenJsonItem> = Vec::with_capacity(creds.len());
+        let mut skipped: Vec<ExportSkippedItem> = Vec::new();
+
+        for c in creds {
+            let id = c.id.unwrap_or(0);
+            let auth_method = c
+                .auth_method
+                .as_deref()
+                .map(|m| {
+                    if m.eq_ignore_ascii_case("builder-id") || m.eq_ignore_ascii_case("iam") {
+                        "idc".to_string()
+                    } else {
+                        m.to_lowercase()
+                    }
+                })
+                .unwrap_or_else(|| "social".to_string());
+
+            // api_key 模式没有 refresh_token，import-token-json 端点会拒绝
+            let refresh_token = match c.refresh_token.as_deref() {
+                Some(rt) if !rt.is_empty() => rt.to_string(),
+                _ => {
+                    skipped.push(ExportSkippedItem {
+                        credential_id: id,
+                        reason: format!(
+                            "凭据缺少 refreshToken（auth_method={auth_method}），无法通过 import-token-json 重新导入"
+                        ),
+                    });
+                    continue;
+                }
+            };
+
+            if auth_method == "idc"
+                && (c.client_id.is_none() || c.client_secret.is_none())
+            {
+                skipped.push(ExportSkippedItem {
+                    credential_id: id,
+                    reason: "IdC 凭据缺少 clientId / clientSecret".to_string(),
+                });
+                continue;
+            }
+
+            items.push(TokenJsonItem {
+                provider: None,
+                refresh_token: Some(refresh_token),
+                client_id: c.client_id,
+                client_secret: c.client_secret,
+                auth_method: Some(auth_method),
+                priority: c.priority,
+                region: c.region,
+                api_region: c.api_region,
+                machine_id: c.machine_id,
+                email: c.email,
+                proxy: None,
+            });
+        }
+
+        // 入参里有、但 token_manager 查不到的 ID 也回报，避免前端无声丢失
+        for id in &req.credential_ids {
+            if !returned_ids.contains(id) {
+                skipped.push(ExportSkippedItem {
+                    credential_id: *id,
+                    reason: "凭据不存在".to_string(),
+                });
+            }
+        }
+
+        ExportCredentialsResponse { items, skipped }
+    }
+
     /// 批量导入 token.json
     ///
     /// 解析官方 token.json 格式，按 provider 字段自动映射 authMethod：
@@ -1909,6 +2002,7 @@ impl AdminService {
             rate_limit_cooldown_max_secs: config.rate_limit_cooldown_max_secs,
             capacity_pressure_cooldown_secs: config.capacity_pressure_cooldown_secs,
             rate_limit_ignore_retry_after: config.rate_limit_ignore_retry_after,
+            rate_limit_disable_cooldown: config.rate_limit_disable_cooldown,
             error_log_enabled: config.error_log_enabled,
             error_log_max_count: config.error_log_max_count,
             error_log_max_age_days: config.error_log_max_age_days,
@@ -2081,6 +2175,10 @@ impl AdminService {
                 config.rate_limit_ignore_retry_after = v;
             }
 
+            if let Some(v) = req.rate_limit_disable_cooldown {
+                config.rate_limit_disable_cooldown = v;
+            }
+
             if let Some(v) = req.error_log_enabled {
                 config.error_log_enabled = v;
             }
@@ -2148,6 +2246,22 @@ impl AdminService {
                 Some(config.max_retries_per_credential),
                 Some(config.max_total_retries),
                 Some(config.all_credentials_cooldown_bail_threshold_secs),
+            );
+        }
+
+        // 热更新 429 限流冷却相关字段（token_manager 持有独立 Config 副本，不同步要重启才生效）
+        if req.rate_limit_cooldown_min_secs.is_some()
+            || req.rate_limit_cooldown_max_secs.is_some()
+            || req.capacity_pressure_cooldown_secs.is_some()
+            || req.rate_limit_ignore_retry_after.is_some()
+            || req.rate_limit_disable_cooldown.is_some()
+        {
+            self.token_manager.update_rate_limit_runtime(
+                Some(config.rate_limit_cooldown_min_secs),
+                Some(config.rate_limit_cooldown_max_secs),
+                Some(config.capacity_pressure_cooldown_secs),
+                Some(config.rate_limit_ignore_retry_after),
+                Some(config.rate_limit_disable_cooldown),
             );
         }
 
@@ -2899,6 +3013,7 @@ mod tests {
             rate_limit_cooldown_max_secs: None,
             capacity_pressure_cooldown_secs: None,
             rate_limit_ignore_retry_after: None,
+            rate_limit_disable_cooldown: None,
             error_log_enabled: None,
             error_log_max_count: None,
             error_log_max_age_days: None,
@@ -2940,6 +3055,7 @@ mod tests {
             rate_limit_cooldown_max_secs: None,
             capacity_pressure_cooldown_secs: None,
             rate_limit_ignore_retry_after: None,
+            rate_limit_disable_cooldown: None,
             error_log_enabled: None,
             error_log_max_count: None,
             error_log_max_age_days: None,
@@ -2980,6 +3096,7 @@ mod tests {
             rate_limit_cooldown_max_secs: None,
             capacity_pressure_cooldown_secs: None,
             rate_limit_ignore_retry_after: None,
+            rate_limit_disable_cooldown: None,
             error_log_enabled: None,
             error_log_max_count: None,
             error_log_max_age_days: None,
@@ -3020,6 +3137,7 @@ mod tests {
             rate_limit_cooldown_max_secs: None,
             capacity_pressure_cooldown_secs: None,
             rate_limit_ignore_retry_after: None,
+            rate_limit_disable_cooldown: None,
             error_log_enabled: None,
             error_log_max_count: None,
             error_log_max_age_days: None,
@@ -3057,6 +3175,7 @@ mod tests {
             rate_limit_cooldown_max_secs: None,
             capacity_pressure_cooldown_secs: None,
             rate_limit_ignore_retry_after: None,
+            rate_limit_disable_cooldown: None,
             error_log_enabled: None,
             error_log_max_count: None,
             error_log_max_age_days: None,

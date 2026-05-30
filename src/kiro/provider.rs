@@ -1083,6 +1083,18 @@ impl KiroProvider {
         let is_capacity_pressure = Self::is_insufficient_model_capacity(body);
 
         let cfg = self.token_manager.config();
+
+        // 全局开关：关闭所有 429 冷却。
+        // 仅触发"换号重试"，凭据不进入冷却状态，下一次轮询立即可被再次选中。
+        if cfg.rate_limit_disable_cooldown {
+            tracing::warn!(
+                credential_id = %credential_id,
+                rate_limit_response = %Self::is_rate_limit_response(body),
+                capacity_pressure = %is_capacity_pressure,
+                "凭据触发 429，rate_limit_disable_cooldown=true，跳过冷却"
+            );
+            return Duration::ZERO;
+        }
         let capacity_secs = if cfg.capacity_pressure_cooldown_secs == 0 {
             CAPACITY_RATE_LIMIT_COOLDOWN_SECS
         } else {

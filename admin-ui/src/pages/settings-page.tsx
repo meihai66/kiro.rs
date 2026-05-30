@@ -73,6 +73,7 @@ export function SettingsPage() {
   const [capacityPressureCooldown, setCapacityPressureCooldown] = useState('8')
   const [rateLimitIgnoreRetryAfter, setRateLimitIgnoreRetryAfter] =
     useState(false)
+  const [rateLimitDisableCooldown, setRateLimitDisableCooldown] = useState(false)
 
   // 错误日志
   const [errorLogEnabled, setErrorLogEnabled] = useState(true)
@@ -127,6 +128,9 @@ export function SettingsPage() {
       )
       setRateLimitIgnoreRetryAfter(
         globalConfig.rateLimitIgnoreRetryAfter ?? false
+      )
+      setRateLimitDisableCooldown(
+        globalConfig.rateLimitDisableCooldown ?? false
       )
       setErrorLogEnabled(globalConfig.errorLogEnabled ?? true)
       setErrorLogMaxCount(String(globalConfig.errorLogMaxCount ?? 50000))
@@ -303,6 +307,14 @@ export function SettingsPage() {
       (globalConfig?.rateLimitIgnoreRetryAfter ?? false)
     ) {
       globalPayload.rateLimitIgnoreRetryAfter = rateLimitIgnoreRetryAfter
+      hasGlobalChanges = true
+    }
+
+    if (
+      rateLimitDisableCooldown !==
+      (globalConfig?.rateLimitDisableCooldown ?? false)
+    ) {
+      globalPayload.rateLimitDisableCooldown = rateLimitDisableCooldown
       hasGlobalChanges = true
     }
 
@@ -612,6 +624,23 @@ export function SettingsPage() {
                 <Switch
                   checked={rateLimitIgnoreRetryAfter}
                   onCheckedChange={setRateLimitIgnoreRetryAfter}
+                  disabled={isPending}
+                />
+              </div>
+              <div className="flex items-center justify-between pt-2 border-t">
+                <div>
+                  <label className="text-sm font-medium">
+                    全局关闭 429 冷却
+                  </label>
+                  <p className="text-xs text-muted-foreground">
+                    开启后所有 429（包括容量类）都不会让凭据进入冷却——只触发一次换号重试，
+                    下轮立即可被再次选中。适合「上游 429 是软限流、不想让任何号被锁住」的场景。
+                    开启后上面三个冷却时长字段都不再生效。
+                  </p>
+                </div>
+                <Switch
+                  checked={rateLimitDisableCooldown}
+                  onCheckedChange={setRateLimitDisableCooldown}
                   disabled={isPending}
                 />
               </div>

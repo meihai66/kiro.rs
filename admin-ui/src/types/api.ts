@@ -382,7 +382,7 @@ export interface CredentialAccountInfoResponse {
 
 // ============ 批量导入 token.json ============
 
-// 官方 token.json 格式（用于解析导入）
+// 官方 token.json 格式（用于解析导入；也作为导出输出 schema）
 export interface TokenJsonItem {
   provider?: string
   refreshToken?: string
@@ -391,6 +391,7 @@ export interface TokenJsonItem {
   authMethod?: string
   priority?: number
   region?: string
+  apiRegion?: string
   machineId?: string
   /** 邮箱（KAM v1.1+ account.email） */
   email?: string
@@ -437,6 +438,26 @@ export interface ImportSummary {
 export interface ImportTokenJsonResponse {
   summary: ImportSummary
   items: ImportItemResult[]
+}
+
+// ============ 批量导出凭据 ============
+
+export interface ExportCredentialsRequest {
+  credentialIds: number[]
+}
+
+export interface ExportSkippedItem {
+  credentialId: number
+  reason: string
+}
+
+/**
+ * 导出响应。`items` 可直接作为 `import-token-json` 的 `items` 字段
+ * （后端也支持顶层数组，所以下载的 JSON 文件可以直接喂回导入弹窗）。
+ */
+export interface ExportCredentialsResponse {
+  items: TokenJsonItem[]
+  skipped: ExportSkippedItem[]
 }
 
 // ============ 代理池 ============
@@ -601,6 +622,8 @@ export interface GlobalConfigResponse {
   rateLimitCooldownMaxSecs: number
   capacityPressureCooldownSecs: number
   rateLimitIgnoreRetryAfter: boolean
+  /** 全局关闭 429 冷却（开启后所有 429 不再让凭据进入冷却） */
+  rateLimitDisableCooldown: boolean
   errorLogEnabled: boolean
   errorLogMaxCount: number
   errorLogMaxAgeDays: number
@@ -641,6 +664,7 @@ export interface UpdateGlobalConfigRequest {
   rateLimitCooldownMaxSecs?: number
   capacityPressureCooldownSecs?: number
   rateLimitIgnoreRetryAfter?: boolean
+  rateLimitDisableCooldown?: boolean
   errorLogEnabled?: boolean
   errorLogMaxCount?: number
   errorLogMaxAgeDays?: number

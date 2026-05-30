@@ -13,6 +13,8 @@ import type {
   CredentialAccountInfoResponse,
   ImportTokenJsonRequest,
   ImportTokenJsonResponse,
+  ExportCredentialsRequest,
+  ExportCredentialsResponse,
   ProxyConfigResponse,
   UpdateProxyConfigRequest,
   GlobalConfigResponse,
@@ -62,7 +64,7 @@ export async function resetCredentialFailure(
   return data
 }
 
-// 设置凭据 Region
+// 设置凭据 Region（同时设两个字段；保留给单凭据编辑表单使用）
 export async function setCredentialRegion(
   id: number,
   region: string | null,
@@ -70,6 +72,30 @@ export async function setCredentialRegion(
 ): Promise<SuccessResponse> {
   const { data } = await api.post<SuccessResponse>(`/credentials/${id}/region`, {
     region: region || null,
+    apiRegion: apiRegion || null,
+  })
+  return data
+}
+
+// 只改 Region，保留原 apiRegion（用于批量操作）
+// region 为 null/空 表示清除
+export async function setCredentialRegionOnly(
+  id: number,
+  region: string | null
+): Promise<SuccessResponse> {
+  const { data } = await api.post<SuccessResponse>(`/credentials/${id}/region`, {
+    region: region || null,
+  })
+  return data
+}
+
+// 只改 API Region，保留原 region（用于批量操作）
+// apiRegion 为 null/空 表示清除
+export async function setCredentialApiRegionOnly(
+  id: number,
+  apiRegion: string | null
+): Promise<SuccessResponse> {
+  const { data } = await api.post<SuccessResponse>(`/credentials/${id}/region`, {
     apiRegion: apiRegion || null,
   })
   return data
@@ -188,6 +214,17 @@ export async function importTokenJson(
 ): Promise<ImportTokenJsonResponse> {
   const { data } = await api.post<ImportTokenJsonResponse>(
     '/credentials/import-token-json',
+    req
+  )
+  return data
+}
+
+// 批量导出选中凭据（返回结构可直接喂回 import-token-json）
+export async function exportCredentials(
+  req: ExportCredentialsRequest
+): Promise<ExportCredentialsResponse> {
+  const { data } = await api.post<ExportCredentialsResponse>(
+    '/credentials/batch/export',
     req
   )
   return data

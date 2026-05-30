@@ -1,5 +1,23 @@
 # Changelog
 
+## [v1.1.52] - 2026-05-30
+
+### 新增
+
+- **全局关闭 429 冷却开关** — 新增 `Config.rate_limit_disable_cooldown`（默认 `false`，向后兼容现有冷却行为）；开启后所有 429（包括容量类）都不会让凭据进入冷却状态——只触发一次「换号重试」，下一轮立即可被再次选中。适用于「上游 429 仅是软限流、不想锁号」的场景。`provider::compute_rate_limit_cooldown` 在开关开启时短路返回 `Duration::ZERO`，并新增 `MultiTokenManager::update_rate_limit_runtime` 用于热更新整组限流冷却字段（含 min/max/capacity/ignore_retry_after/disable_cooldown），关闭重启依赖 (`src/model/config.rs`, `src/kiro/provider.rs`, `src/kiro/token_manager.rs`, `src/admin/service.rs`, `src/admin/types.rs`)
+- **批量导出凭据 JSON** — 新增 `POST /api/admin/credentials/batch/export`，按勾选 ID 导出 `TokenJsonItem[]` 兼容格式（可直接喂回 `import-token-json` 实现「导出→重新导入」闭环）；自动跳过缺 `refreshToken` 的 api_key 凭据和缺 `clientId/clientSecret` 的 IdC 凭据，并在 `skipped` 中回报原因。前端在批量操作菜单加「导出 JSON」选项，下载文件名带时间戳 `kiro-credentials-YYYYMMDDHHmmss.json` (`src/admin/handlers.rs`, `src/admin/router.rs`, `src/admin/service.rs`, `src/admin/types.rs`, `src/kiro/token_manager.rs`, `admin-ui/src/api/credentials.ts`, `admin-ui/src/pages/credentials-page.tsx`, `admin-ui/src/types/api.ts`)
+- **批量改 Region / API Region** — 凭据列表批量操作菜单新增「改 Region」「改 API Region」两项，留空表示清除覆盖（回退全局/默认）。后端 `SetRegionRequest` 改为「字段缺省=不变 / `null`=清除 / 非空=设置」的 patch 三态语义（`Option<Option<String>>` + 自定义 `deserialize_double_option`），避免批量「只改 Region 不动 API Region」时误清空另一字段 (`src/admin/service.rs`, `src/admin/types.rs`, `src/kiro/token_manager.rs`, `admin-ui/src/api/credentials.ts`, `admin-ui/src/pages/credentials-page.tsx`)
+
+### 重构
+
+- **凭据选号改为 LRU 算法** — `MultiTokenManager::select_best_candidate_id` 由「使用次数最少 + 余额最多」改为基于本地 `last_acquired_at` 的 LRU（从未被选中=最优，否则取时间戳最早）。原算法依赖远端余额接口的 `recent_usage`，刷新延迟 10~30 分钟不适合实时分流；新算法仅依赖进程内时间戳，重启清零。完全并列时仍用 `selection_rr` 兜底轮询防止首项独占 (`src/kiro/token_manager.rs`)
+
+### 修复
+
+- **高并发下 LRU 选号偏向单号** — `acquire_context` 将「收集候选 → LRU 选号 → 更新 `last_acquired_at` → 取 credentials」全部移入同一个 `entries` 锁内完成。原结构在锁外做 select 时多个并发请求会拿到过期快照，瞬时把流量打偏到同一个「最旧的号」上；新增 multi_thread runtime 下 100 并发 × 4 号的回归测试，分布偏差从 `max-min >= 30` 收敛到 `<= 5` (`src/kiro/token_manager.rs`)
+- **自愈后 LRU 时间戳未重置** — 凭据触发自愈（auto-heal）时同步清空 `last_acquired_at`，使自愈后的凭据按「从未用过」语义重新加入轮转，避免靠旧时间戳被错误排在队尾或队首 (`src/kiro/token_manager.rs`)
+- **429 限流冷却字段热更新失效** — `token_manager` 持有 Config 独立副本，admin 写入磁盘后 `rate_limit_cooldown_min/max_secs`、`capacity_pressure_cooldown_secs`、`rate_limit_ignore_retry_after`、`rate_limit_disable_cooldown` 均需显式同步；`update_global_config` 检测到这五项变化时统一调用新增的 `update_rate_limit_runtime` 同步副本 (`src/admin/service.rs`, `src/kiro/token_manager.rs`)
+
 ## [v1.1.51] - 2026-05-20
 
 ### 新增

@@ -48,11 +48,14 @@ import {
 } from '@/components/ui/dialog'
 import {
   deleteCredential as deleteCredentialApi,
+  exportCredentials as exportCredentialsApi,
   forceRefreshToken as forceRefreshTokenApi,
   getCredentialBalance,
   setCredentialAllowOveruse as setCredentialAllowOveruseApi,
+  setCredentialApiRegionOnly as setCredentialApiRegionOnlyApi,
   setCredentialDisabled as setCredentialDisabledApi,
   setCredentialPriority as setCredentialPriorityApi,
+  setCredentialRegionOnly as setCredentialRegionOnlyApi,
   setCredentialRpm as setCredentialRpmApi,
   setOveragePreference,
 } from '@/api/credentials'
@@ -68,6 +71,8 @@ type BatchAction =
   | 'disable'
   | 'setPriority'
   | 'setRpm'
+  | 'setRegion'
+  | 'setApiRegion'
   | 'overageOn'
   | 'overageOff'
   | 'allowOveruseOn'
@@ -75,6 +80,7 @@ type BatchAction =
   | 'verify'
   | 'refreshToken'
   | 'queryBalance'
+  | 'export'
   | 'delete'
 import {
   useCachedBalances,
@@ -820,6 +826,9 @@ export function CredentialsPage() {
   const [batchPriorityValue, setBatchPriorityValue] = useState(0)
   // 批量 RPM 输入：空 / 0 都视为「清除覆盖（沿用全局）」
   const [batchRpmValue, setBatchRpmValue] = useState('')
+  // 批量 Region / API Region 输入：空字符串视为「清除（回退全局/默认）」
+  const [batchRegionValue, setBatchRegionValue] = useState('')
+  const [batchApiRegionValue, setBatchApiRegionValue] = useState('')
   const [rangeStart, setRangeStart] = useState('')
   const [rangeEnd, setRangeEnd] = useState('')
   const [visibleRows, setVisibleRows] = useState<CredentialStatusItem[]>([])
@@ -1351,6 +1360,30 @@ export function CredentialsPage() {
     else toast.warning(`成功 ${ok}，失败 ${fail}`)
   }
 
+  // 批量改 Region：region=null 表示清除（回退到全局 region），不会动 apiRegion
+  const handleBatchSetRegion = async (region: string | null) => {
+    if (selectedIds.length === 0) return
+    const { ok, fail } = await runBatchConcurrent(selectedIds, (id) =>
+      setCredentialRegionOnlyApi(id, region)
+    )
+    queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    const label = region ? `Region=${region}` : '清除 Region 覆盖'
+    if (fail === 0) toast.success(`已对 ${ok} 个凭据${region ? '设置' : ''}${label}`)
+    else toast.warning(`成功 ${ok}，失败 ${fail}`)
+  }
+
+  // 批量改 API Region：apiRegion=null 表示清除（回退到 region），不会动 region
+  const handleBatchSetApiRegion = async (apiRegion: string | null) => {
+    if (selectedIds.length === 0) return
+    const { ok, fail } = await runBatchConcurrent(selectedIds, (id) =>
+      setCredentialApiRegionOnlyApi(id, apiRegion)
+    )
+    queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    const label = apiRegion ? `API Region=${apiRegion}` : '清除 API Region 覆盖'
+    if (fail === 0) toast.success(`已对 ${ok} 个凭据${apiRegion ? '设置' : ''}${label}`)
+    else toast.warning(`成功 ${ok}，失败 ${fail}`)
+  }
+
   const [batchRunning, setBatchRunning] = useState(false)
   const runBatchAction = async () => {
     if (batchRunning) return
@@ -1376,6 +1409,12 @@ export function CredentialsPage() {
           await handleBatchSetRpm(Number.isFinite(n) && n > 0 ? n : null)
           break
         }
+        case 'setRegion':
+          await handleBatchSetRegion(batchRegionValue.trim() || null)
+          break
+        case 'setApiRegion':
+          await handleBatchSetApiRegion(batchApiRegionValue.trim() || null)
+          break
         case 'overageOn':
           await handleBatchSetOverage('ENABLED')
           break
@@ -1397,12 +1436,54 @@ export function CredentialsPage() {
         case 'queryBalance':
           await handleQueryBalances()
           break
+        case 'export':
+          await handleBatchExport()
+          break
         case 'delete':
           await handleBatchDelete()
           break
       }
     } finally {
       setBatchRunning(false)
+    }
+  }
+
+  // 批量导出：服务端按勾选 ID 返回可重新导入的 JSON，前端直接触发下载
+  const handleBatchExport = async () => {
+    if (selectedIds.length === 0) return
+    try {
+      const resp = await exportCredentialsApi({ credentialIds: selectedIds })
+      if (resp.items.length === 0) {
+        const reason = resp.skipped[0]?.reason ?? '所选凭据都无法导出'
+        toast.error(`导出失败：${reason}`)
+        return
+      }
+      // 文件顶层用数组，与 import-token-json 接受的格式一致
+      const blob = new Blob([JSON.stringify(resp.items, null, 2)], {
+        type: 'application/json',
+      })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      const ts = new Date()
+        .toISOString()
+        .replace(/[-:T]/g, '')
+        .replace(/\..+$/, '')
+      a.href = url
+      a.download = `kiro-credentials-${ts}.json`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+
+      if (resp.skipped.length > 0) {
+        toast.warning(
+          `已导出 ${resp.items.length} 个，跳过 ${resp.skipped.length} 个（${resp.skipped[0].reason}）`
+        )
+      } else {
+        toast.success(`已导出 ${resp.items.length} 个凭据到 JSON 文件`)
+      }
+    } catch (e) {
+      toast.error('导出失败：' + extractErrorMessage(e))
     }
   }
 
@@ -2084,6 +2165,8 @@ export function CredentialsPage() {
             <option value="disable">禁用</option>
             <option value="setPriority">改优先级</option>
             <option value="setRpm">改 RPM 上限</option>
+            <option value="setRegion">改 Region</option>
+            <option value="setApiRegion">改 API Region</option>
             <option value="overageOn">账号超额开</option>
             <option value="overageOff">账号超额关</option>
             <option value="allowOveruseOn">允许超额:开</option>
@@ -2091,6 +2174,7 @@ export function CredentialsPage() {
             <option value="verify">验活</option>
             <option value="refreshToken">刷新</option>
             <option value="queryBalance">查余额</option>
+            <option value="export">导出 JSON</option>
             <option value="delete">删除(仅禁用)</option>
           </select>
           {batchAction === 'setPriority' && (
@@ -2113,6 +2197,26 @@ export function CredentialsPage() {
               onChange={(e) => setBatchRpmValue(e.target.value)}
               className="h-full w-24 text-xs border-0 border-l rounded-none focus-visible:ring-1"
               title="RPM 上限；留空 / 0 表示清除覆盖，沿用全局值"
+            />
+          )}
+          {batchAction === 'setRegion' && (
+            <Input
+              type="text"
+              placeholder="us-east-1，留空=清除"
+              value={batchRegionValue}
+              onChange={(e) => setBatchRegionValue(e.target.value)}
+              className="h-full w-40 text-xs border-0 border-l rounded-none focus-visible:ring-1"
+              title="凭据级 Region；留空表示清除覆盖，沿用全局 region。不影响 API Region。"
+            />
+          )}
+          {batchAction === 'setApiRegion' && (
+            <Input
+              type="text"
+              placeholder="us-west-2，留空=清除"
+              value={batchApiRegionValue}
+              onChange={(e) => setBatchApiRegionValue(e.target.value)}
+              className="h-full w-40 text-xs border-0 border-l rounded-none focus-visible:ring-1"
+              title="凭据级 API Region；留空表示清除覆盖，回退到 region。不影响 Region。"
             />
           )}
         </div>

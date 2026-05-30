@@ -174,6 +174,13 @@ pub struct Config {
     #[serde(default)]
     pub rate_limit_ignore_retry_after: bool,
 
+    /// 全局关闭 429 冷却开关。
+    /// 开启后所有 429（包括容量类）都不会让凭据进入冷却状态——只会触发一次"换号重试"，
+    /// 下一次轮询时该凭据立即可被再次选中。默认 false（保留冷却保护）。
+    /// 适用于「上游 429 已经只是软限流、不想让任何号被锁住」的场景。
+    #[serde(default)]
+    pub rate_limit_disable_cooldown: bool,
+
     /// 错误日志总开关（关闭后不写库；接口仍可读历史日志）
     #[serde(default = "default_true")]
     pub error_log_enabled: bool,
@@ -477,6 +484,7 @@ impl Default for Config {
             rate_limit_cooldown_max_secs: default_rate_limit_cooldown_max_secs(),
             capacity_pressure_cooldown_secs: default_capacity_pressure_cooldown_secs(),
             rate_limit_ignore_retry_after: false,
+            rate_limit_disable_cooldown: false,
             error_log_enabled: true,
             error_log_max_count: default_error_log_max_count(),
             error_log_max_age_days: default_error_log_max_age_days(),

@@ -13,10 +13,11 @@ use super::{
     types::{
         AddCredentialRequest, BatchProxyDeleteRequest, BatchProxyExtendRequest,
         BatchProxySlotsRequest, BatchProxyUnbindRequest, BindProxyRequest, ClearErrorLogsRequest,
-        CreateApiKeyRequest, ImportProxiesRequest, ImportTokenJsonRequest, ListErrorLogsQuery,
-        SetAllowOveruseRequest, SetCredentialRpmRequest, SetDisabledRequest, SetEmailRequest,
-        SetEndpointRequest, SetOveragePreferenceRequest, SetPriorityRequest, SetRegionRequest,
-        SuccessResponse, UpdateApiKeyRequest, UpdateProxyConfigRequest,
+        CreateApiKeyRequest, ExportCredentialsRequest, ImportProxiesRequest,
+        ImportTokenJsonRequest, ListErrorLogsQuery, SetAllowOveruseRequest, SetCredentialRpmRequest,
+        SetDisabledRequest, SetEmailRequest, SetEndpointRequest, SetOveragePreferenceRequest,
+        SetPriorityRequest, SetRegionRequest, SuccessResponse, UpdateApiKeyRequest,
+        UpdateProxyConfigRequest,
     },
 };
 
@@ -339,6 +340,16 @@ pub async fn import_token_json(
     Json(payload): Json<ImportTokenJsonRequest>,
 ) -> impl IntoResponse {
     let response = state.service.import_token_json(payload).await;
+    Json(response)
+}
+
+/// POST /api/admin/credentials/batch/export
+/// 按 ID 批量导出凭据为 token.json 兼容 JSON，可直接喂回 import-token-json
+pub async fn export_credentials(
+    State(state): State<AdminState>,
+    Json(payload): Json<ExportCredentialsRequest>,
+) -> impl IntoResponse {
+    let response = state.service.export_credentials(payload);
     Json(response)
 }
 

@@ -117,13 +117,20 @@ pub struct SetPriorityRequest {
 }
 
 /// 修改 Region 请求
+///
+/// 三态语义（用于支持批量"只改一个"）：
+/// - 字段缺省 = 保持不变
+/// - 字段为 `null` 或空字符串 = 清除（恢复全局/默认）
+/// - 字段为非空字符串 = 设置
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetRegionRequest {
-    /// 凭据级 Region（用于 Token 刷新），空字符串表示清除
-    pub region: Option<String>,
-    /// 凭据级 API Region（单独覆盖 API 请求），空字符串表示清除
-    pub api_region: Option<String>,
+    /// 凭据级 Region（用于 Token 刷新）
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub region: Option<Option<String>>,
+    /// 凭据级 API Region（单独覆盖 API 请求）
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub api_region: Option<Option<String>>,
 }
 
 /// 修改 endpoint 请求
@@ -338,41 +345,55 @@ impl SuccessResponse {
 
 // ============ 批量导入 token.json ============
 
-/// 官方 token.json 格式（用于解析导入）
-#[derive(Debug, Deserialize)]
+/// 官方 token.json 格式（用于解析导入 / 也作为导出输出 schema）
+///
+/// 导出时复用此结构以保证「导出文件能直接喂回 import-token-json」。
+/// Option 字段使用 `skip_serializing_if` 保持导出 JSON 简洁；代理信息默认不
+/// 跟随导出（用户偏好：导入后再手动绑定）。
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenJsonItem {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub refresh_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_method: Option<String>,
     #[serde(default = "default_import_priority")]
     pub priority: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub api_region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub machine_id: Option<String>,
     /// 邮箱（来自导出文件 account.email；用于前端展示）
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
     /// 嵌入式代理（来自 KAM 导出 v1.1+ 的 account.proxy 字段）
     /// 提供时：导入此凭据后将该代理加入代理池并强制绑定，覆盖自动选槽逻辑
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy: Option<TokenJsonProxyItem>,
 }
 
 /// 凭据导出文件中的嵌入式代理
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct TokenJsonProxyItem {
     /// 代理 URL，可包含用户名密码：`socks5://user:pass@host:port`
     pub url: String,
     /// 协议名（仅作记录；以 url scheme 为准）
     #[allow(dead_code)]
-    #[serde(default, rename = "type")]
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
     pub proxy_type: Option<String>,
     /// 到期时间（接受 RFC3339 / `YYYY-MM-DD` / Unix 秒 / Unix 毫秒）
-    #[serde(default, alias = "expiresAt")]
+    #[serde(default, alias = "expiresAt", skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<serde_json::Value>,
     /// 备注（可选）
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
 }
 
@@ -448,6 +469,32 @@ pub enum ImportAction {
     Added,
     Skipped,
     Invalid,
+}
+
+/// 批量导出请求：按勾选的凭据 ID 导出可重新导入的 JSON
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportCredentialsRequest {
+    pub credential_ids: Vec<u64>,
+}
+
+/// 批量导出响应
+///
+/// `items` 是 `TokenJsonItem` 数组，可直接作为 `import-token-json` 的
+/// `items` 字段（接口本身也接受顶层数组），实现"导出→重新导入"闭环。
+/// `skipped` 列出无法导出的 ID 及原因（例如缺少 refreshToken 的 api_key 凭据）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportCredentialsResponse {
+    pub items: Vec<TokenJsonItem>,
+    pub skipped: Vec<ExportSkippedItem>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportSkippedItem {
+    pub credential_id: u64,
+    pub reason: String,
 }
 
 // ============ 代理池 ============
@@ -906,6 +953,8 @@ pub struct GlobalConfigResponse {
     pub capacity_pressure_cooldown_secs: u64,
     /// 是否忽略上游 Retry-After，直接在 [min,max] 内随机出冷却
     pub rate_limit_ignore_retry_after: bool,
+    /// 全局关闭 429 冷却（开启后 429 只触发换号重试，不让凭据进入冷却）
+    pub rate_limit_disable_cooldown: bool,
     /// 错误日志开关
     pub error_log_enabled: bool,
     /// 错误日志最大保留条数（0=不限）
@@ -977,6 +1026,8 @@ pub struct UpdateGlobalConfigRequest {
     pub capacity_pressure_cooldown_secs: Option<u64>,
     /// 忽略上游 Retry-After 直接随机（可选）
     pub rate_limit_ignore_retry_after: Option<bool>,
+    /// 全局关闭 429 冷却（可选；开启后所有 429 不再让凭据进入冷却）
+    pub rate_limit_disable_cooldown: Option<bool>,
     /// 错误日志开关
     pub error_log_enabled: Option<bool>,
     /// 错误日志最大保留条数
