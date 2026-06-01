@@ -13,9 +13,83 @@ import {
 import { extractErrorMessage } from '@/lib/utils'
 import { storage } from '@/lib/storage'
 import type {
+  PricingConfig,
   UpdateCompressionConfigRequest,
   UpdateGlobalConfigRequest,
 } from '@/types/api'
+
+const DEFAULT_PRICING: PricingConfig = {
+  rules: [
+    { label: 'Opus', match: 'opus', matchType: 'contains', input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
+    { label: 'Sonnet', match: 'sonnet', matchType: 'contains', input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+    { label: 'Haiku', match: 'haiku', matchType: 'contains', input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
+  ],
+  default: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  multiplier: 1,
+}
+
+// 编辑态：价格字段用字符串保存，避免受控数字输入吃掉小数点（如 "0." / "1.5"）。
+// 保存时再转成数字。
+type PricingRateDraft = {
+  input: string
+  output: string
+  cacheRead: string
+  cacheWrite: string
+}
+type PricingRuleDraft = {
+  label: string
+  match: string
+  matchType: string
+} & PricingRateDraft
+type PricingDraft = {
+  rules: PricingRuleDraft[]
+  default: PricingRateDraft
+  multiplier: string
+}
+
+const rateToDraft = (r: {
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+}): PricingRateDraft => ({
+  input: String(r.input),
+  output: String(r.output),
+  cacheRead: String(r.cacheRead),
+  cacheWrite: String(r.cacheWrite),
+})
+const numOf = (s: string): number => {
+  const n = parseFloat(s)
+  return Number.isFinite(n) ? n : 0
+}
+const pricingToDraft = (p: PricingConfig): PricingDraft => ({
+  rules: p.rules.map((r) => ({
+    label: r.label,
+    match: r.match,
+    matchType: r.matchType,
+    ...rateToDraft(r),
+  })),
+  default: rateToDraft(p.default),
+  multiplier: String(p.multiplier ?? 1),
+})
+const draftToPricing = (d: PricingDraft): PricingConfig => ({
+  rules: d.rules.map((r) => ({
+    label: r.label,
+    match: r.match,
+    matchType: r.matchType,
+    input: numOf(r.input),
+    output: numOf(r.output),
+    cacheRead: numOf(r.cacheRead),
+    cacheWrite: numOf(r.cacheWrite),
+  })),
+  default: {
+    input: numOf(d.default.input),
+    output: numOf(d.default.output),
+    cacheRead: numOf(d.default.cacheRead),
+    cacheWrite: numOf(d.default.cacheWrite),
+  },
+  multiplier: d.multiplier.trim() === '' ? 1 : numOf(d.multiplier),
+})
 
 export function SettingsPage() {
   const { data: globalConfig, isLoading: globalLoading } = useGlobalConfig()
@@ -66,6 +140,7 @@ export function SettingsPage() {
 
   // 余额自动刷新
   const [balanceAutoRefreshSecs, setBalanceAutoRefreshSecs] = useState('0')
+  const [balanceRefreshConcurrency, setBalanceRefreshConcurrency] = useState('8')
 
   // 限流冷却
   const [rateLimitCooldownMin, setRateLimitCooldownMin] = useState('60')
@@ -94,6 +169,11 @@ export function SettingsPage() {
   const [cMaxHistoryChars, setCMaxHistoryChars] = useState('')
   const [cMaxRequestBodyBytes, setCMaxRequestBodyBytes] = useState('')
 
+  // 模型定价
+  const [pricing, setPricing] = useState<PricingDraft>(() =>
+    pricingToDraft(DEFAULT_PRICING)
+  )
+
   const isLoading = globalLoading || proxyLoading
   const isPending = globalPending || proxyPending
 
@@ -121,6 +201,9 @@ export function SettingsPage() {
       )
       setImportDisabledByDefault(globalConfig.importDisabledByDefault ?? true)
       setBalanceAutoRefreshSecs(String(globalConfig.balanceAutoRefreshSecs ?? 0))
+      setBalanceRefreshConcurrency(
+        String(globalConfig.balanceRefreshConcurrency ?? 8)
+      )
       setRateLimitCooldownMin(String(globalConfig.rateLimitCooldownMinSecs ?? 60))
       setRateLimitCooldownMax(String(globalConfig.rateLimitCooldownMaxSecs ?? 300))
       setCapacityPressureCooldown(
@@ -150,6 +233,9 @@ export function SettingsPage() {
       setCMaxHistoryTurns(c.maxHistoryTurns.toString())
       setCMaxHistoryChars(c.maxHistoryChars.toString())
       setCMaxRequestBodyBytes(c.maxRequestBodyBytes.toString())
+      if (globalConfig.pricing) {
+        setPricing(pricingToDraft(globalConfig.pricing))
+      }
     }
     if (proxyConfig) {
       setProxyUrl(proxyConfig.proxyUrl || '')
@@ -286,6 +372,21 @@ export function SettingsPage() {
       hasGlobalChanges = true
     }
 
+    const newBalanceConcurrency = Math.max(
+      1,
+      parseInt(balanceRefreshConcurrency, 10) || 8
+    )
+    if (
+      newBalanceConcurrency !== (globalConfig?.balanceRefreshConcurrency ?? 8)
+    ) {
+      if (newBalanceConcurrency < 1 || newBalanceConcurrency > 256) {
+        toast.error('余额刷新并发数应在 1~256')
+        return
+      }
+      globalPayload.balanceRefreshConcurrency = newBalanceConcurrency
+      hasGlobalChanges = true
+    }
+
     const newRlMin = Math.max(1, parseInt(rateLimitCooldownMin, 10) || 60)
     if (newRlMin !== (globalConfig?.rateLimitCooldownMinSecs ?? 60)) {
       globalPayload.rateLimitCooldownMinSecs = newRlMin
@@ -381,6 +482,16 @@ export function SettingsPage() {
       }
     }
 
+    // 模型定价（整体替换；JSON 深比较检测变更）
+    if (
+      globalConfig &&
+      JSON.stringify(draftToPricing(pricing)) !==
+        JSON.stringify(globalConfig.pricing)
+    ) {
+      globalPayload.pricing = draftToPricing(pricing)
+      hasGlobalChanges = true
+    }
+
     const proxyPayload: Record<string, string | null> = {
       proxyUrl: proxyUrl.trim() || null,
     }
@@ -409,6 +520,64 @@ export function SettingsPage() {
       toast.info('没有变更')
     }
   }
+
+  const updateRule = (
+    idx: number,
+    key: keyof PricingRuleDraft,
+    value: string
+  ) => {
+    setPricing((p) => ({
+      ...p,
+      rules: p.rules.map((r, i) => (i === idx ? { ...r, [key]: value } : r)),
+    }))
+  }
+  const addRule = () =>
+    setPricing((p) => ({
+      ...p,
+      rules: [
+        ...p.rules,
+        {
+          label: '',
+          match: '',
+          matchType: 'contains',
+          input: '0',
+          output: '0',
+          cacheRead: '0',
+          cacheWrite: '0',
+        },
+      ],
+    }))
+  const removeRule = (idx: number) =>
+    setPricing((p) => ({ ...p, rules: p.rules.filter((_, i) => i !== idx) }))
+  const updateDefault = (key: keyof PricingRateDraft, value: string) =>
+    setPricing((p) => ({
+      ...p,
+      default: { ...p.default, [key]: value },
+    }))
+
+  // 价格输入框：用 text + inputMode=decimal，避免 number 输入吃掉小数点。
+  // 只放行数字与小数点，存原始字符串，保存时再转数字。
+  const priceInput = (
+    value: string,
+    onChange: (v: string) => void,
+    id?: string
+  ) => (
+    <Input
+      id={id}
+      type="text"
+      inputMode="decimal"
+      value={value}
+      onChange={(e) => {
+        const v = e.target.value
+        if (v === '' || /^\d*\.?\d*$/.test(v)) onChange(v)
+      }}
+      disabled={isPending}
+    />
+  )
+
+  // 定价规则一行（响应式网格）
+  const priceCols =
+    'grid grid-cols-2 md:grid-cols-[1.1fr_1.4fr_0.9fr_repeat(4,0.8fr)_auto] gap-2 items-center'
 
   const numInput = (
     id: string,
@@ -515,6 +684,133 @@ export function SettingsPage() {
                   onCheckedChange={setImportDisabledByDefault}
                   disabled={isPending}
                 />
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* 模型定价（产出价值统计） */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">模型定价（产出价值统计）</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <p className="text-xs text-muted-foreground">
+                单价单位：美元 / 每百万 token。自上而下第一条命中的规则生效；都不命中用「默认价」。
+                改价或改规则后，凭据列表里所有历史用量的价值会按新规则即时重算（不影响积分）。
+              </p>
+              <div className="space-y-2">
+                <div className="hidden md:grid grid-cols-[1.1fr_1.4fr_0.9fr_repeat(4,0.8fr)_auto] gap-2 text-xs text-muted-foreground px-1">
+                  <span>标签</span>
+                  <span>匹配串</span>
+                  <span>方式</span>
+                  <span>输入</span>
+                  <span>输出</span>
+                  <span>缓存读</span>
+                  <span>缓存写</span>
+                  <span></span>
+                </div>
+                {pricing.rules.map((rule, idx) => (
+                  <div key={idx} className={priceCols}>
+                    <Input
+                      value={rule.label}
+                      placeholder="标签"
+                      onChange={(e) => updateRule(idx, 'label', e.target.value)}
+                      disabled={isPending}
+                    />
+                    <Input
+                      value={rule.match}
+                      placeholder="如 opus"
+                      onChange={(e) => updateRule(idx, 'match', e.target.value)}
+                      disabled={isPending}
+                    />
+                    <select
+                      className="flex h-9 w-full rounded-md border border-input bg-transparent px-2 py-1 text-sm"
+                      value={rule.matchType}
+                      onChange={(e) =>
+                        updateRule(idx, 'matchType', e.target.value)
+                      }
+                      disabled={isPending}
+                    >
+                      <option value="contains">包含</option>
+                      <option value="prefix">前缀</option>
+                      <option value="exact">精确</option>
+                      <option value="glob">通配</option>
+                    </select>
+                    {priceInput(rule.input, (v) => updateRule(idx, 'input', v))}
+                    {priceInput(rule.output, (v) =>
+                      updateRule(idx, 'output', v)
+                    )}
+                    {priceInput(rule.cacheRead, (v) =>
+                      updateRule(idx, 'cacheRead', v)
+                    )}
+                    {priceInput(rule.cacheWrite, (v) =>
+                      updateRule(idx, 'cacheWrite', v)
+                    )}
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => removeRule(idx)}
+                      disabled={isPending}
+                    >
+                      删除
+                    </Button>
+                  </div>
+                ))}
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={addRule}
+                  disabled={isPending}
+                >
+                  + 添加规则
+                </Button>
+              </div>
+              <div className="pt-2 border-t space-y-2">
+                <div className="text-sm font-medium">默认价（未命中任何规则）</div>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                  <div className="space-y-1">
+                    <label className="text-sm font-medium">输入</label>
+                    {priceInput(pricing.default.input, (v) =>
+                      updateDefault('input', v)
+                    )}
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-sm font-medium">输出</label>
+                    {priceInput(pricing.default.output, (v) =>
+                      updateDefault('output', v)
+                    )}
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-sm font-medium">缓存读</label>
+                    {priceInput(pricing.default.cacheRead, (v) =>
+                      updateDefault('cacheRead', v)
+                    )}
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-sm font-medium">缓存写</label>
+                    {priceInput(pricing.default.cacheWrite, (v) =>
+                      updateDefault('cacheWrite', v)
+                    )}
+                  </div>
+                </div>
+              </div>
+              <div className="pt-2 border-t space-y-1">
+                <label htmlFor="pricing-multiplier" className="text-sm font-medium">
+                  全局倍率
+                </label>
+                <div className="max-w-[12rem]">
+                  {priceInput(
+                    pricing.multiplier,
+                    (v) => setPricing((p) => ({ ...p, multiplier: v })),
+                    'pricing-multiplier'
+                  )}
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  所有模型按上面定价算出的价值，最终都会再 × 此倍率（默认 1）。
+                  例如想把展示价值整体打 1.5 倍就填 1.5。
+                </p>
               </div>
             </CardContent>
           </Card>
@@ -674,6 +970,32 @@ export function SettingsPage() {
               <p className="text-[11px] text-muted-foreground">
                 有效范围：0（关闭）或 60~86400 秒
               </p>
+              <div className="pt-2 space-y-1">
+                <label
+                  htmlFor="balance-refresh-concurrency"
+                  className="text-sm font-medium"
+                >
+                  刷新并发数
+                </label>
+                <div className="flex items-center gap-2 max-w-xs">
+                  <Input
+                    id="balance-refresh-concurrency"
+                    type="number"
+                    min={1}
+                    max={256}
+                    value={balanceRefreshConcurrency}
+                    onChange={(e) =>
+                      setBalanceRefreshConcurrency(e.target.value)
+                    }
+                    disabled={isPending}
+                  />
+                  <span className="text-sm">个并发</span>
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  后台刷新 + 启动初始化的并发数（1~256，默认 8）。每个凭据走各自代理出口时可调高（如
+                  32+）加速；若多个凭据共用同一出口 IP，调高可能触发上游 429。
+                </p>
+              </div>
             </CardContent>
           </Card>
 

@@ -144,6 +144,31 @@ impl KiroProvider {
         Ok(())
     }
 
+    /// 记录一次请求的用量到对应凭据（按模型累计，用于「产出价值」统计）。
+    ///
+    /// 仅做统计累加，失败不影响主流程。
+    #[allow(clippy::too_many_arguments)]
+    pub fn report_usage(
+        &self,
+        id: u64,
+        model: &str,
+        input_tokens: i32,
+        output_tokens: i32,
+        cache_read_tokens: i32,
+        cache_write_tokens: i32,
+        credit_usage: f64,
+    ) {
+        self.token_manager.report_usage(
+            id,
+            model,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            credit_usage,
+        );
+    }
+
     /// 获取凭据对应的 HTTP Client
     ///
     /// 启用代理池时：必须从凭据所绑代理槽取（缺失/过期返回 Err，由调用方标 ProxyExhausted）。

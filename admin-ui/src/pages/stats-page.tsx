@@ -48,9 +48,8 @@ export function StatsPage() {
   const noProxyCount = credList.filter(
     (c) => !c.proxySlotId && !c.disabled
   ).length
-  const failureCount = credList.filter(
-    (c) => c.failureCount > 0 || c.refreshFailureCount > 0
-  ).length
+  // 累计错误数（不随成功清零）；区别于「当前处于连续失败状态的凭据数」
+  const totalErrors = credList.reduce((s, c) => s + (c.errorCount ?? 0), 0)
   const totalInFlight = credList.reduce((s, c) => s + (c.inFlight ?? 0), 0)
   const totalRpm = credList.reduce((s, c) => s + (c.rpm ?? 0), 0)
   const overageOn = credList.filter((c) => c.overageStatus === 'ENABLED').length
@@ -153,11 +152,11 @@ export function StatsPage() {
             variant="destructive"
             className="h-8"
             disabled={resetMut.isPending}
-            title="清空所有 API Key 累计请求计数 + 每凭据 success/429 计数。不清 RPM 历史和错误日志"
+            title="清空所有 API Key 累计请求计数 + 每凭据 success/错误/429 计数 + 产出价值。不清 RPM 历史和错误日志"
             onClick={() => {
               if (
                 !confirm(
-                  '确认清空统计数据？\n\n会重置：\n• 总请求次数 / 成功 / 失败\n• 每凭据成功次数、429 累计\n\n不会动：连续失败计数、最后调用时间、RPM 历史、错误日志。'
+                  '确认清空统计数据？\n\n会重置：\n• 总请求次数 / 成功 / 失败\n• 每凭据成功次数、累计错误、429 累计\n• 每凭据积分 / 产出价值\n\n不会动：连续失败计数、最后调用时间、RPM 历史、错误日志。'
                 )
               )
                 return
@@ -254,7 +253,7 @@ export function StatsPage() {
         <StatCard label="可用" value={enabledCount} tone="ok" />
         <StatCard label="已禁用" value={disabledCount} tone="warn" />
         <StatCard label="未绑代理" value={noProxyCount} tone={noProxyCount > 0 ? 'warn' : undefined} />
-        <StatCard label="失败计数" value={failureCount} tone={failureCount > 0 ? 'warn' : undefined} />
+        <StatCard label="累计错误" value={totalErrors} tone={totalErrors > 0 ? 'warn' : undefined} />
         <StatCard label="超额开启" value={overageOn} tone="ok" />
       </div>
 

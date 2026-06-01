@@ -1420,7 +1420,13 @@ async fn handle_stream_request(
     let initial_events = ctx.generate_initial_events();
 
     // 创建 SSE 流
-    let stream = create_sse_stream(api_result.response, ctx, initial_events);
+    let stream = create_sse_stream(
+        api_result.response,
+        ctx,
+        initial_events,
+        provider,
+        api_result.credential_id,
+    );
 
     // 返回 SSE 响应
     Response::builder()
@@ -1440,11 +1446,31 @@ fn create_ping_sse() -> Bytes {
     Bytes::from("event: ping\ndata: {\"type\": \"ping\"}\n\n")
 }
 
+/// 流式请求结束时记录用量（按模型累计，用于「产出价值」统计；不影响响应）
+fn report_stream_usage(
+    provider: &crate::kiro::provider::KiroProvider,
+    credential_id: u64,
+    ctx: &StreamContext,
+) {
+    let (input, output, cache_read, cache_write, credit) = ctx.usage_for_accounting();
+    provider.report_usage(
+        credential_id,
+        &ctx.model,
+        input,
+        output,
+        cache_read,
+        cache_write,
+        credit,
+    );
+}
+
 /// 创建 SSE 事件流
 fn create_sse_stream(
     response: reqwest::Response,
     ctx: StreamContext,
     initial_events: Vec<SseEvent>,
+    provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
+    credential_id: u64,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> {
     // 先发送初始事件
     let initial_stream = stream::iter(
@@ -1459,8 +1485,16 @@ fn create_sse_stream(
     let ping_interval = interval_at(Instant::now() + ping_period, ping_period);
 
     let processing_stream = stream::unfold(
-        (body_stream, ctx, EventStreamDecoder::new(), false, ping_interval),
-        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval)| async move {
+        (
+            body_stream,
+            ctx,
+            EventStreamDecoder::new(),
+            false,
+            ping_interval,
+            provider,
+            credential_id,
+        ),
+        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval, provider, credential_id)| async move {
             if finished {
                 return None;
             }
@@ -1497,26 +1531,28 @@ fn create_sse_stream(
                                 .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                 .collect();
 
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, provider, credential_id)))
                         }
                         Some(Err(e)) => {
                             tracing::error!("读取响应流失败: {}", e);
                             // 发送最终事件并结束
                             let final_events = ctx.generate_final_events();
+                            report_stream_usage(&provider, credential_id, &ctx);
                             let bytes: Vec<Result<Bytes, Infallible>> = final_events
                                 .into_iter()
                                 .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                 .collect();
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, provider, credential_id)))
                         }
                         None => {
                             // 流结束，发送最终事件
                             let final_events = ctx.generate_final_events();
+                            report_stream_usage(&provider, credential_id, &ctx);
                             let bytes: Vec<Result<Bytes, Infallible>> = final_events
                                 .into_iter()
                                 .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                 .collect();
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, provider, credential_id)))
                         }
                     }
                 }
@@ -1524,7 +1560,7 @@ fn create_sse_stream(
                 _ = ping_interval.tick() => {
                     tracing::trace!("发送 ping 保活事件");
                     let bytes: Vec<Result<Bytes, Infallible>> = vec![Ok(create_ping_sse())];
-                    Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval)))
+                    Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, provider, credential_id)))
                 }
             }
         },
@@ -1795,6 +1831,21 @@ async fn handle_non_stream_request(
         context_input_tokens_for_log.map_or("N/A".to_string(), |v| v.to_string()),
         billed_input_tokens,
         output_tokens
+    );
+
+    // 记录用量（按模型累计，用于「产出价值」统计；不影响响应）
+    provider.report_usage(
+        api_result.credential_id,
+        context.model,
+        billed_input_tokens,
+        output_tokens,
+        final_cache_context
+            .map(|c| c.cache_read_input_tokens)
+            .unwrap_or(0),
+        final_cache_context
+            .map(|c| c.cache_creation_input_tokens)
+            .unwrap_or(0),
+        metering.as_ref().map(|m| m.usage).unwrap_or(0.0),
     );
 
     let response_body = {

@@ -27,6 +27,7 @@ import { toast } from 'sonner'
 
 import { AddCredentialDialog } from '@/components/add-credential-dialog'
 import { BalanceDialog } from '@/components/balance-dialog'
+import { UsageStatsDialog } from '@/components/usage-stats-dialog'
 import {
   BatchVerifyDialog,
   type VerifyResult,
@@ -211,12 +212,15 @@ function AuthBadge({ method }: { method: string }) {
   )
 }
 
-/** 订阅 → 单字符图标。PRO+/PRO=P(绿), Solo=S(蓝), Indie=I(紫), Team=T(橙), Free=F(黄) */
+/** 订阅 → 单字符图标。Power=⚡(玫红), PRO+/PRO=P(绿), Solo=S(蓝), Indie=I(紫), Team=T(橙), Free=F(黄) */
 function SubscriptionBadge({ title }: { title: string }) {
   const upper = title.toUpperCase()
   let letter = '?'
   let cls = 'bg-muted text-muted-foreground ring-muted-foreground/30'
-  if (upper.includes('PRO')) {
+  if (upper.includes('POWER')) {
+    letter = '⚡'
+    cls = 'bg-rose-500/15 text-rose-700 dark:text-rose-400 ring-rose-500/30'
+  } else if (upper.includes('PRO')) {
     // PRO+ 和 PRO 共用绿色 P，title 区分
     letter = 'P'
     cls =
@@ -299,6 +303,18 @@ function formatLastUsed(lastUsedAt: string | null): string {
   return `${Math.floor(hours / 24)}d 前`
 }
 
+function formatUsdShort(value: number): string {
+  const v = value ?? 0
+  return `$${v >= 1 ? v.toFixed(2) : v.toFixed(4)}`
+}
+
+function formatCreditShort(value: number): string {
+  const v = value ?? 0
+  if (v >= 1000) return `${(v / 1000).toFixed(1)}k`
+  if (v === 0) return '0'
+  return v.toFixed(2).replace(/\.?0+$/, '')
+}
+
 interface CellContext {
   cachedBalanceMap: Map<number, CachedBalanceInfo>
   liveBalanceMap: Map<number, BalanceResponse>
@@ -315,6 +331,7 @@ interface CellContext {
   onToggleOverage: (cred: CredentialStatusItem) => void
   onToggleAllowOveruse: (id: number, allow: boolean) => void
   onShowDetail: (cred: CredentialStatusItem) => void
+  onShowUsage: (cred: CredentialStatusItem) => void
   onToggleDisabled: (cred: CredentialStatusItem) => void
   onDelete: (cred: CredentialStatusItem) => void
 }
@@ -496,19 +513,22 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
       cell: ({ row }) => {
         const c = row.original
         return (
-          <span className="font-mono text-xs whitespace-nowrap">
+          <span
+            className="font-mono text-xs whitespace-nowrap"
+            title="成功 / 累计错误 / 429 限流（均为累计值）"
+          >
             <span className="text-emerald-600">{c.successCount}</span>
+            <span className="text-muted-foreground mx-1">/</span>
+            <span
+              className={c.errorCount > 0 ? 'text-red-500' : 'text-muted-foreground'}
+            >
+              {c.errorCount}
+            </span>
             <span className="text-muted-foreground mx-1">/</span>
             <span
               className={c.rateLimitCount > 0 ? 'text-yellow-600' : 'text-muted-foreground'}
             >
               {c.rateLimitCount}
-            </span>
-            <span className="text-muted-foreground mx-1">/</span>
-            <span
-              className={c.failureCount > 0 ? 'text-red-500' : 'text-muted-foreground'}
-            >
-              {c.failureCount}
             </span>
           </span>
         )
@@ -727,13 +747,26 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
     },
     {
       id: 'lastUsed',
-      header: '最后调用',
+      header: '调用状态',
       accessorFn: (row) =>
         row.lastUsedAt ? new Date(row.lastUsedAt).getTime() : 0,
       cell: ({ row }) => (
-        <span className="text-xs text-muted-foreground whitespace-nowrap">
-          {formatLastUsed(row.original.lastUsedAt)}
-        </span>
+        <div className="text-xs whitespace-nowrap leading-tight">
+          <div className="text-muted-foreground">
+            {formatLastUsed(row.original.lastUsedAt)}
+          </div>
+          <div className="text-muted-foreground">
+            {formatCreditShort(row.original.creditUsageTotal)}
+          </div>
+          <button
+            type="button"
+            className="text-emerald-600 hover:underline cursor-pointer"
+            onClick={() => ctx.onShowUsage(row.original)}
+            title="查看调用统计"
+          >
+            {formatUsdShort(row.original.totalValueUsd)}
+          </button>
+        </div>
       ),
     },
     {
@@ -890,6 +923,8 @@ export function CredentialsPage() {
   const [balanceTargetId, setBalanceTargetId] = useState<number | null>(null)
   const [balanceForce, setBalanceForce] = useState(false)
   const [balanceDialogOpen, setBalanceDialogOpen] = useState(false)
+  const [usageCred, setUsageCred] = useState<CredentialStatusItem | null>(null)
+  const [usageDialogOpen, setUsageDialogOpen] = useState(false)
   const [verifying, setVerifying] = useState(false)
   const [verifyProgress, setVerifyProgress] = useState({ current: 0, total: 0 })
   const [verifyResults, setVerifyResults] = useState<Map<number, VerifyResult>>(
@@ -1090,6 +1125,16 @@ export function CredentialsPage() {
       .map(Number)
   }, [rowSelection, visibleRows])
 
+  // 已选凭据的「调用状态」价值合计（totalValueUsd）
+  const selectedTotalValueUsd = useMemo(() => {
+    if (selectedIds.length === 0) return 0
+    const idSet = new Set(selectedIds)
+    return allCredentials.reduce(
+      (s, c) => (idSet.has(c.id) ? s + (c.totalValueUsd ?? 0) : s),
+      0,
+    )
+  }, [selectedIds, allCredentials])
+
   const handleViewBalance = (id: number, force: boolean) => {
     setBalanceTargetId(id)
     setBalanceForce(force)
@@ -1253,6 +1298,10 @@ export function CredentialsPage() {
         onToggleOverage: handleToggleOverage,
         onToggleAllowOveruse: handleToggleAllowOveruse,
         onShowDetail: (c) => setDetailCred(c),
+        onShowUsage: (c) => {
+          setUsageCred(c)
+          setUsageDialogOpen(true)
+        },
         onToggleDisabled: handleToggleDisabled,
         onDelete: handleDeleteOne,
       }),
@@ -2143,6 +2192,9 @@ export function CredentialsPage() {
           >
             <CheckCircle2 className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />
             已选 {selectedIds.length}
+            <span className="text-emerald-600 dark:text-emerald-400">
+              · {formatUsdShort(selectedTotalValueUsd)}
+            </span>
           </Badge>
         ) : (
           <span className="text-xs text-muted-foreground">未选中</span>
@@ -2332,6 +2384,13 @@ export function CredentialsPage() {
           }
         }}
         forceRefresh={balanceForce}
+      />
+
+      {/* 调用统计对话框 */}
+      <UsageStatsDialog
+        credential={usageCred}
+        open={usageDialogOpen}
+        onOpenChange={setUsageDialogOpen}
       />
 
       <AddCredentialDialog open={addOpen} onOpenChange={setAddOpen} />

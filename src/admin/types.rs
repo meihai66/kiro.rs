@@ -65,6 +65,8 @@ pub struct CredentialStatusItem {
     pub subscription_title: Option<String>,
     /// API 调用成功次数
     pub success_count: u64,
+    /// API 调用累计失败次数（不随成功清零；与连续 failure_count 区分）
+    pub error_count: u64,
     /// 最后一次 API 调用时间（RFC3339 格式）
     pub last_used_at: Option<String>,
     /// 凭据级 Region（用于 Token 刷新）
@@ -96,6 +98,34 @@ pub struct CredentialStatusItem {
     /// 凭据级 RPM 上限（None 表示沿用全局 credentialRpm）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credential_rpm: Option<u32>,
+    /// 累计积分消耗（上游 meteringEvent.usage 之和）
+    pub credit_usage_total: f64,
+    /// 按当前定价换算的累计产出价值（美元）
+    pub total_value_usd: f64,
+    /// 按模型细分的累计用量与价值（按价值降序）
+    pub model_stats: Vec<ModelUsageStat>,
+}
+
+/// 单个模型的累计用量与价值（展示用）
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelUsageStat {
+    /// 模型名
+    pub model: String,
+    /// 累计输入（非缓存）token
+    pub input_tokens: u64,
+    /// 累计输出 token
+    pub output_tokens: u64,
+    /// 累计缓存读取 token
+    pub cache_read_tokens: u64,
+    /// 累计缓存写入 token
+    pub cache_write_tokens: u64,
+    /// 累计积分
+    pub credit_usage: f64,
+    /// 累计调用次数
+    pub calls: u64,
+    /// 按当前定价换算的产出价值（美元）
+    pub cost_usd: f64,
 }
 
 // ============ 操作请求 ============
@@ -945,6 +975,8 @@ pub struct GlobalConfigResponse {
     pub import_disabled_by_default: bool,
     /// 余额自动刷新目标周期（秒）；0 = 禁用
     pub balance_auto_refresh_secs: u32,
+    /// 余额刷新并发数（后台 + 启动初始化）
+    pub balance_refresh_concurrency: u32,
     /// 触发 429 限流时的最短冷却（秒）
     pub rate_limit_cooldown_min_secs: u64,
     /// 触发 429 限流时的最长冷却（秒）
@@ -963,6 +995,8 @@ pub struct GlobalConfigResponse {
     pub error_log_max_age_days: u32,
     /// 不记录的 HTTP 状态码黑名单
     pub error_log_excluded_status_codes: Vec<u16>,
+    /// 模型定价（用于「产出价值」统计）
+    pub pricing: crate::model::config::PricingConfig,
 }
 
 /// 压缩配置响应
@@ -1018,6 +1052,8 @@ pub struct UpdateGlobalConfigRequest {
     pub import_disabled_by_default: Option<bool>,
     /// 余额自动刷新目标周期（秒，可选；0=禁用）
     pub balance_auto_refresh_secs: Option<u32>,
+    /// 余额刷新并发数（可选；1~256）
+    pub balance_refresh_concurrency: Option<u32>,
     /// 触发 429 限流时的最短冷却（秒，可选）
     pub rate_limit_cooldown_min_secs: Option<u64>,
     /// 触发 429 限流时的最长冷却（秒，可选）
@@ -1036,6 +1072,8 @@ pub struct UpdateGlobalConfigRequest {
     pub error_log_max_age_days: Option<u32>,
     /// 不记录的 HTTP 状态码黑名单（提供则整体替换；空数组表示不排除任何状态码）
     pub error_log_excluded_status_codes: Option<Vec<u16>>,
+    /// 模型定价（可选；提供则整体替换）
+    pub pricing: Option<crate::model::config::PricingConfig>,
 }
 
 /// 更新压缩配置请求

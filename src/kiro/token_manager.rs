@@ -730,6 +730,8 @@ struct CredentialEntry {
     fingerprint: Fingerprint,
     /// API 调用成功次数
     success_count: u64,
+    /// API 调用累计失败次数（持久化；不随成功清零，与连续 failure_count 区分）
+    error_count: u64,
     /// 最后一次 API 调用时间（RFC3339 格式）
     last_used_at: Option<String>,
     /// 上次被 `acquire_context` 选中的时刻（用于 LRU 选号；None=从未被选中，最优）。
@@ -743,6 +745,32 @@ struct CredentialEntry {
     rpm: Arc<RpmTracker>,
     /// 累计 429 触发次数（运行时统计；重启清零）
     rate_limit_count: Arc<AtomicU32>,
+    /// 按模型累计用量（持久化；用于「产出价值」统计）
+    model_usage: HashMap<String, ModelUsage>,
+}
+
+/// 单个模型的累计用量（原始计数；价值在展示时按当前定价实时换算）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelUsage {
+    /// 累计输入（非缓存）token
+    #[serde(default)]
+    pub input_tokens: u64,
+    /// 累计输出 token
+    #[serde(default)]
+    pub output_tokens: u64,
+    /// 累计缓存读取 token
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    /// 累计缓存写入 token
+    #[serde(default)]
+    pub cache_write_tokens: u64,
+    /// 累计积分（上游 meteringEvent.usage 之和）
+    #[serde(default)]
+    pub credit_usage: f64,
+    /// 累计调用次数
+    #[serde(default)]
+    pub calls: u64,
 }
 
 /// 自愈原因（内部使用，用于判断是否可自动恢复）
@@ -761,7 +789,13 @@ enum AutoHealReason {
 #[derive(Serialize, Deserialize)]
 struct StatsEntry {
     success_count: u64,
+    /// 累计失败次数（旧缓存无此字段时默认 0）
+    #[serde(default)]
+    error_count: u64,
     last_used_at: Option<String>,
+    /// 按模型累计用量（旧缓存无此字段时默认空）
+    #[serde(default)]
+    model_usage: HashMap<String, ModelUsage>,
 }
 
 // ============================================================================
@@ -798,6 +832,8 @@ pub struct CredentialEntrySnapshot {
     pub subscription_title: Option<String>,
     /// API 调用成功次数
     pub success_count: u64,
+    /// API 调用累计失败次数（持久化；不随成功清零）
+    pub error_count: u64,
     /// 最后一次 API 调用时间（RFC3339 格式）
     pub last_used_at: Option<String>,
     /// 凭据级 Region（用于 Token 刷新）
@@ -824,6 +860,8 @@ pub struct CredentialEntrySnapshot {
     pub cooldown_remaining_secs: Option<u64>,
     /// 凭据级 RPM 上限（None 表示沿用全局 credentialRpm）
     pub credential_rpm: Option<u32>,
+    /// 按模型累计用量（原始计数；价值由上层按定价换算）
+    pub model_usage: HashMap<String, ModelUsage>,
 }
 
 /// 凭据管理器状态快照
@@ -899,8 +937,9 @@ pub struct MultiTokenManager {
     store: RwLock<Option<Arc<crate::storage::Store>>>,
     /// 凭据条目列表
     entries: Mutex<Vec<CredentialEntry>>,
-    /// Token 刷新锁，确保同一时间只有一个刷新操作
-    refresh_lock: TokioMutex<()>,
+    /// Token 刷新锁（每凭据一把）：避免同一凭据被并发重复刷新，
+    /// 同时允许不同凭据的 token 刷新并行（大量号刷余额时的关键提速点）。
+    refresh_locks: Mutex<HashMap<u64, Arc<TokioMutex<()>>>>,
     /// 凭据文件路径（用于回写）
     credentials_path: Option<PathBuf>,
     /// 是否为多凭据格式（数组格式才回写）
@@ -1105,12 +1144,14 @@ impl MultiTokenManager {
                     },
                     fingerprint,
                     success_count: 0,
+                    error_count: 0,
                     last_used_at: None,
                     last_acquired_at: None,
                     refresh_token_hash,
                     in_flight: Arc::new(AtomicU32::new(0)),
                     rpm: RpmTracker::new(),
                     rate_limit_count: Arc::new(AtomicU32::new(0)),
+                    model_usage: HashMap::new(),
                 }
             })
             .collect();
@@ -1151,7 +1192,7 @@ impl MultiTokenManager {
             proxy_pool: RwLock::new(None),
             store: RwLock::new(None),
             entries: Mutex::new(entries),
-            refresh_lock: TokioMutex::new(()),
+            refresh_locks: Mutex::new(HashMap::new()),
             credentials_path,
             is_multiple_format,
             model_unavailable_count: AtomicU32::new(0),
@@ -2217,7 +2258,8 @@ impl MultiTokenManager {
 
         let creds = if needs_refresh {
             // 获取刷新锁，确保同一时间只有一个刷新操作
-            let _guard = self.refresh_lock.lock().await;
+            let _refresh_guard = self.refresh_lock_for(id);
+            let _guard = _refresh_guard.lock().await;
 
             // 第二次检查：获取锁后重新读取凭据，因为其他请求可能已经完成刷新
             let current_creds = {
@@ -2461,7 +2503,9 @@ impl MultiTokenManager {
         for entry in entries.iter_mut() {
             if let Some(s) = stats.get(&entry.id.to_string()) {
                 entry.success_count = s.success_count;
+                entry.error_count = s.error_count;
                 entry.last_used_at = s.last_used_at.clone();
+                entry.model_usage = s.model_usage.clone();
             }
         }
         *self.last_stats_save_at.lock() = Some(Instant::now());
@@ -2485,7 +2529,9 @@ impl MultiTokenManager {
                         e.id.to_string(),
                         StatsEntry {
                             success_count: e.success_count,
+                            error_count: e.error_count,
                             last_used_at: e.last_used_at.clone(),
+                            model_usage: e.model_usage.clone(),
                         },
                     )
                 })
@@ -2530,6 +2576,13 @@ impl MultiTokenManager {
         }
     }
 
+    /// 取某凭据专属的 token 刷新锁（不存在则创建）。
+    /// 保证同一凭据不会并发重复刷新，不同凭据可并行刷新。
+    fn refresh_lock_for(&self, id: u64) -> Arc<TokioMutex<()>> {
+        let mut locks = self.refresh_locks.lock();
+        locks.entry(id).or_default().clone()
+    }
+
     /// 报告指定凭据 API 调用成功
     ///
     /// 重置该凭据的失败计数
@@ -2559,6 +2612,45 @@ impl MultiTokenManager {
         self.save_stats_debounced();
     }
 
+    /// 记录一次请求的用量到对应凭据（按模型累加），用于「产出价值」统计。
+    ///
+    /// 只存原始计数；价值在展示时按当前定价实时换算。失败不影响主流程。
+    ///
+    /// # Arguments
+    /// * `id` - 凭据 ID（来自 ApiCallResult.credential_id）
+    /// * `model` - 客户端请求的模型名
+    /// * `input_tokens` / `output_tokens` / `cache_read_tokens` / `cache_write_tokens` - 本次 token 用量
+    /// * `credit_usage` - 上游 meteringEvent.usage（积分），无则传 0
+    #[allow(clippy::too_many_arguments)]
+    pub fn report_usage(
+        &self,
+        id: u64,
+        model: &str,
+        input_tokens: i32,
+        output_tokens: i32,
+        cache_read_tokens: i32,
+        cache_write_tokens: i32,
+        credit_usage: f64,
+    ) {
+        {
+            let mut entries = self.entries.lock();
+            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                let mu = entry.model_usage.entry(model.to_string()).or_default();
+                mu.input_tokens += input_tokens.max(0) as u64;
+                mu.output_tokens += output_tokens.max(0) as u64;
+                mu.cache_read_tokens += cache_read_tokens.max(0) as u64;
+                mu.cache_write_tokens += cache_write_tokens.max(0) as u64;
+                if credit_usage.is_finite() && credit_usage > 0.0 {
+                    mu.credit_usage += credit_usage;
+                }
+                mu.calls += 1;
+            } else {
+                return;
+            }
+        }
+        self.save_stats_debounced();
+    }
+
     /// 报告指定凭据 API 调用失败
     ///
     /// 增加失败计数，达到阈值时禁用凭据
@@ -2576,6 +2668,7 @@ impl MultiTokenManager {
             };
 
             entry.failure_count += 1;
+            entry.error_count += 1;
             entry.last_used_at = Some(Utc::now().to_rfc3339());
             let failure_count = entry.failure_count;
 
@@ -2880,59 +2973,59 @@ impl MultiTokenManager {
             return 0;
         }
 
-        tracing::info!("正在初始化 {} 个凭据的余额...", credential_ids.len());
+        let total = credential_ids.len();
+        let concurrency = (self.config.read().balance_refresh_concurrency.max(1) as usize).min(256);
+        tracing::info!("正在初始化 {} 个凭据的余额（并发 {}）...", total, concurrency);
 
-        let mut success_count = 0;
+        // 有界并发查询：每个凭据走各自代理出口，并发刷新不会撞同一 IP 的上游限流。
+        use futures::stream::StreamExt;
+        let results = futures::stream::iter(credential_ids.into_iter())
+            .map(|id| async move {
+                match self.get_usage_limits_for(id).await {
+                    Ok(limits) => {
+                        let used = limits.current_usage();
+                        let limit = limits.usage_limit();
+                        let remaining = (limit - used).max(0.0);
+                        self.update_balance_cache(id, remaining);
 
-        // 顺序查询每个凭据的余额，间隔 0.5 秒避免触发限流
-        for (index, &id) in credential_ids.iter().enumerate() {
-            match self.get_usage_limits_for(id).await {
-                Ok(limits) => {
-                    // 计算剩余额度
-                    let used = limits.current_usage();
-                    let limit = limits.usage_limit();
-                    let remaining = (limit - used).max(0.0);
-
-                    self.update_balance_cache(id, remaining);
-
-                    // 余额小于 1 时自动禁用凭据（开启允许超额则跳过）
-                    if remaining < 1.0 {
-                        let mut entries = self.entries.lock();
-                        if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-                            if entry.credentials.allow_overuse {
-                                tracing::info!(
-                                    "凭据 #{} 余额不足 ({:.2}) 但已开启允许超额使用，保持启用",
-                                    id,
-                                    remaining
-                                );
-                            } else {
-                                entry.disabled = true;
-                                entry.disable_reason = Some(DisableReason::InsufficientBalance);
-                                tracing::warn!("凭据 #{} 余额不足 ({:.2})，已自动禁用", id, remaining);
+                        // 余额小于 1 时自动禁用凭据（开启允许超额则跳过）
+                        if remaining < 1.0 {
+                            let mut entries = self.entries.lock();
+                            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                                if entry.credentials.allow_overuse {
+                                    tracing::info!(
+                                        "凭据 #{} 余额不足 ({:.2}) 但已开启允许超额使用，保持启用",
+                                        id,
+                                        remaining
+                                    );
+                                } else {
+                                    entry.disabled = true;
+                                    entry.disable_reason =
+                                        Some(DisableReason::InsufficientBalance);
+                                    tracing::warn!(
+                                        "凭据 #{} 余额不足 ({:.2})，已自动禁用",
+                                        id,
+                                        remaining
+                                    );
+                                }
                             }
+                        } else {
+                            tracing::info!("凭据 #{} 余额初始化成功: {:.2}", id, remaining);
                         }
-                    } else {
-                        tracing::info!("凭据 #{} 余额初始化成功: {:.2}", id, remaining);
+                        true
                     }
-                    success_count += 1;
+                    Err(e) => {
+                        tracing::warn!("凭据 #{} 余额查询失败: {}", id, e);
+                        false
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("凭据 #{} 余额查询失败: {}", id, e);
-                }
-            }
+            })
+            .buffer_unordered(concurrency)
+            .collect::<Vec<bool>>()
+            .await;
 
-            // 非最后一个凭据时，间隔 0.5 秒
-            if index < credential_ids.len() - 1 {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            }
-        }
-
-        tracing::info!(
-            "余额初始化完成: {}/{} 成功",
-            success_count,
-            credential_ids.len()
-        );
-
+        let success_count = results.into_iter().filter(|ok| *ok).count();
+        tracing::info!("余额初始化完成: {}/{} 成功", success_count, total);
         success_count
     }
 
@@ -2987,6 +3080,7 @@ impl MultiTokenManager {
                         email: e.credentials.email.clone(),
                         subscription_title: e.credentials.subscription_title.clone(),
                         success_count: e.success_count,
+                        error_count: e.error_count,
                         last_used_at: e.last_used_at.clone(),
                         region: e.credentials.region.clone(),
                         api_region: e.credentials.api_region.clone(),
@@ -3000,6 +3094,7 @@ impl MultiTokenManager {
                         cooldown_reason,
                         cooldown_remaining_secs,
                         credential_rpm: e.credentials.rpm,
+                        model_usage: e.model_usage.clone(),
                     }
                 })
                 .collect(),
@@ -3173,7 +3268,9 @@ impl MultiTokenManager {
             let mut entries = self.entries.lock();
             for entry in entries.iter_mut() {
                 entry.success_count = 0;
+                entry.error_count = 0;
                 entry.rate_limit_count.store(0, Ordering::Relaxed);
+                entry.model_usage.clear();
             }
         }
         // 立即落盘，避免重启又恢复成旧值
@@ -3220,7 +3317,8 @@ impl MultiTokenManager {
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("凭据无 kiroApiKey"))?
         } else if is_token_expired(&credentials) || is_token_expiring_soon(&credentials) {
-            let _guard = self.refresh_lock.lock().await;
+            let _refresh_guard = self.refresh_lock_for(id);
+            let _guard = _refresh_guard.lock().await;
             let proxy = self.effective_proxy_for_cred(&credentials)?;
             let new_creds =
                 refresh_token_with_id(&credentials, &config, proxy.as_ref(), id).await?;
@@ -3299,7 +3397,8 @@ impl MultiTokenManager {
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("凭据无 kiroApiKey"))?
         } else if is_token_expired(&credentials) || is_token_expiring_soon(&credentials) {
-            let _guard = self.refresh_lock.lock().await;
+            let _refresh_guard = self.refresh_lock_for(id);
+            let _guard = _refresh_guard.lock().await;
             let proxy = self.effective_proxy_for_cred(&credentials)?;
             let new_creds =
                 refresh_token_with_id(&credentials, &config, proxy.as_ref(), id).await?;
@@ -3426,8 +3525,9 @@ impl MultiTokenManager {
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
         };
 
-        // 持有刷新锁，避免与业务请求自动刷新并发
-        let _guard = self.refresh_lock.lock().await;
+        // 持有刷新锁（每凭据一把），避免与业务请求自动刷新并发
+        let _refresh_guard = self.refresh_lock_for(id);
+        let _guard = _refresh_guard.lock().await;
 
         if credentials.is_api_key_credential() {
             anyhow::bail!("API Key 凭据无需刷新 Token");
@@ -3479,7 +3579,8 @@ impl MultiTokenManager {
                     .clone()
                     .ok_or_else(|| anyhow::anyhow!("凭据无 kiroApiKey"))?
             } else if needs_refresh {
-                let _guard = self.refresh_lock.lock().await;
+                let _refresh_guard = self.refresh_lock_for(id);
+                let _guard = _refresh_guard.lock().await;
                 let current_creds = {
                     let entries = self.entries.lock();
                     entries
@@ -3756,12 +3857,14 @@ impl MultiTokenManager {
                 disable_reason: None,
                 fingerprint,
                 success_count: 0,
+                error_count: 0,
                 last_used_at: None,
                 last_acquired_at: None,
                 refresh_token_hash: entry_secret_hash,
                 in_flight: Arc::new(AtomicU32::new(0)),
                 rpm: RpmTracker::new(),
                 rate_limit_count: Arc::new(AtomicU32::new(0)),
+                model_usage: HashMap::new(),
             });
         }
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## [v1.1.53] - 2026-06-01
+
+### 新增
+
+- **凭据「产出价值」统计 + 模型定价配置** — 新增 `Config.pricing`（`PricingConfig`：有序匹配规则 + 兜底默认价 + 全局倍率 `multiplier`），内置 Opus/Sonnet/Haiku 三档 Anthropic 官网价（美元/每百万 token），支持 `exact`/`prefix`/`contains`/`glob` 四种匹配方式（大小写不敏感）。后台按凭据×模型累计 token 用量与上游 `meteringEvent` 积分（`ModelUsage`），admin 接口实时按当前定价换算每模型/累计美元价值（改价即时重算，不影响任何代理/计费逻辑）。设置页新增「模型定价」卡片可视化编辑规则与倍率，凭据卡片展示累计积分/产出价值并可点开 `UsageStatsDialog` 查看按模型细分明细 (`src/model/config.rs`, `src/admin/types.rs`, `src/admin/service.rs`, `src/anthropic/stream.rs`, `src/anthropic/handlers.rs`, `src/kiro/token_manager.rs`, `admin-ui/src/pages/settings-page.tsx`, `admin-ui/src/components/credential-card.tsx`, `admin-ui/src/components/usage-stats-dialog.tsx`, `admin-ui/src/types/api.ts`)
+- **凭据累计错误数统计** — 新增 `error_count`（累计失败次数，不随成功清零，与连续 `failure_count` 区分），凭据状态接口透出，统计页新增「累计错误」卡片汇总展示 (`src/admin/types.rs`, `src/admin/service.rs`, `src/kiro/token_manager.rs`, `admin-ui/src/pages/stats-page.tsx`, `admin-ui/src/types/api.ts`)
+- **余额刷新并发数可配** — 新增 `Config.balance_refresh_concurrency`（默认 8，范围 1~256），控制后台自动刷新与启动初始化的余额刷新并发度；每凭据独立代理出口时可调高加速，共用出口 IP 时谨慎以免触发上游 429。设置页可热更新 (`src/model/config.rs`, `src/admin/types.rs`, `src/admin/service.rs`, `src/main.rs`, `src/kiro/token_manager.rs`, `admin-ui/src/pages/settings-page.tsx`, `admin-ui/src/types/api.ts`)
+- **测试对话模型列表对接上游** — 测试对话弹窗改为从上游 Kiro `ListAvailableModels` 拉取可选模型（复用「模型检测」接口），自动切到上游 `defaultModel`，并尝试展示各模型积分倍率 (`admin-ui/src/components/test-chat-dialog.tsx`)
+- **识别 Power 订阅类型** — `norm_subscription_type` 新增 `Power` 档识别，避免被误判为 Pro/Free (`src/kiro/web_portal.rs`)
+
 ## [v1.1.52] - 2026-05-30
 
 ### 新增

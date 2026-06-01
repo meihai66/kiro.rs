@@ -488,22 +488,37 @@ async fn main() {
                             let batch_max = ((n_total as u64 * 30 / target_secs).max(1)
                                 .min(n_total as u64))
                                 as usize;
+                            let concurrency = (cfg.read().balance_refresh_concurrency.max(1)
+                                as usize)
+                                .min(256);
                             tracing::debug!(
                                 target_secs,
                                 candidates = n_total,
                                 batch_max,
+                                concurrency,
                                 "余额自动刷新 tick"
                             );
-                            for (id, _) in candidates.into_iter().take(batch_max) {
-                                if let Err(e) = svc.refresh_balance(id).await {
-                                    tracing::debug!(
-                                        credential_id = id,
-                                        "余额自动刷新失败（忽略，后续 tick 重试）: {}",
-                                        e
-                                    );
-                                }
-                                tokio::time::sleep(Duration::from_millis(300)).await;
-                            }
+                            // 有界并发刷新：每个凭据走各自代理出口，并发不会撞同一 IP 的上游限流。
+                            use futures::stream::StreamExt;
+                            let ids: Vec<u64> = candidates
+                                .into_iter()
+                                .take(batch_max)
+                                .map(|(id, _)| id)
+                                .collect();
+                            futures::stream::iter(ids)
+                                .for_each_concurrent(concurrency, |id| {
+                                    let svc = svc.clone();
+                                    async move {
+                                        if let Err(e) = svc.refresh_balance(id).await {
+                                            tracing::debug!(
+                                                credential_id = id,
+                                                "余额自动刷新失败（忽略，后续 tick 重试）: {}",
+                                                e
+                                            );
+                                        }
+                                    }
+                                })
+                                .await;
                         }
                     });
                 }

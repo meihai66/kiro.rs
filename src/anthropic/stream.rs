@@ -1246,6 +1246,23 @@ impl StreamContext {
         }));
         events
     }
+
+    /// 返回用于「产出价值」统计的真实用量：
+    /// (input 非缓存, output, cache_read, cache_write, credit)。
+    /// 取真实 cache_usage（不受 per-API-Key 模拟比例影响）。
+    pub fn usage_for_accounting(&self) -> (i32, i32, i32, i32, f64) {
+        let cache_read = self
+            .cache_usage
+            .map(|c| c.cache_read_input_tokens)
+            .unwrap_or(0);
+        let cache_write = self
+            .cache_usage
+            .map(|c| c.cache_creation_input_tokens)
+            .unwrap_or(0);
+        let input = billed_input_tokens(self.input_tokens, cache_write, cache_read);
+        let credit = self.metering.as_ref().map(|m| m.usage).unwrap_or(0.0);
+        (input, self.output_tokens, cache_read, cache_write, credit)
+    }
 }
 
 /// 将总输入 token 转为 Anthropic usage 的 input_tokens 口径（剔除 cache 读写）

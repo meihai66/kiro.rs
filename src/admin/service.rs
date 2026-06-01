@@ -634,13 +634,47 @@ impl AdminService {
     pub fn get_all_credentials(&self) -> CredentialsStatusResponse {
         let snapshot = self.token_manager.snapshot();
 
-        let default_endpoint = self.config.read().default_endpoint.clone();
+        let (default_endpoint, pricing) = {
+            let c = self.config.read();
+            (c.default_endpoint.clone(), c.pricing.clone())
+        };
         let mut credentials: Vec<CredentialStatusItem> = snapshot
             .entries
             .into_iter()
             .map(|entry| {
                 let endpoint = entry.endpoint;
                 let effective_endpoint = endpoint.clone().unwrap_or(default_endpoint.clone());
+                // 按当前定价实时换算每模型价值（改价/改规则即时重算）
+                let mut model_stats: Vec<super::types::ModelUsageStat> = entry
+                    .model_usage
+                    .iter()
+                    .map(|(model, u)| {
+                        let cost_usd = pricing.cost_usd(
+                            model,
+                            u.input_tokens,
+                            u.output_tokens,
+                            u.cache_read_tokens,
+                            u.cache_write_tokens,
+                        );
+                        super::types::ModelUsageStat {
+                            model: model.clone(),
+                            input_tokens: u.input_tokens,
+                            output_tokens: u.output_tokens,
+                            cache_read_tokens: u.cache_read_tokens,
+                            cache_write_tokens: u.cache_write_tokens,
+                            credit_usage: u.credit_usage,
+                            calls: u.calls,
+                            cost_usd,
+                        }
+                    })
+                    .collect();
+                model_stats.sort_by(|a, b| {
+                    b.cost_usd
+                        .partial_cmp(&a.cost_usd)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let total_value_usd = model_stats.iter().map(|m| m.cost_usd).sum();
+                let credit_usage_total = model_stats.iter().map(|m| m.credit_usage).sum();
                 CredentialStatusItem {
                     id: entry.id,
                     priority: entry.priority,
@@ -655,6 +689,7 @@ impl AdminService {
                     email: entry.email,
                     subscription_title: entry.subscription_title,
                     success_count: entry.success_count,
+                    error_count: entry.error_count,
                     last_used_at: entry.last_used_at.clone(),
                     region: entry.region,
                     api_region: entry.api_region,
@@ -669,6 +704,9 @@ impl AdminService {
                     cooldown_reason: entry.cooldown_reason,
                     cooldown_remaining_secs: entry.cooldown_remaining_secs,
                     credential_rpm: entry.credential_rpm,
+                    credit_usage_total,
+                    total_value_usd,
+                    model_stats,
                 }
             })
             .collect();
@@ -1998,6 +2036,7 @@ impl AdminService {
             model_unavailable_breaker_enabled: config.model_unavailable_breaker_enabled,
             import_disabled_by_default: config.import_disabled_by_default,
             balance_auto_refresh_secs: config.balance_auto_refresh_secs,
+            balance_refresh_concurrency: config.balance_refresh_concurrency,
             rate_limit_cooldown_min_secs: config.rate_limit_cooldown_min_secs,
             rate_limit_cooldown_max_secs: config.rate_limit_cooldown_max_secs,
             capacity_pressure_cooldown_secs: config.capacity_pressure_cooldown_secs,
@@ -2007,6 +2046,7 @@ impl AdminService {
             error_log_max_count: config.error_log_max_count,
             error_log_max_age_days: config.error_log_max_age_days,
             error_log_excluded_status_codes: config.error_log_excluded_status_codes.clone(),
+            pricing: config.pricing.clone(),
         }
     }
 
@@ -2146,6 +2186,15 @@ impl AdminService {
                 config.balance_auto_refresh_secs = v;
             }
 
+            if let Some(v) = req.balance_refresh_concurrency {
+                if v < 1 || v > 256 {
+                    return Err(AdminServiceError::InvalidRequest(
+                        "余额刷新并发数应在 1~256".into(),
+                    ));
+                }
+                config.balance_refresh_concurrency = v;
+            }
+
             if let Some(v) = req.rate_limit_cooldown_min_secs {
                 if v < 1 || v > 3600 {
                     return Err(AdminServiceError::InvalidRequest(
@@ -2203,6 +2252,9 @@ impl AdminService {
                 cleaned.sort_unstable();
                 cleaned.dedup();
                 config.error_log_excluded_status_codes = cleaned;
+            }
+            if let Some(pricing) = &req.pricing {
+                config.pricing = pricing.clone();
             }
 
             config
@@ -3009,6 +3061,7 @@ mod tests {
             model_unavailable_breaker_enabled: None,
             import_disabled_by_default: None,
             balance_auto_refresh_secs: None,
+            balance_refresh_concurrency: None,
             rate_limit_cooldown_min_secs: None,
             rate_limit_cooldown_max_secs: None,
             capacity_pressure_cooldown_secs: None,
@@ -3018,6 +3071,7 @@ mod tests {
             error_log_max_count: None,
             error_log_max_age_days: None,
             error_log_excluded_status_codes: None,
+            pricing: None,
         };
 
         let result = service.update_global_config(req).await;
@@ -3051,6 +3105,7 @@ mod tests {
             model_unavailable_breaker_enabled: None,
             import_disabled_by_default: None,
             balance_auto_refresh_secs: None,
+            balance_refresh_concurrency: None,
             rate_limit_cooldown_min_secs: None,
             rate_limit_cooldown_max_secs: None,
             capacity_pressure_cooldown_secs: None,
@@ -3060,6 +3115,7 @@ mod tests {
             error_log_max_count: None,
             error_log_max_age_days: None,
             error_log_excluded_status_codes: None,
+            pricing: None,
         };
 
         let result = service.update_global_config(req).await;
@@ -3092,6 +3148,7 @@ mod tests {
             model_unavailable_breaker_enabled: None,
             import_disabled_by_default: None,
             balance_auto_refresh_secs: None,
+            balance_refresh_concurrency: None,
             rate_limit_cooldown_min_secs: None,
             rate_limit_cooldown_max_secs: None,
             capacity_pressure_cooldown_secs: None,
@@ -3101,6 +3158,7 @@ mod tests {
             error_log_max_count: None,
             error_log_max_age_days: None,
             error_log_excluded_status_codes: None,
+            pricing: None,
         };
 
         let result = service.update_global_config(req).await;
@@ -3133,6 +3191,7 @@ mod tests {
             model_unavailable_breaker_enabled: None,
             import_disabled_by_default: None,
             balance_auto_refresh_secs: None,
+            balance_refresh_concurrency: None,
             rate_limit_cooldown_min_secs: None,
             rate_limit_cooldown_max_secs: None,
             capacity_pressure_cooldown_secs: None,
@@ -3142,6 +3201,7 @@ mod tests {
             error_log_max_count: None,
             error_log_max_age_days: None,
             error_log_excluded_status_codes: None,
+            pricing: None,
         };
 
         let result = service.update_global_config(req).await;
@@ -3171,6 +3231,7 @@ mod tests {
             model_unavailable_breaker_enabled: None,
             import_disabled_by_default: None,
             balance_auto_refresh_secs: None,
+            balance_refresh_concurrency: None,
             rate_limit_cooldown_min_secs: None,
             rate_limit_cooldown_max_secs: None,
             capacity_pressure_cooldown_secs: None,
@@ -3180,6 +3241,7 @@ mod tests {
             error_log_max_count: None,
             error_log_max_age_days: None,
             error_log_excluded_status_codes: None,
+            pricing: None,
         };
 
         let result = service.update_global_config(req).await;

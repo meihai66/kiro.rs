@@ -151,6 +151,12 @@ pub struct Config {
     #[serde(default)]
     pub balance_auto_refresh_secs: u32,
 
+    /// 余额刷新并发数（后台自动刷新 + 启动初始化）。默认 8。
+    /// 每个凭据走各自代理出口时可调高（如 32+）以加速大量号的刷新；
+    /// 若多个凭据共用同一出口 IP，调高可能触发上游 429，请谨慎。
+    #[serde(default = "default_balance_refresh_concurrency")]
+    pub balance_refresh_concurrency: u32,
+
     /// 触发 429 限流时的最短冷却（秒）。
     /// 上游若返回 Retry-After 会优先使用，但不会低于此值；
     /// 上游未带 Retry-After 时直接用此值。默认 60。
@@ -217,9 +223,176 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub model_unavailable_breaker_enabled: bool,
 
+    /// 模型定价（用于「凭据产出价值」统计）。
+    /// 仅影响展示侧的价值换算，不影响任何代理/计费逻辑。
+    #[serde(default)]
+    pub pricing: PricingConfig,
+
     /// 配置文件路径（运行时元数据，不写入 JSON）
     #[serde(skip)]
     config_path: Option<PathBuf>,
+}
+
+/// 单档价格（单位：美元 / 每百万 token）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PricingRate {
+    /// 输入（非缓存）单价
+    #[serde(default)]
+    pub input: f64,
+    /// 输出单价
+    #[serde(default)]
+    pub output: f64,
+    /// 缓存读取单价
+    #[serde(default)]
+    pub cache_read: f64,
+    /// 缓存写入单价
+    #[serde(default)]
+    pub cache_write: f64,
+}
+
+/// 一条定价匹配规则（自上而下第一条命中者生效）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PricingRule {
+    /// 展示用标签（如 "Opus"）
+    #[serde(default)]
+    pub label: String,
+    /// 匹配串
+    #[serde(rename = "match", default)]
+    pub pattern: String,
+    /// 匹配方式：exact | prefix | contains | glob
+    #[serde(default = "default_match_type")]
+    pub match_type: String,
+    /// 价格档
+    #[serde(flatten)]
+    pub rate: PricingRate,
+}
+
+impl PricingRule {
+    /// 判断模型名是否命中本规则（大小写不敏感）
+    pub fn matches(&self, model: &str) -> bool {
+        let p = self.pattern.trim();
+        if p.is_empty() {
+            return false;
+        }
+        let model_l = model.to_ascii_lowercase();
+        let pat_l = p.to_ascii_lowercase();
+        match self.match_type.as_str() {
+            "exact" => model_l == pat_l,
+            "prefix" => model_l.starts_with(&pat_l),
+            "glob" => glob_match(&pat_l, &model_l),
+            // 默认含「contains」
+            _ => model_l.contains(&pat_l),
+        }
+    }
+}
+
+/// 模型定价配置：有序规则 + 兜底默认价
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PricingConfig {
+    /// 有序匹配规则
+    #[serde(default)]
+    pub rules: Vec<PricingRule>,
+    /// 未命中任何规则时的兜底价（默认全 0）
+    #[serde(default)]
+    pub default: PricingRate,
+    /// 全局倍率：所有模型算出的价值最终都 × 此值（默认 1.0）
+    #[serde(default = "default_pricing_multiplier")]
+    pub multiplier: f64,
+}
+
+fn default_pricing_multiplier() -> f64 {
+    1.0
+}
+
+impl Default for PricingConfig {
+    fn default() -> Self {
+        // 内置 Anthropic 官网定价（美元 / 每百万 token），用户可在设置页覆盖
+        let rule = |label: &str, pat: &str, i: f64, o: f64, cr: f64, cw: f64| PricingRule {
+            label: label.to_string(),
+            pattern: pat.to_string(),
+            match_type: "contains".to_string(),
+            rate: PricingRate {
+                input: i,
+                output: o,
+                cache_read: cr,
+                cache_write: cw,
+            },
+        };
+        Self {
+            rules: vec![
+                rule("Opus", "opus", 15.0, 75.0, 1.5, 18.75),
+                rule("Sonnet", "sonnet", 3.0, 15.0, 0.3, 3.75),
+                rule("Haiku", "haiku", 1.0, 5.0, 0.1, 1.25),
+            ],
+            default: PricingRate::default(),
+            multiplier: default_pricing_multiplier(),
+        }
+    }
+}
+
+impl PricingConfig {
+    /// 取某模型生效的价格档（自上而下第一条命中；都不中则用 default）
+    pub fn rate_for(&self, model: &str) -> &PricingRate {
+        self.rules
+            .iter()
+            .find(|r| r.matches(model))
+            .map(|r| &r.rate)
+            .unwrap_or(&self.default)
+    }
+
+    /// 按 token 用量算出该次（或累计）的美元价值
+    pub fn cost_usd(
+        &self,
+        model: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_tokens: u64,
+        cache_write_tokens: u64,
+    ) -> f64 {
+        let r = self.rate_for(model);
+        let base = (input_tokens as f64 * r.input
+            + output_tokens as f64 * r.output
+            + cache_read_tokens as f64 * r.cache_read
+            + cache_write_tokens as f64 * r.cache_write)
+            / 1_000_000.0;
+        base * self.multiplier
+    }
+}
+
+fn default_match_type() -> String {
+    "contains".to_string()
+}
+
+/// 极简 glob 匹配：仅支持 `*`（任意串）与 `?`（任意单字符），其余字面匹配。
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    // 经典 DP / 双指针回溯
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let (mut star, mut mark) = (None::<usize>, 0usize);
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            mark = ti;
+            pi += 1;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
 }
 
 fn default_rate_limit_cooldown_min_secs() -> u64 {
@@ -252,6 +425,10 @@ fn default_max_total_retries() -> u32 {
 
 fn default_all_credentials_cooldown_bail_threshold_secs() -> u64 {
     2
+}
+
+fn default_balance_refresh_concurrency() -> u32 {
+    8
 }
 
 fn default_host() -> String {
@@ -480,6 +657,7 @@ impl Default for Config {
             model_unavailable_breaker_enabled: true,
             import_disabled_by_default: true,
             balance_auto_refresh_secs: 0,
+            balance_refresh_concurrency: default_balance_refresh_concurrency(),
             rate_limit_cooldown_min_secs: default_rate_limit_cooldown_min_secs(),
             rate_limit_cooldown_max_secs: default_rate_limit_cooldown_max_secs(),
             capacity_pressure_cooldown_secs: default_capacity_pressure_cooldown_secs(),
@@ -489,6 +667,7 @@ impl Default for Config {
             error_log_max_count: default_error_log_max_count(),
             error_log_max_age_days: default_error_log_max_age_days(),
             error_log_excluded_status_codes: Vec::new(),
+            pricing: PricingConfig::default(),
             config_path: None,
         }
     }
@@ -553,6 +732,56 @@ mod tests {
     fn test_config_defaults_enable_prompt_cache_accounting() {
         let config = Config::default();
         assert!(config.prompt_cache_accounting_enabled);
+    }
+
+    #[test]
+    fn test_pricing_default_rules_match_and_cost() {
+        let p = PricingConfig::default();
+        // contains 匹配（默认规则均为 contains）
+        let r = p.rate_for("claude-opus-4-6-thinking");
+        assert_eq!(r.input, 15.0);
+        assert_eq!(r.output, 75.0);
+        // 1M 输入 + 1M 输出 = 15 + 75 = 90 美元
+        let cost = p.cost_usd("claude-opus-4-6", 1_000_000, 1_000_000, 0, 0);
+        assert!((cost - 90.0).abs() < 1e-9);
+        // 缓存读写单价
+        let cache_cost = p.cost_usd("claude-sonnet-4-6", 0, 0, 1_000_000, 1_000_000);
+        assert!((cache_cost - (0.3 + 3.75)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_pricing_global_multiplier_scales_cost() {
+        let mut p = PricingConfig::default();
+        p.multiplier = 1.5;
+        // 1M 输入 opus = 15，× 1.5 = 22.5
+        let cost = p.cost_usd("claude-opus-4-6", 1_000_000, 0, 0, 0);
+        assert!((cost - 22.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_pricing_unmatched_uses_default_zero() {
+        let p = PricingConfig::default();
+        // 未命中任何规则 → 默认价（全 0）
+        assert_eq!(p.cost_usd("gpt-4o", 1_000_000, 1_000_000, 0, 0), 0.0);
+    }
+
+    #[test]
+    fn test_pricing_match_types() {
+        let rule = |mt: &str, pat: &str| PricingRule {
+            label: String::new(),
+            pattern: pat.to_string(),
+            match_type: mt.to_string(),
+            rate: PricingRate::default(),
+        };
+        assert!(rule("exact", "claude-opus-4-6").matches("claude-opus-4-6"));
+        assert!(!rule("exact", "opus").matches("claude-opus-4-6"));
+        assert!(rule("prefix", "claude-opus").matches("claude-opus-4-6"));
+        assert!(rule("contains", "opus").matches("claude-opus-4-6"));
+        assert!(rule("glob", "claude-*-4-6").matches("claude-opus-4-6"));
+        assert!(rule("glob", "*opus*").matches("claude-opus-4-6"));
+        assert!(!rule("glob", "claude-haiku-*").matches("claude-opus-4-6"));
+        // 大小写不敏感
+        assert!(rule("contains", "OPUS").matches("claude-opus-4-6"));
     }
 
     #[test]

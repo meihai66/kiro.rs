@@ -32,6 +32,7 @@ import type {
 import { unbindCredentialProxy } from '@/api/proxies'
 import { RpmSparkline } from '@/components/rpm-sparkline'
 import { TestChatDialog } from '@/components/test-chat-dialog'
+import { UsageStatsDialog } from '@/components/usage-stats-dialog'
 import {
   useSetDisabled,
   useSetPriority,
@@ -68,6 +69,20 @@ function formatLastUsed(lastUsedAt: string | null): string {
   const hours = Math.floor(minutes / 60)
   if (hours < 24) return `${hours} 小时前`
   return `${Math.floor(hours / 24)} 天前`
+}
+
+/** 美元金额：>=1 保留 2 位，<1 保留 4 位 */
+function formatUsd(value: number): string {
+  const v = value ?? 0
+  return `$${v >= 1 ? v.toFixed(2) : v.toFixed(4)}`
+}
+
+/** 积分：大数转 k，小数保留 2 位 */
+function formatCredit(value: number): string {
+  const v = value ?? 0
+  if (v >= 1000) return `${(v / 1000).toFixed(1)}k`
+  if (v === 0) return '0'
+  return v.toFixed(2).replace(/\.?0+$/, '')
 }
 
 function formatCacheAge(cachedAt: number): string {
@@ -145,6 +160,7 @@ export function CredentialCard({
   )
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
   const [showTestChat, setShowTestChat] = useState(false)
+  const [showUsageStats, setShowUsageStats] = useState(false)
 
   useEffect(() => {
     setEmailVal(credential.email ?? '')
@@ -506,11 +522,23 @@ export function CredentialCard({
           <SectionTitle>运行状态</SectionTitle>
           <div className="grid grid-cols-2 md:grid-cols-3 gap-x-4 gap-y-2 text-sm">
             <div>
-              <div className="text-xs text-muted-foreground">成功</div>
-              <div className="font-medium">{credential.successCount}</div>
+              <div className="text-xs text-muted-foreground">成功 / 错误(累计)</div>
+              <div className="font-medium">
+                {credential.successCount}
+                <span className="text-muted-foreground"> / </span>
+                <span
+                  className={
+                    credential.errorCount > 0
+                      ? 'text-red-500 font-medium'
+                      : 'font-medium'
+                  }
+                >
+                  {credential.errorCount}
+                </span>
+              </div>
             </div>
             <div>
-              <div className="text-xs text-muted-foreground">失败 / 刷新失败</div>
+              <div className="text-xs text-muted-foreground">连续失败 / 刷新失败</div>
               <div>
                 <span
                   className={
@@ -546,9 +574,20 @@ export function CredentialCard({
               </div>
             </div>
             <div>
-              <div className="text-xs text-muted-foreground">最后调用</div>
-              <div className="font-medium">
-                {formatLastUsed(credential.lastUsedAt)}
+              <div className="text-xs text-muted-foreground">调用状态</div>
+              <div className="font-medium leading-tight">
+                <div>{formatLastUsed(credential.lastUsedAt)}</div>
+                <div className="text-xs text-muted-foreground">
+                  {formatCredit(credential.creditUsageTotal)}
+                </div>
+                <button
+                  type="button"
+                  className="text-xs text-emerald-600 hover:underline cursor-pointer"
+                  onClick={() => setShowUsageStats(true)}
+                  title="查看调用统计"
+                >
+                  {formatUsd(credential.totalValueUsd)}
+                </button>
               </div>
             </div>
             <div>
@@ -728,6 +767,11 @@ export function CredentialCard({
         open={showTestChat}
         onOpenChange={setShowTestChat}
         credentialId={credential.id}
+      />
+      <UsageStatsDialog
+        credential={credential}
+        open={showUsageStats}
+        onOpenChange={setShowUsageStats}
       />
     </>
   )

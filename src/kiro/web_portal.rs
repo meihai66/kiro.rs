@@ -347,6 +347,9 @@ fn norm_subscription_type(title: Option<&str>) -> String {
         return "Free".to_string();
     };
     let up = t.to_uppercase();
+    if up.contains("POWER") {
+        return "Power".to_string();
+    }
     if up.contains("PRO") {
         return "Pro".to_string();
     }
@@ -550,5 +553,20 @@ pub fn aggregate_account_info(
             })
             .unwrap_or_default(),
         raw_usage: usage,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_norm_subscription_type_recognizes_power() {
+        assert_eq!(norm_subscription_type(Some("Kiro Power")), "Power");
+        assert_eq!(norm_subscription_type(Some("KIRO POWER")), "Power");
+        // Power 不应被误判为 Pro / Free
+        assert_eq!(norm_subscription_type(Some("Kiro Pro")), "Pro");
+        assert_eq!(norm_subscription_type(Some("Kiro Pro+")), "Pro");
+        assert_eq!(norm_subscription_type(None), "Free");
     }
 }

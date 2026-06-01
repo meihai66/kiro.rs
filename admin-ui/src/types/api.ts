@@ -34,6 +34,8 @@ export interface CredentialStatusItem {
 
   // ===== upstream 字段 =====
   successCount: number
+  /** 累计失败次数（不随成功清零；与连续 failureCount 区分） */
+  errorCount: number
   lastUsedAt: string | null
   /** 凭据级 Region（用于 Token 刷新） */
   region: string | null
@@ -61,6 +63,26 @@ export interface CredentialStatusItem {
   cooldownRemainingSecs?: number | null
   /** 凭据级 RPM 上限（缺省表示沿用全局 credentialRpm） */
   credentialRpm?: number | null
+
+  // ===== 产出价值统计 =====
+  /** 累计积分消耗（上游 meteringEvent.usage 之和） */
+  creditUsageTotal: number
+  /** 按当前定价换算的累计产出价值（美元） */
+  totalValueUsd: number
+  /** 按模型细分的累计用量与价值（按价值降序） */
+  modelStats: ModelUsageStat[]
+}
+
+// 单个模型的累计用量与价值
+export interface ModelUsageStat {
+  model: string
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+  creditUsage: number
+  calls: number
+  costUsd: number
 }
 
 // ===== API Keys =====
@@ -602,6 +624,37 @@ export interface CompressionConfigResponse {
   maxRequestBodyBytes: number
 }
 
+// 模型定价
+export interface PricingRule {
+  label: string
+  /** 匹配串 */
+  match: string
+  /** 匹配方式：exact | prefix | contains | glob */
+  matchType: string
+  /** 输入单价（美元 / 每百万 token） */
+  input: number
+  /** 输出单价 */
+  output: number
+  /** 缓存读取单价 */
+  cacheRead: number
+  /** 缓存写入单价 */
+  cacheWrite: number
+}
+
+export interface PricingRate {
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+}
+
+export interface PricingConfig {
+  rules: PricingRule[]
+  default: PricingRate
+  /** 全局倍率：所有模型算出的价值最终都 × 此值 */
+  multiplier: number
+}
+
 export interface GlobalConfigResponse {
   region: string
   credentialRpm: number | null
@@ -618,6 +671,7 @@ export interface GlobalConfigResponse {
   modelUnavailableBreakerEnabled: boolean
   importDisabledByDefault: boolean
   balanceAutoRefreshSecs: number
+  balanceRefreshConcurrency: number
   rateLimitCooldownMinSecs: number
   rateLimitCooldownMaxSecs: number
   capacityPressureCooldownSecs: number
@@ -628,6 +682,7 @@ export interface GlobalConfigResponse {
   errorLogMaxCount: number
   errorLogMaxAgeDays: number
   errorLogExcludedStatusCodes: number[]
+  pricing: PricingConfig
 }
 
 export interface UpdateCompressionConfigRequest {
@@ -660,6 +715,7 @@ export interface UpdateGlobalConfigRequest {
   modelUnavailableBreakerEnabled?: boolean
   importDisabledByDefault?: boolean
   balanceAutoRefreshSecs?: number
+  balanceRefreshConcurrency?: number
   rateLimitCooldownMinSecs?: number
   rateLimitCooldownMaxSecs?: number
   capacityPressureCooldownSecs?: number
@@ -669,6 +725,7 @@ export interface UpdateGlobalConfigRequest {
   errorLogMaxCount?: number
   errorLogMaxAgeDays?: number
   errorLogExcludedStatusCodes?: number[]
+  pricing?: PricingConfig
 }
 
 // ===== 错误日志 =====
