@@ -1,5 +1,11 @@
 # Changelog
 
+## [v1.1.57] - 2026-06-01
+
+### 新增
+
+- **支持 Claude Opus 4.8 模型** — `map_model` 新增 `4.8`/`4-8` → `claude-opus-4.8` 映射（`-thinking`/`-agentic` 后缀正常剥离），`/v1/models` 列表新增 `claude-opus-4-8`、`claude-opus-4-8-thinking`、`claude-opus-4-8-agentic` 三项（1M 上下文、display name 对应），并将 `get_context_window_size` 的 1M 上下文判定扩展到 Opus/Sonnet 的 4.6/4.7/4.8 系列 (`src/anthropic/converter.rs`, `src/anthropic/handlers.rs`, `src/anthropic/types.rs`, `src/admin/service.rs`)
+
 ## [v1.1.56] - 2026-06-01
 
 ### 新增
