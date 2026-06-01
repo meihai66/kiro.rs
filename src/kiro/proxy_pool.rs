@@ -11,15 +11,17 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use crate::http_client::ProxyConfig;
+use crate::model::config::TlsBackend;
 
 /// 代理条目
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -677,6 +679,27 @@ pub struct ProxyTestResult {
     pub error: Option<String>,
 }
 
+/// 代理测试用的 HTTP Client 缓存。
+///
+/// 代理测试只需「能否连通 + 延迟」，每次都重建 reqwest::Client（含 TLS 初始化）在
+/// 高并发时会同步占用 worker 线程。按 (代理配置, TLS 后端) 缓存复用 Client，既省去
+/// 重建开销，也复用连接池让重复测试更快。
+static PROXY_TEST_CLIENTS: OnceLock<Mutex<HashMap<(ProxyConfig, TlsBackend), Client>>> =
+    OnceLock::new();
+
+fn proxy_test_client(proxy: &ProxyConfig, tls_backend: TlsBackend) -> anyhow::Result<Client> {
+    let cache = PROXY_TEST_CLIENTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = (proxy.clone(), tls_backend);
+    {
+        if let Some(client) = cache.lock().get(&key) {
+            return Ok(client.clone());
+        }
+    }
+    let client = crate::http_client::build_client(Some(proxy), 10, tls_backend)?;
+    cache.lock().insert(key, client.clone());
+    Ok(client)
+}
+
 /// 通过给定代理测出口 IP + 延迟。
 ///
 /// 试 https / http 两个 ipify 端点；任一成功即返回。
@@ -686,7 +709,7 @@ pub async fn test_proxy(
 ) -> ProxyTestResult {
     use std::time::Instant;
     let proxy = entry.to_proxy_config();
-    let client = match crate::http_client::build_client(Some(&proxy), 10, tls_backend) {
+    let client = match proxy_test_client(&proxy, tls_backend) {
         Ok(c) => c,
         Err(e) => {
             return ProxyTestResult {

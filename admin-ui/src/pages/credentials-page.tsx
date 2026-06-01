@@ -739,6 +739,17 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
               >
                 /{cap ?? '—'}
               </span>
+              <span
+                className={
+                  'ml-1 ' +
+                  (c.inFlight > 0
+                    ? 'text-blue-600 dark:text-blue-400 font-semibold'
+                    : 'text-muted-foreground')
+                }
+                title={`当前并发（in-flight）${c.inFlight}`}
+              >
+                [{c.inFlight}]
+              </span>
             </div>
             {cap != null && cap > 0 && <UsageBar pct={pct} tone={tone} />}
           </div>

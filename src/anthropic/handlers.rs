@@ -1176,8 +1176,29 @@ pub async fn post_messages(
         "Computed provisional cache usage for /v1/messages"
     );
 
-    // 转换请求
-    let conversion_result = match convert_request(&payload, &compression_config) {
+    // 转换请求（图片处理 + 输入压缩为 CPU 密集型同步操作，放到阻塞线程池执行，
+    // 避免占用 async worker 线程，导致高并发下 admin / 代理测试等轻量请求被饿死）
+    let compression_config_for_convert = compression_config.clone();
+    let (payload, convert_outcome) = match tokio::task::spawn_blocking(move || {
+        let result = convert_request(&payload, &compression_config_for_convert);
+        (payload, result)
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("convert_request 阻塞任务异常: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new(
+                    "internal_error",
+                    "请求转换内部错误".to_string(),
+                )),
+            )
+                .into_response();
+        }
+    };
+    let conversion_result = match convert_outcome {
         Ok(result) => result,
         Err(e) => {
             let (error_type, message) = match &e {

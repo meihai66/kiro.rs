@@ -1,5 +1,16 @@
 # Changelog
 
+## [v1.1.55] - 2026-06-01
+
+### 优化
+
+- **高并发下卸载 CPU 密集型转换，避免饿死轻量请求** — `/v1/messages` 的 `convert_request`（图片解码/缩放/GIF 抽帧 + 输入压缩，均为同步 CPU 密集操作）改用 `tokio::task::spawn_blocking` 在阻塞线程池执行，不再占用数量等于 CPU 核数的 async worker 线程。修复「业务并发一高，带图/大请求把 worker 占满，导致 admin/代理测试等轻量请求被调度饿死、明显变卡」的问题（`payload` 移入闭包后回传复用，`JoinError` 兜底返回 500）(`src/anthropic/handlers.rs`)
+- **代理测试复用 HTTP Client** — 新增 `PROXY_TEST_CLIENTS` 缓存，按 `(ProxyConfig, TlsBackend)` 复用代理测试用的 `reqwest::Client`，省去每次重建（含 TLS 初始化）的同步开销并复用连接池；`TlsBackend` 增加 `Hash` derive 以作缓存 key (`src/kiro/proxy_pool.rs`, `src/model/config.rs`)
+
+### 新增
+
+- **RPM 列展示实时并发数** — 凭据列表 RPM 列在 `实时RPM/上限` 后追加当前并发（in-flight）`[N]`，并发大于 0 时高亮显示，便于直观判断单号活跃度，例如 `1/5 [1]` (`admin-ui/src/pages/credentials-page.tsx`)
+
 ## [v1.1.54] - 2026-06-01
 
 ### 新增
