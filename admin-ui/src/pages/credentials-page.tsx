@@ -1125,15 +1125,24 @@ export function CredentialsPage() {
       .map(Number)
   }, [rowSelection, visibleRows])
 
-  // 已选凭据的「调用状态」价值合计（totalValueUsd）
-  const selectedTotalValueUsd = useMemo(() => {
-    if (selectedIds.length === 0) return 0
+  // 已选凭据的「调用状态」价值合计（totalValueUsd）与积分合计（creditUsageTotal）
+  const selectedTotals = useMemo(() => {
+    if (selectedIds.length === 0) return { valueUsd: 0, credit: 0 }
     const idSet = new Set(selectedIds)
     return allCredentials.reduce(
-      (s, c) => (idSet.has(c.id) ? s + (c.totalValueUsd ?? 0) : s),
-      0,
+      (acc, c) => {
+        if (idSet.has(c.id)) {
+          acc.valueUsd += c.totalValueUsd ?? 0
+          acc.credit += c.creditUsageTotal ?? 0
+        }
+        return acc
+      },
+      { valueUsd: 0, credit: 0 },
     )
   }, [selectedIds, allCredentials])
+  // 1 积分约等于多少价值（USD）
+  const usdPerCredit =
+    selectedTotals.credit > 0 ? selectedTotals.valueUsd / selectedTotals.credit : 0
 
   const handleViewBalance = (id: number, force: boolean) => {
     setBalanceTargetId(id)
@@ -2192,9 +2201,17 @@ export function CredentialsPage() {
           >
             <CheckCircle2 className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />
             已选 {selectedIds.length}
-            <span className="text-emerald-600 dark:text-emerald-400">
-              · {formatUsdShort(selectedTotalValueUsd)}
+            <span className="text-muted-foreground">
+              · {formatCreditShort(selectedTotals.credit)} 积分
             </span>
+            <span className="text-emerald-600 dark:text-emerald-400">
+              · {formatUsdShort(selectedTotals.valueUsd)}
+            </span>
+            {selectedTotals.credit > 0 && (
+              <span className="text-muted-foreground">
+                · 1积分≈${usdPerCredit.toFixed(6)}
+              </span>
+            )}
           </Badge>
         ) : (
           <span className="text-xs text-muted-foreground">未选中</span>
