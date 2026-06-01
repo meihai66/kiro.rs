@@ -105,6 +105,8 @@ export function SettingsPage() {
   const [promptCacheTtlSeconds, setPromptCacheTtlSeconds] = useState('300')
   const [promptCacheAccountingEnabled, setPromptCacheAccountingEnabled] =
     useState(true)
+  const [preferUpstreamInputTokens, setPreferUpstreamInputTokens] =
+    useState(false)
   const [defaultEndpoint, setDefaultEndpoint] = useState('ide')
 
   // 全局代理（用于 count_tokens 等非凭据出站）
@@ -183,6 +185,9 @@ export function SettingsPage() {
       setCredentialRpm(globalConfig.credentialRpm?.toString() || '')
       setPromptCacheTtlSeconds(globalConfig.promptCacheTtlSeconds.toString())
       setPromptCacheAccountingEnabled(globalConfig.promptCacheAccountingEnabled)
+      setPreferUpstreamInputTokens(
+        globalConfig.preferUpstreamInputTokens ?? false
+      )
       setDefaultEndpoint(globalConfig.defaultEndpoint || 'ide')
       setAutoDisablePatternsText(
         (globalConfig.autoDisablePatterns ?? []).join('\n')
@@ -272,6 +277,14 @@ export function SettingsPage() {
       promptCacheAccountingEnabled !== globalConfig.promptCacheAccountingEnabled
     ) {
       globalPayload.promptCacheAccountingEnabled = promptCacheAccountingEnabled
+      hasGlobalChanges = true
+    }
+
+    if (
+      preferUpstreamInputTokens !==
+      (globalConfig?.preferUpstreamInputTokens ?? false)
+    ) {
+      globalPayload.preferUpstreamInputTokens = preferUpstreamInputTokens
       hasGlobalChanges = true
     }
 
@@ -657,6 +670,22 @@ export function SettingsPage() {
                 <Switch
                   checked={promptCacheAccountingEnabled}
                   onCheckedChange={setPromptCacheAccountingEnabled}
+                  disabled={isPending}
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <div>
+                  <label className="text-sm font-medium">
+                    优先上游真实 Token
+                  </label>
+                  <p className="text-xs text-muted-foreground">
+                    开启后 usage 的 input_tokens 优先采用上游 contextUsageEvent
+                    的真实值（上游未返回时回退本地估算），可避免本地估算偏高导致上下文提前逼近上限
+                  </p>
+                </div>
+                <Switch
+                  checked={preferUpstreamInputTokens}
+                  onCheckedChange={setPreferUpstreamInputTokens}
                   disabled={isPending}
                 />
               </div>

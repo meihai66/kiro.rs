@@ -953,6 +953,8 @@ pub struct GlobalConfigResponse {
     pub prompt_cache_ttl_seconds: u64,
     /// 是否启用本地 Prompt Cache usage 记账
     pub prompt_cache_accounting_enabled: bool,
+    /// 是否优先采用上游真实输入 token 作为 usage 口径（回退本地估算）
+    pub prefer_upstream_input_tokens: bool,
     /// 默认端点名称（凭据未显式指定 endpoint 时使用）
     pub default_endpoint: String,
     /// 压缩配置
@@ -1030,6 +1032,8 @@ pub struct UpdateGlobalConfigRequest {
     pub prompt_cache_ttl_seconds: Option<u64>,
     /// 是否启用本地 Prompt Cache usage 记账（可选）
     pub prompt_cache_accounting_enabled: Option<bool>,
+    /// 是否优先采用上游真实输入 token 作为 usage 口径（可选）
+    pub prefer_upstream_input_tokens: Option<bool>,
     /// 默认端点名称（可选）
     pub default_endpoint: Option<String>,
     /// 压缩配置（可选）

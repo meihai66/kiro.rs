@@ -604,6 +604,9 @@ pub struct StreamContext {
     strip_thinking_leading_newline: bool,
     /// per-API-Key 的 cache_read 模拟比例（0..=100）。None 表示不模拟，输出真实值。
     pub cache_sim_pct: Option<u32>,
+    /// 是否优先采用上游真实输入 token（context_input_tokens）作为 usage 口径，
+    /// 上游未返回时回退本地估算 input_tokens。
+    pub prefer_upstream_input: bool,
 }
 
 impl StreamContext {
@@ -634,6 +637,17 @@ impl StreamContext {
             metering: None,
             strip_thinking_leading_newline: false,
             cache_sim_pct: None,
+            prefer_upstream_input: false,
+        }
+    }
+
+    /// 用于 usage 的有效输入 token 口径：
+    /// 当开启「优先上游」且上游返回了 context_input_tokens 时取上游真实值，
+    /// 否则回退本地估算的 input_tokens。
+    fn effective_input_tokens(&self) -> i32 {
+        match (self.prefer_upstream_input, self.context_input_tokens) {
+            (true, Some(upstream)) if upstream > 0 => upstream,
+            _ => self.input_tokens,
         }
     }
 
@@ -1211,7 +1225,7 @@ impl StreamContext {
         // 始终基于本地估算输入与 cache 统计来生成 usage，
         // 避免因服务端压缩导致上游 token 统计偏低，使客户端误判上下文大小。
         // credit usage 则仅透传上游 meteringEvent，不影响本地 input/cache usage 语义。
-        let final_input_tokens = self.input_tokens;
+        let final_input_tokens = self.effective_input_tokens();
         let billed_input_tokens = self
             .cache_usage
             .map(|cache_usage| {
@@ -1229,7 +1243,7 @@ impl StreamContext {
             context_input_tokens = ?self.context_input_tokens,
             final_input_tokens,
             output_tokens = self.output_tokens,
-            "StreamContext usage: final_input_tokens={} (估算值), billed_input_tokens={}, context_input_tokens={} (上游值), output_tokens={}",
+            "StreamContext usage: final_input_tokens={} (口径), billed_input_tokens={}, context_input_tokens={} (上游值), output_tokens={}",
             final_input_tokens,
             billed_input_tokens,
             self.context_input_tokens.map_or("N/A".to_string(), |v| v.to_string()),
@@ -1259,7 +1273,7 @@ impl StreamContext {
             .cache_usage
             .map(|c| c.cache_creation_input_tokens)
             .unwrap_or(0);
-        let input = billed_input_tokens(self.input_tokens, cache_write, cache_read);
+        let input = billed_input_tokens(self.effective_input_tokens(), cache_write, cache_read);
         let credit = self.metering.as_ref().map(|m| m.usage).unwrap_or(0.0);
         (input, self.output_tokens, cache_read, cache_write, credit)
     }

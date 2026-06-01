@@ -98,6 +98,11 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub prompt_cache_accounting_enabled: bool,
 
+    /// 是否优先采用上游真实输入 token（contextUsageEvent）作为 usage 口径，
+    /// 上游未返回时回退本地估算。默认 false（保持本地估算口径）
+    #[serde(default)]
+    pub prefer_upstream_input_tokens: bool,
+
     /// 默认端点名称（凭据未显式指定 endpoint 时使用）
     #[serde(default = "default_endpoint")]
     pub default_endpoint: String,
@@ -641,6 +646,7 @@ impl Default for Config {
             compression: CompressionConfig::default(),
             prompt_cache_ttl_seconds: default_prompt_cache_ttl_seconds(),
             prompt_cache_accounting_enabled: default_true(),
+            prefer_upstream_input_tokens: false,
             default_endpoint: default_endpoint(),
             proxy_pool_enabled: false,
             proxy_pool_path: None,

@@ -1436,6 +1436,12 @@ async fn handle_stream_request(
         context.tool_name_map,
     );
     ctx.cache_sim_pct = context.cache_sim_pct;
+    ctx.prefer_upstream_input = context
+        .state
+        .global_config
+        .as_ref()
+        .map(|c| c.read().prefer_upstream_input_tokens)
+        .unwrap_or(false);
 
     // 生成初始事件
     let initial_events = ctx.generate_initial_events();
@@ -1660,8 +1666,8 @@ async fn handle_non_stream_request(
     let mut tool_uses: Vec<serde_json::Value> = Vec::new();
     let mut has_tool_use = false;
     let mut stop_reason = "end_turn".to_string();
-    #[cfg(feature = "sensitive-logs")]
-    let mut context_input_tokens_for_log: Option<i32> = None;
+    // 上游 contextUsageEvent 推算的真实输入 token（开启「优先上游」时作为 usage 口径，亦用于诊断日志）
+    let mut upstream_input_tokens: Option<i32> = None;
     // 从 meteringEvent 透传的 credit usage，仅用于最终 usage 字段
     let mut metering: Option<MeteringEvent> = None;
 
@@ -1756,10 +1762,7 @@ async fn handle_non_stream_request(
                             let actual_input_tokens =
                                 (context_usage.context_usage_percentage * context_window / 100.0)
                                     as i32;
-                            #[cfg(feature = "sensitive-logs")]
-                            {
-                                context_input_tokens_for_log = Some(actual_input_tokens);
-                            }
+                            upstream_input_tokens = Some(actual_input_tokens);
                             // 上下文使用量达到 100% 时，设置 stop_reason 为 model_context_window_exceeded
                             if context_usage.context_usage_percentage >= 100.0 {
                                 stop_reason = "model_context_window_exceeded".to_string();
@@ -1828,8 +1831,18 @@ async fn handle_non_stream_request(
     // 估算输出 tokens
     let output_tokens = token::estimate_output_tokens(&content);
 
-    // non-stream 与 stream 保持一致：始终使用本地估算的 input_tokens 作为最终口径。
-    let final_input_tokens = context.input_tokens;
+    // non-stream 与 stream 保持一致的口径选择：
+    // 开启「优先上游」且上游返回了真实 token 时取上游值，否则回退本地估算。
+    let prefer_upstream_input = context
+        .state
+        .global_config
+        .as_ref()
+        .map(|c| c.read().prefer_upstream_input_tokens)
+        .unwrap_or(false);
+    let final_input_tokens = match (prefer_upstream_input, upstream_input_tokens) {
+        (true, Some(upstream)) if upstream > 0 => upstream,
+        _ => context.input_tokens,
+    };
     let billed_input_tokens = final_cache_context
         .map(|ctx| {
             billed_input_tokens(
@@ -1843,13 +1856,13 @@ async fn handle_non_stream_request(
     #[cfg(feature = "sensitive-logs")]
     tracing::info!(
         estimated_input_tokens = context.input_tokens,
-        context_input_tokens = ?context_input_tokens_for_log,
+        context_input_tokens = ?upstream_input_tokens,
         final_input_tokens,
         billed_input_tokens,
         output_tokens,
-        "Non-stream usage: final_input_tokens={} (估算值), context_input_tokens={} (上游值), billed_input_tokens={}, output_tokens={}",
+        "Non-stream usage: final_input_tokens={} (口径), context_input_tokens={} (上游值), billed_input_tokens={}, output_tokens={}",
         final_input_tokens,
-        context_input_tokens_for_log.map_or("N/A".to_string(), |v| v.to_string()),
+        upstream_input_tokens.map_or("N/A".to_string(), |v| v.to_string()),
         billed_input_tokens,
         output_tokens
     );

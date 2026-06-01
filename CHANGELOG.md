@@ -1,5 +1,11 @@
 # Changelog
 
+## [v1.1.56] - 2026-06-01
+
+### 新增
+
+- **可选「优先上游真实 Token」usage 口径** — 新增 `Config.prefer_upstream_input_tokens`（默认 `false`，保持本地估算口径，向后兼容）。开启后 usage 的 `input_tokens` 优先采用上游 `contextUsageEvent` 推算的真实值（上游未返回或为 0 时回退本地估算），可避免本地估算偏高导致客户端误判上下文提前逼近上限。stream（`StreamContext::effective_input_tokens`）与 non-stream 两条路径口径一致，billed/usage 透传逻辑同步使用该口径；设置页新增开关可热更新 (`src/model/config.rs`, `src/anthropic/stream.rs`, `src/anthropic/handlers.rs`, `src/admin/service.rs`, `src/admin/types.rs`, `admin-ui/src/pages/settings-page.tsx`, `admin-ui/src/types/api.ts`)
+
 ## [v1.1.55] - 2026-06-01
 
 ### 优化

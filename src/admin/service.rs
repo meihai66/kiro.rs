@@ -2012,6 +2012,7 @@ impl AdminService {
             credential_rpm: config.credential_rpm,
             prompt_cache_ttl_seconds: config.prompt_cache_ttl_seconds,
             prompt_cache_accounting_enabled: config.prompt_cache_accounting_enabled,
+            prefer_upstream_input_tokens: config.prefer_upstream_input_tokens,
             default_endpoint: config.default_endpoint.clone(),
             compression: super::types::CompressionConfigResponse {
                 enabled: c.enabled,
@@ -2084,6 +2085,10 @@ impl AdminService {
 
             if let Some(enabled) = req.prompt_cache_accounting_enabled {
                 config.prompt_cache_accounting_enabled = enabled;
+            }
+
+            if let Some(enabled) = req.prefer_upstream_input_tokens {
+                config.prefer_upstream_input_tokens = enabled;
             }
 
             if let Some(ref endpoint) = req.default_endpoint {
