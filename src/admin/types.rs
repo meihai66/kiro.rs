@@ -128,6 +128,44 @@ pub struct ModelUsageStat {
     pub cost_usd: f64,
 }
 
+// ============ 最佳 RPM 分析 ============
+
+/// 单个 RPM 分桶的统计（按每分钟 RPM 落桶聚合）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpmAnalysisBucket {
+    /// 桶下界（含）
+    pub rpm_low: u32,
+    /// 桶上界（不含）
+    pub rpm_high: u32,
+    /// 落在该桶的样本分钟数
+    pub minutes: u32,
+    /// 该桶累计请求数（Σ每分钟 RPM）
+    pub requests: u64,
+    /// 该桶累计 429 数
+    pub rl429: u64,
+    /// 429 率 = rl429 / requests（requests 为 0 时为 0）
+    pub rate429: f64,
+}
+
+/// 单个凭据的 RPM 分析结果
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpmAnalysisEntry {
+    /// 凭据 ID
+    pub id: u64,
+    /// 邮箱（用于前端展示）
+    pub email: Option<String>,
+    /// 自适应桶宽（RPM）
+    pub bucket_width: u32,
+    /// 已观测最高 RPM
+    pub observed_peak_rpm: u32,
+    /// 参与分析的样本分钟总数
+    pub total_minutes: u32,
+    /// 分桶列表（按 rpmLow 升序）
+    pub buckets: Vec<RpmAnalysisBucket>,
+}
+
 // ============ 操作请求 ============
 
 /// 启用/禁用凭据请求

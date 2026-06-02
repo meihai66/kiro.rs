@@ -31,8 +31,8 @@ use super::types::{
     ExportCredentialsResponse, ExportSkippedItem, ImportAction, ImportItemResult,
     ImportProxiesRequest, ImportProxiesResponse, ImportProxyItemResult, ImportSummary,
     ImportTokenJsonRequest, ImportTokenJsonResponse, ProxyAlertItem, ProxyAlertsResponse,
-    ProxyConfigResponse, ProxyEntryItem, ProxyListResponse, TokenJsonItem, TokenJsonProxyItem,
-    UpdateProxyConfigRequest,
+    ProxyConfigResponse, ProxyEntryItem, ProxyListResponse, RpmAnalysisBucket, RpmAnalysisEntry,
+    TokenJsonItem, TokenJsonProxyItem, UpdateProxyConfigRequest,
 };
 
 /// 余额缓存过期时间（秒），5 分钟
@@ -474,6 +474,83 @@ impl AdminService {
         store
             .rpm_history_aggregate(hours.clamp(1, 24 * 7))
             .map_err(|e| AdminServiceError::InternalError(e.to_string()))
+    }
+
+    /// 「最佳 RPM」分析：把每分钟的 (RPM, 429 增量) 按 RPM 分桶，
+    /// 返回每个凭据的分桶统计。阈值/推荐值由前端按可调阈值实时计算。
+    pub fn rpm_analysis(&self, hours: i64) -> Result<Vec<RpmAnalysisEntry>, AdminServiceError> {
+        let store = self.store.as_ref().ok_or_else(|| {
+            AdminServiceError::InvalidRequest("RPM 分析功能需要 SQLite store".into())
+        })?;
+        let rows = store
+            .rpm_analysis_all(hours.clamp(1, 24 * 7))
+            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+
+        // 邮箱映射（用于前端展示）
+        let snapshot = self.token_manager.snapshot();
+        let email_of: std::collections::HashMap<u64, Option<String>> = snapshot
+            .entries
+            .iter()
+            .map(|e| (e.id, e.email.clone()))
+            .collect();
+
+        // 按凭据分组原始 (rpm, rl_count) 数据点
+        let mut by_cred: std::collections::HashMap<u64, Vec<(u32, u32)>> =
+            std::collections::HashMap::new();
+        for (id, rpm, rl) in rows {
+            by_cred.entry(id).or_default().push((rpm, rl));
+        }
+
+        let mut entries: Vec<RpmAnalysisEntry> = by_cred
+            .into_iter()
+            .map(|(id, points)| {
+                let observed_peak_rpm = points.iter().map(|(r, _)| *r).max().unwrap_or(0);
+                let total_minutes = points.len() as u32;
+                // 自适应桶宽：峰值切成约 20 桶，最小 1
+                let bucket_width = ((observed_peak_rpm as f64 / 20.0).round() as u32).max(1);
+
+                // 按桶下标聚合
+                let mut buckets_map: std::collections::HashMap<u32, (u32, u64, u64)> =
+                    std::collections::HashMap::new(); // idx -> (minutes, requests, rl429)
+                for (rpm, rl) in &points {
+                    let idx = rpm / bucket_width;
+                    let e = buckets_map.entry(idx).or_insert((0, 0, 0));
+                    e.0 += 1;
+                    e.1 += *rpm as u64;
+                    e.2 += *rl as u64;
+                }
+                let mut buckets: Vec<RpmAnalysisBucket> = buckets_map
+                    .into_iter()
+                    .map(|(idx, (minutes, requests, rl429))| {
+                        let rate429 = if requests > 0 {
+                            rl429 as f64 / requests as f64
+                        } else {
+                            0.0
+                        };
+                        RpmAnalysisBucket {
+                            rpm_low: idx * bucket_width,
+                            rpm_high: (idx + 1) * bucket_width,
+                            minutes,
+                            requests,
+                            rl429,
+                            rate429,
+                        }
+                    })
+                    .collect();
+                buckets.sort_by_key(|b| b.rpm_low);
+
+                RpmAnalysisEntry {
+                    id,
+                    email: email_of.get(&id).cloned().flatten(),
+                    bucket_width,
+                    observed_peak_rpm,
+                    total_minutes,
+                    buckets,
+                }
+            })
+            .collect();
+        entries.sort_by_key(|e| e.id);
+        Ok(entries)
     }
 
     // ============ 错误日志 ============

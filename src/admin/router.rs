@@ -12,7 +12,8 @@ use super::{
         batch_test_proxies, clear_error_logs, create_api_key, delete_api_key, delete_error_log,
         export_credentials, force_refresh_token, get_all_credentials, get_cached_balances,
         get_credential_balance, get_error_log, get_global_config, get_proxy_config,
-        get_rpm_history, get_rpm_history_aggregate, get_stats_summary, import_proxies,
+        get_rpm_analysis, get_rpm_history, get_rpm_history_aggregate, get_stats_summary,
+        import_proxies,
         import_token_json, list_api_keys, list_credential_models, list_error_logs, list_proxies,
         list_proxy_alerts, reset_all_stats, reset_failure_count, rotate_proxies_now, test_chat,
         set_credential_allow_overuse, set_credential_disabled, set_credential_email,
@@ -65,6 +66,7 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/credentials/{id}/balance", get(get_credential_balance))
         .route("/credentials/{id}/rpm-history", get(get_rpm_history))
         .route("/stats/rpm-history", get(get_rpm_history_aggregate))
+        .route("/stats/rpm-analysis", get(get_rpm_analysis))
         .route("/stats/summary", get(get_stats_summary))
         .route("/stats/reset", post(reset_all_stats))
         .route("/test-chat", post(test_chat))

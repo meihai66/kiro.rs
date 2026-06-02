@@ -1,5 +1,11 @@
 # Changelog
 
+## [v1.1.58] - 2026-06-02
+
+### 新增
+
+- **「最佳 RPM」分析** — 新增按每分钟 (RPM, 429 增量) 分桶的凭据 RPM 分析能力：`rpm_history` 表新增 `rl_count` 列（记录每分钟新增 429 数，老库自动迁移、默认 0），`record_rpm` 同步写入；新增 `Store::rpm_analysis_all` 拉取原始数据点，`AdminService::rpm_analysis` 按凭据自适应分桶（峰值约 20 桶）聚合分钟数/请求数/429 数/429 率，并附带邮箱映射；新增 admin API 端点与前端 `rpm-tuning-card` 调参卡片，由前端按可调阈值实时计算推荐 RPM (`src/storage/migration.rs`, `src/storage/mod.rs`, `src/admin/service.rs`, `src/admin/types.rs`, `src/admin/handlers.rs`, `src/admin/router.rs`, `src/main.rs`, `admin-ui/src/components/rpm-tuning-card.tsx`, `admin-ui/src/pages/stats-page.tsx`, `admin-ui/src/api/credentials.ts`, `admin-ui/src/types/api.ts`)
+
 ## [v1.1.57] - 2026-06-01
 
 ### 新增

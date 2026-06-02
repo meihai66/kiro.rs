@@ -275,13 +275,22 @@ async fn main() {
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(60));
             ticker.tick().await; // 跳过首个 tick（避免 0 数据点）
+            // 记录每个凭据上次采样时的累计 429 数，用于差分出「该分钟新增 429」
+            let mut last_rl: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
             loop {
                 ticker.tick().await;
                 let snapshot = tm_for_rpm.snapshot();
                 let minute_ts = chrono::Utc::now().timestamp() / 60;
                 for entry in snapshot.entries {
+                    let cur = entry.rate_limit_count;
+                    // 首次见到该号 / 计数回退（重启或清空统计）→ 增量记 0
+                    let delta = match last_rl.get(&entry.id) {
+                        Some(&prev) => cur.saturating_sub(prev),
+                        None => 0,
+                    };
+                    last_rl.insert(entry.id, cur);
                     if let Err(e) =
-                        store_for_rpm.record_rpm(entry.id, minute_ts, entry.rpm)
+                        store_for_rpm.record_rpm(entry.id, minute_ts, entry.rpm, delta)
                     {
                         tracing::warn!(credential_id = entry.id, "RPM 历史写入失败: {}", e);
                         break;

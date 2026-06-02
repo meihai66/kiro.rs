@@ -23,6 +23,7 @@ import type {
   SetOveragePreferenceResponse,
   RpmHistoryResponse,
   RpmHistoryAggregateResponse,
+  RpmAnalysisResponse,
   StatsSummaryResponse,
 } from '@/types/api'
 
@@ -283,6 +284,16 @@ export async function getRpmHistoryAggregate(
 ): Promise<RpmHistoryAggregateResponse> {
   const { data } = await api.get<RpmHistoryAggregateResponse>(
     `/stats/rpm-history?hours=${hours}`
+  )
+  return data
+}
+
+// 「最佳 RPM」分析：每个凭据的 RPM 分桶 + 429 率
+export async function getRpmAnalysis(
+  hours = 24
+): Promise<RpmAnalysisResponse> {
+  const { data } = await api.get<RpmAnalysisResponse>(
+    `/stats/rpm-analysis?hours=${hours}`
   )
   return data
 }

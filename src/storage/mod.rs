@@ -229,15 +229,35 @@ impl Store {
 
     // ============ RPM history ============
 
-    /// 写一个分钟的 RPM 数据点
-    pub fn record_rpm(&self, cred_id: u64, minute_ts: i64, count: u32) -> Result<()> {
+    /// 写一个分钟的 RPM 数据点（count = 该分钟末 60s 窗口 RPM，rl_count = 该分钟新增 429 数）
+    pub fn record_rpm(&self, cred_id: u64, minute_ts: i64, count: u32, rl_count: u32) -> Result<()> {
         let conn = self.conn()?;
         conn.execute(
-            "INSERT INTO rpm_history(credential_id, minute_ts, count) VALUES (?1, ?2, ?3) \
-             ON CONFLICT(credential_id, minute_ts) DO UPDATE SET count=excluded.count",
-            params![cred_id as i64, minute_ts, count as i64],
+            "INSERT INTO rpm_history(credential_id, minute_ts, count, rl_count) VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(credential_id, minute_ts) DO UPDATE SET count=excluded.count, rl_count=excluded.rl_count",
+            params![cred_id as i64, minute_ts, count as i64, rl_count as i64],
         )?;
         Ok(())
+    }
+
+    /// 取过去 hours 小时全部凭据的 (credential_id, rpm, rl_count) 原始数据点。
+    /// 用于「最佳 RPM」分桶分析：按 credential_id 分组后由上层做分桶。
+    pub fn rpm_analysis_all(&self, hours: i64) -> Result<Vec<(u64, u32, u32)>> {
+        let cutoff_minute = (Utc::now().timestamp() - hours * 3600) / 60;
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT credential_id, count, rl_count FROM rpm_history \
+             WHERE minute_ts >= ?1 ORDER BY credential_id ASC",
+        )?;
+        let rows = stmt.query_map(params![cutoff_minute], |r| {
+            Ok((
+                r.get::<_, i64>(0)? as u64,
+                r.get::<_, i64>(1)? as u32,
+                r.get::<_, i64>(2)? as u32,
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     /// 取过去 hours 小时的所有凭据汇总 RPM 历史（按分钟）
@@ -924,3 +944,53 @@ pub struct StoreHandle(pub Arc<Store>);
 
 #[allow(dead_code)]
 pub type SharedStore = RwLock<Option<Arc<Store>>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn temp_store() -> (Arc<Store>, PathBuf) {
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir()
+            .join(format!("kiro_rpm_test_{}_{}.db", std::process::id(), n));
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open(&path).expect("open store");
+        (store, path)
+    }
+
+    #[test]
+    fn test_record_rpm_with_rl_count_and_analysis() {
+        let (store, path) = temp_store();
+        let now_min = Utc::now().timestamp() / 60;
+
+        // 号 1：低 RPM 无 429；高 RPM 有 429
+        store.record_rpm(1, now_min - 2, 10, 0).unwrap();
+        store.record_rpm(1, now_min - 1, 50, 0).unwrap();
+        store.record_rpm(1, now_min, 90, 9).unwrap();
+        // 号 2：单点
+        store.record_rpm(2, now_min, 30, 1).unwrap();
+
+        // 聚合历史仍只看 count，不受 rl_count 影响
+        let agg = store.rpm_history_aggregate(1).unwrap();
+        let total: u32 = agg.iter().map(|(_, c)| *c).sum();
+        assert_eq!(total, 10 + 50 + 90 + 30);
+
+        // 分析数据带回 rl_count
+        let mut rows = store.rpm_analysis_all(1).unwrap();
+        rows.sort();
+        assert!(rows.contains(&(1, 90, 9)));
+        assert!(rows.contains(&(2, 30, 1)));
+        assert_eq!(rows.iter().filter(|(id, _, _)| *id == 1).count(), 3);
+
+        // ON CONFLICT 覆盖：同分钟重写应更新 count 和 rl_count
+        store.record_rpm(1, now_min, 95, 12).unwrap();
+        let rows2 = store.rpm_analysis_all(1).unwrap();
+        assert!(rows2.contains(&(1, 95, 12)));
+        assert!(!rows2.contains(&(1, 90, 9)));
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+}

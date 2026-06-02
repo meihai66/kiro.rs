@@ -8,6 +8,7 @@ import { Badge } from '@/components/ui/badge'
 import { useCredentials, useResetAllStats } from '@/hooks/use-credentials'
 import { getProxies } from '@/api/proxies'
 import { getRpmHistoryAggregate, getStatsSummary } from '@/api/credentials'
+import { RpmTuningCard } from '@/components/rpm-tuning-card'
 import { extractErrorMessage } from '@/lib/utils'
 
 const HOURS_OPTIONS = [1, 6, 24, 72, 168] as const
@@ -306,6 +307,9 @@ export function StatsPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* RPM 调优：最佳 RPM 发现 */}
+      <RpmTuningCard hours={hours} />
 
       {/* 三栏：分布 + 排行 */}
       <div className="grid gap-3 md:grid-cols-3">

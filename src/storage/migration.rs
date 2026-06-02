@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS rpm_history (
     credential_id   INTEGER NOT NULL,
     minute_ts       INTEGER NOT NULL,
     count           INTEGER NOT NULL,
+    rl_count        INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (credential_id, minute_ts)
 );
 
@@ -120,6 +121,8 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
     add_column_if_missing(conn, "credentials", "last_overage_status", "TEXT")?;
     // 凭据自动禁用事件落 error_logs 时记录禁用原因（AccountSuspended/AuthenticationFailed 等）
     add_column_if_missing(conn, "error_logs", "disable_reason", "TEXT")?;
+    // 每分钟 429 增量（用于「最佳 RPM」分析）；老库默认 0
+    add_column_if_missing(conn, "rpm_history", "rl_count", "INTEGER NOT NULL DEFAULT 0")?;
     Ok(())
 }
 

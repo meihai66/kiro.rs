@@ -309,6 +309,23 @@ pub async fn get_rpm_history_aggregate(
     }
 }
 
+/// GET /api/admin/stats/rpm-analysis?hours=24
+/// 「最佳 RPM」分析：每个凭据的 RPM 分桶 + 429 率（推荐值由前端按可调阈值计算）
+pub async fn get_rpm_analysis(
+    State(state): State<AdminState>,
+    axum::extract::Query(q): axum::extract::Query<RpmHistoryQuery>,
+) -> impl IntoResponse {
+    let hours = q.hours.unwrap_or(24);
+    match state.service.rpm_analysis(hours) {
+        Ok(entries) => Json(serde_json::json!({
+            "hours": hours,
+            "entries": entries,
+        }))
+        .into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
 /// POST /api/admin/credentials
 /// 添加新凭据
 pub async fn add_credential(

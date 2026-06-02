@@ -146,6 +146,40 @@ export interface RpmHistoryAggregateResponse {
   points: RpmHistoryPoint[]
 }
 
+// ===== 最佳 RPM 分析 =====
+
+export interface RpmAnalysisBucket {
+  /** 桶下界（含） */
+  rpmLow: number
+  /** 桶上界（不含） */
+  rpmHigh: number
+  /** 落在该桶的样本分钟数 */
+  minutes: number
+  /** 该桶累计请求数（Σ每分钟 RPM） */
+  requests: number
+  /** 该桶累计 429 数 */
+  rl429: number
+  /** 429 率 = rl429 / requests（0~1） */
+  rate429: number
+}
+
+export interface RpmAnalysisEntry {
+  id: number
+  email: string | null
+  /** 自适应桶宽（RPM） */
+  bucketWidth: number
+  /** 已观测最高 RPM */
+  observedPeakRpm: number
+  /** 参与分析的样本分钟总数 */
+  totalMinutes: number
+  buckets: RpmAnalysisBucket[]
+}
+
+export interface RpmAnalysisResponse {
+  hours: number
+  entries: RpmAnalysisEntry[]
+}
+
 export interface StatsSummaryResponse {
   startedAt: string
   uptimeSecs: number
