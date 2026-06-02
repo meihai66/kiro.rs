@@ -2089,6 +2089,7 @@ impl AdminService {
             credential_rpm: config.credential_rpm,
             prompt_cache_ttl_seconds: config.prompt_cache_ttl_seconds,
             prompt_cache_accounting_enabled: config.prompt_cache_accounting_enabled,
+            prompt_cache_sim_scale_hit: config.prompt_cache_sim_scale_hit,
             prefer_upstream_input_tokens: config.prefer_upstream_input_tokens,
             default_endpoint: config.default_endpoint.clone(),
             compression: super::types::CompressionConfigResponse {
@@ -2162,6 +2163,10 @@ impl AdminService {
 
             if let Some(enabled) = req.prompt_cache_accounting_enabled {
                 config.prompt_cache_accounting_enabled = enabled;
+            }
+
+            if let Some(enabled) = req.prompt_cache_sim_scale_hit {
+                config.prompt_cache_sim_scale_hit = enabled;
             }
 
             if let Some(enabled) = req.prefer_upstream_input_tokens {
@@ -2417,10 +2422,14 @@ impl AdminService {
         }
 
         // 热更新 Prompt Cache 运行时配置
-        if req.prompt_cache_ttl_seconds.is_some() || req.prompt_cache_accounting_enabled.is_some() {
+        if req.prompt_cache_ttl_seconds.is_some()
+            || req.prompt_cache_accounting_enabled.is_some()
+            || req.prompt_cache_sim_scale_hit.is_some()
+        {
             self.prompt_cache_runtime.write().update(
                 req.prompt_cache_ttl_seconds,
                 req.prompt_cache_accounting_enabled,
+                req.prompt_cache_sim_scale_hit,
             );
         }
 
@@ -3085,7 +3094,7 @@ mod tests {
 
         let config = Arc::new(RwLock::new(Config::load(&config_path).unwrap()));
         let compression_config = Arc::new(RwLock::new(CompressionConfig::default()));
-        let prompt_cache_runtime = Arc::new(RwLock::new(PromptCacheRuntime::new(300, true)));
+        let prompt_cache_runtime = Arc::new(RwLock::new(PromptCacheRuntime::new(300, true, true)));
 
         let credentials = KiroCredentials::default();
         let tm = Arc::new(
@@ -3132,6 +3141,7 @@ mod tests {
             credential_rpm: None,
             prompt_cache_ttl_seconds: None,
             prompt_cache_accounting_enabled: None,
+            prompt_cache_sim_scale_hit: None,
             prefer_upstream_input_tokens: None,
             default_endpoint: Some("cli".to_string()),
             compression: None,
@@ -3177,6 +3187,7 @@ mod tests {
             credential_rpm: None,
             prompt_cache_ttl_seconds: None,
             prompt_cache_accounting_enabled: None,
+            prompt_cache_sim_scale_hit: None,
             prefer_upstream_input_tokens: None,
             default_endpoint: Some("".to_string()),
             compression: None,
@@ -3221,6 +3232,7 @@ mod tests {
             credential_rpm: None,
             prompt_cache_ttl_seconds: None,
             prompt_cache_accounting_enabled: None,
+            prompt_cache_sim_scale_hit: None,
             prefer_upstream_input_tokens: None,
             default_endpoint: Some("   ".to_string()),
             compression: None,
@@ -3265,6 +3277,7 @@ mod tests {
             credential_rpm: None,
             prompt_cache_ttl_seconds: None,
             prompt_cache_accounting_enabled: None,
+            prompt_cache_sim_scale_hit: None,
             prefer_upstream_input_tokens: None,
             default_endpoint: Some("unknown".to_string()),
             compression: None,
@@ -3306,6 +3319,7 @@ mod tests {
             credential_rpm: None,
             prompt_cache_ttl_seconds: None,
             prompt_cache_accounting_enabled: None,
+            prompt_cache_sim_scale_hit: None,
             prefer_upstream_input_tokens: None,
             default_endpoint: Some("  cli  ".to_string()),
             compression: None,

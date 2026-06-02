@@ -694,6 +694,7 @@ export interface GlobalConfigResponse {
   credentialRpm: number | null
   promptCacheTtlSeconds: number
   promptCacheAccountingEnabled: boolean
+  promptCacheSimScaleHit: boolean
   preferUpstreamInputTokens: boolean
   defaultEndpoint: string
   compression: CompressionConfigResponse
@@ -739,6 +740,7 @@ export interface UpdateGlobalConfigRequest {
   credentialRpm?: number | null
   promptCacheTtlSeconds?: number
   promptCacheAccountingEnabled?: boolean
+  promptCacheSimScaleHit?: boolean
   preferUpstreamInputTokens?: boolean
   defaultEndpoint?: string
   compression?: UpdateCompressionConfigRequest

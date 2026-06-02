@@ -363,6 +363,7 @@ async fn main() {
     let prompt_cache_runtime = Arc::new(RwLock::new(anthropic::PromptCacheRuntime::new(
         config.read().prompt_cache_ttl_seconds,
         config.read().prompt_cache_accounting_enabled,
+        config.read().prompt_cache_sim_scale_hit,
     )));
 
     // 启动期 seed：把 config.api_key 一次性导入 api_keys 表（如尚未存在）

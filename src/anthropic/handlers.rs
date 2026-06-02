@@ -59,6 +59,7 @@ struct StreamRequestContext<'a> {
     tool_name_map: std::collections::HashMap<String, String>,
     user_id: Option<&'a str>,
     cache_sim_pct: Option<u32>,
+    cache_sim_scale_hit: bool,
     state: &'a super::middleware::AppState,
 }
 
@@ -71,6 +72,7 @@ struct NonStreamRequestContext<'a> {
     cache_tracker: Option<&'a std::sync::Arc<crate::anthropic::cache_tracker::CacheTracker>>,
     cache_profile: Option<&'a crate::anthropic::cache_tracker::CacheProfile>,
     cache_sim_pct: Option<u32>,
+    cache_sim_scale_hit: bool,
     state: &'a super::middleware::AppState,
 }
 
@@ -113,16 +115,18 @@ fn resolved_cache_usage(
 
 #[allow(dead_code)]
 fn inject_cache_usage_fields(usage: &mut serde_json::Value, cache_context: CacheUsageContext) {
-    inject_cache_usage_fields_with_sim(usage, cache_context, None);
+    inject_cache_usage_fields_with_sim(usage, cache_context, None, true);
 }
 
-/// 应用 cache 模拟比例（per-API-Key 的 cacheReadMinPct/maxPct）：
-/// 把 input + cache_read + cache_creation 的总和按 pct 重分配，
-/// cache_read 占 pct%，其余落到 input，cache_creation 清零。
+/// 应用 cache 模拟比例（per-API-Key 的 cacheReadMinPct/maxPct）。
+/// `scale_hit` 选择模拟模式（见 `apply_cache_simulation`）：
+/// - true：只缩放真实命中的 cache_read，保留真实 cache_creation；
+/// - false：按总输入比例切给 cache_read，cache_creation 清零（旧行为）。
 fn inject_cache_usage_fields_with_sim(
     usage: &mut serde_json::Value,
     cache_context: CacheUsageContext,
     sim_pct: Option<u32>,
+    scale_hit: bool,
 ) {
     let mut creation = cache_context.cache_creation_input_tokens;
     let mut read = cache_context.cache_read_input_tokens;
@@ -132,7 +136,7 @@ fn inject_cache_usage_fields_with_sim(
             .and_then(|v| v.as_i64())
             .unwrap_or(0) as i32;
         let (new_input, new_read, new_creation) =
-            crate::api_key_manager::apply_cache_simulation(input, read, creation, pct);
+            crate::api_key_manager::apply_cache_simulation(input, read, creation, pct, scale_hit);
         usage["input_tokens"] = json!(new_input);
         read = new_read;
         creation = new_creation;
@@ -1394,6 +1398,7 @@ pub async fn post_messages(
             tool_name_map: tool_name_map.clone(),
             user_id: user_id.as_deref(),
             cache_sim_pct,
+            cache_sim_scale_hit: prompt_cache.sim_scale_hit,
             state: &state,
         };
         handle_stream_request(provider, stream_request).await
@@ -1406,6 +1411,7 @@ pub async fn post_messages(
             tool_name_map,
             user_id: user_id.as_deref(),
             cache_sim_pct,
+            cache_sim_scale_hit: prompt_cache.sim_scale_hit,
             cache_tracker: prompt_cache
                 .accounting_enabled
                 .then_some(&prompt_cache.tracker),
@@ -1472,6 +1478,7 @@ async fn handle_stream_request(
         context.tool_name_map,
     );
     ctx.cache_sim_pct = context.cache_sim_pct;
+    ctx.cache_sim_scale_hit = context.cache_sim_scale_hit;
     ctx.prefer_upstream_input = context
         .state
         .global_config
@@ -1927,13 +1934,19 @@ async fn handle_non_stream_request(
             inject_credit_usage_fields(&mut usage, metering);
         }
         if let Some(cache_context) = final_cache_context {
-            inject_cache_usage_fields_with_sim(&mut usage, cache_context, context.cache_sim_pct);
+            inject_cache_usage_fields_with_sim(
+                &mut usage,
+                cache_context,
+                context.cache_sim_pct,
+                context.cache_sim_scale_hit,
+            );
         } else if let Some(pct) = context.cache_sim_pct {
             // 即使没有真实 cache_context，启用 sim 时也要重写
             inject_cache_usage_fields_with_sim(
                 &mut usage,
                 CacheUsageContext::default(),
                 Some(pct),
+                context.cache_sim_scale_hit,
             );
         }
 

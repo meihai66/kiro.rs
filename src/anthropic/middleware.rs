@@ -24,20 +24,24 @@ use super::types::ErrorResponse;
 pub(crate) struct PromptCacheSnapshot {
     pub accounting_enabled: bool,
     pub ttl_seconds: u64,
+    /// cache 比例模拟模式：true=只缩放真实命中（默认）；false=按总输入比例（旧行为）
+    pub sim_scale_hit: bool,
     pub tracker: Arc<CacheTracker>,
 }
 
 pub struct PromptCacheRuntime {
     accounting_enabled: bool,
     ttl_seconds: u64,
+    sim_scale_hit: bool,
     tracker: Arc<CacheTracker>,
 }
 
 impl PromptCacheRuntime {
-    pub fn new(ttl_seconds: u64, accounting_enabled: bool) -> Self {
+    pub fn new(ttl_seconds: u64, accounting_enabled: bool, sim_scale_hit: bool) -> Self {
         Self {
             accounting_enabled,
             ttl_seconds,
+            sim_scale_hit,
             tracker: Arc::new(CacheTracker::new(Duration::from_secs(ttl_seconds))),
         }
     }
@@ -46,13 +50,23 @@ impl PromptCacheRuntime {
         PromptCacheSnapshot {
             accounting_enabled: self.accounting_enabled,
             ttl_seconds: self.ttl_seconds,
+            sim_scale_hit: self.sim_scale_hit,
             tracker: self.tracker.clone(),
         }
     }
 
-    pub fn update(&mut self, ttl_seconds: Option<u64>, accounting_enabled: Option<bool>) {
+    pub fn update(
+        &mut self,
+        ttl_seconds: Option<u64>,
+        accounting_enabled: Option<bool>,
+        sim_scale_hit: Option<bool>,
+    ) {
         if let Some(value) = accounting_enabled {
             self.accounting_enabled = value;
+        }
+
+        if let Some(value) = sim_scale_hit {
+            self.sim_scale_hit = value;
         }
 
         if let Some(value) = ttl_seconds

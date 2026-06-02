@@ -209,34 +209,54 @@ impl ApiKeyManager {
 }
 
 /// 把 cache_read_pct 应用到一组 usage 字段：
-/// 输入 (input, cache_read, cache_creation)，
-/// 输出 (input', cache_read', cache_creation')
-/// 总和不变；新 cache_read = total * pct%；其余分到 input；cache_creation 清零（避免重复计费）
+/// 输入 (input, cache_read, cache_creation)，输出 (input', cache_read', cache_creation')。
+/// 总和（input + cache_read + cache_creation）始终守恒。
+///
+/// `scale_hit_only` 选择两种模式：
+/// - `true`（缩放真实命中，默认）：只把真实命中的 `cache_read` 按 pct% 缩放，
+///   未命中（read=0）则 cache_read 保持 0、不伪造；真实 `cache_creation` 原样保留；
+///   被缩掉的命中部分回落到 input。
+/// - `false`（按总输入比例，旧行为）：不论是否命中，新 cache_read = total * pct%，
+///   其余分到 input，cache_creation 清零（避免重复计费）。
 pub fn apply_cache_simulation(
     input_tokens: i32,
     cache_read_input_tokens: i32,
     cache_creation_input_tokens: i32,
     pct: u32,
+    scale_hit_only: bool,
 ) -> (i32, i32, i32) {
     let total = input_tokens
         .saturating_add(cache_read_input_tokens)
         .saturating_add(cache_creation_input_tokens);
     if total <= 0 {
-        return (input_tokens, cache_read_input_tokens, cache_creation_input_tokens);
+        return (
+            input_tokens,
+            cache_read_input_tokens,
+            cache_creation_input_tokens,
+        );
     }
     let pct = pct.min(100) as i32;
-    let new_cache_read = (total * pct) / 100;
-    let new_input = total - new_cache_read;
-    (new_input, new_cache_read, 0)
+
+    if scale_hit_only {
+        let new_read = (cache_read_input_tokens.max(0) * pct) / 100;
+        let new_creation = cache_creation_input_tokens.max(0);
+        let new_input = (total - new_read - new_creation).max(0);
+        (new_input, new_read, new_creation)
+    } else {
+        let new_read = (total * pct) / 100;
+        let new_input = total - new_read;
+        (new_input, new_read, 0)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // ---- 旧模式：按总输入比例（scale_hit_only = false）----
     #[test]
     fn test_apply_cache_simulation_50pct() {
-        let (i, r, c) = apply_cache_simulation(800, 100, 100, 50);
+        let (i, r, c) = apply_cache_simulation(800, 100, 100, 50, false);
         assert_eq!(i + r + c, 1000);
         assert_eq!(r, 500);
         assert_eq!(c, 0);
@@ -244,15 +264,46 @@ mod tests {
 
     #[test]
     fn test_apply_cache_simulation_zero_total() {
-        let (i, r, c) = apply_cache_simulation(0, 0, 0, 50);
+        let (i, r, c) = apply_cache_simulation(0, 0, 0, 50, false);
         assert_eq!((i, r, c), (0, 0, 0));
     }
 
     #[test]
     fn test_apply_cache_simulation_100pct() {
-        let (i, r, c) = apply_cache_simulation(1000, 0, 0, 100);
+        let (i, r, c) = apply_cache_simulation(1000, 0, 0, 100, false);
         assert_eq!(r, 1000);
         assert_eq!(i, 0);
         assert_eq!(c, 0);
+    }
+
+    // ---- 新模式：缩放真实命中（scale_hit_only = true）----
+    #[test]
+    fn test_scale_hit_scales_real_read() {
+        // 真实命中 800，creation 50，input 150（total=1000）；pct=50
+        // → read = 800*50% = 400；creation 保留 50；input = 1000-400-50 = 550
+        let (i, r, c) = apply_cache_simulation(150, 800, 50, 50, true);
+        assert_eq!(i + r + c, 1000);
+        assert_eq!(r, 400);
+        assert_eq!(c, 50);
+        assert_eq!(i, 550);
+    }
+
+    #[test]
+    fn test_scale_hit_no_hit_does_not_fabricate() {
+        // 真实未命中（read=0），无论 pct 多少都不应伪造 cache_read
+        let (i, r, c) = apply_cache_simulation(900, 0, 100, 80, true);
+        assert_eq!(r, 0);
+        assert_eq!(c, 100);
+        assert_eq!(i, 900);
+        assert_eq!(i + r + c, 1000);
+    }
+
+    #[test]
+    fn test_scale_hit_100pct_keeps_full_hit() {
+        // pct=100 时真实命中全保留
+        let (i, r, c) = apply_cache_simulation(200, 800, 0, 100, true);
+        assert_eq!(r, 800);
+        assert_eq!(c, 0);
+        assert_eq!(i, 200);
     }
 }

@@ -1,5 +1,11 @@
 # Changelog
 
+## [v1.1.59] - 2026-06-02
+
+### 新增
+
+- **Cache 比例「只缩放真实命中」模式** — 新增 `Config.prompt_cache_sim_scale_hit`（默认 `true`），改进 API Key 的 `cacheRead` 比例模拟逻辑：开启时只对真实命中的 `cache_read` 按 pct% 缩放、保留真实 `cache_creation`、未命中不再伪造 cache_read（缩掉部分回落到 input，总和守恒）；关闭则回退旧行为（按总输入比例切给 cache_read、creation 清零）。`apply_cache_simulation` 新增 `scale_hit_only` 参数并补充三组单测，stream/non-stream 两条路径口径一致，`PromptCacheRuntime` 支持热更新，设置页新增开关 (`src/api_key_manager.rs`, `src/model/config.rs`, `src/anthropic/handlers.rs`, `src/anthropic/middleware.rs`, `src/anthropic/stream.rs`, `src/admin/service.rs`, `src/admin/types.rs`, `src/main.rs`, `admin-ui/src/pages/settings-page.tsx`, `admin-ui/src/types/api.ts`)
+
 ## [v1.1.58] - 2026-06-02
 
 ### 新增

@@ -105,6 +105,7 @@ export function SettingsPage() {
   const [promptCacheTtlSeconds, setPromptCacheTtlSeconds] = useState('300')
   const [promptCacheAccountingEnabled, setPromptCacheAccountingEnabled] =
     useState(true)
+  const [promptCacheSimScaleHit, setPromptCacheSimScaleHit] = useState(true)
   const [preferUpstreamInputTokens, setPreferUpstreamInputTokens] =
     useState(false)
   const [defaultEndpoint, setDefaultEndpoint] = useState('ide')
@@ -185,6 +186,7 @@ export function SettingsPage() {
       setCredentialRpm(globalConfig.credentialRpm?.toString() || '')
       setPromptCacheTtlSeconds(globalConfig.promptCacheTtlSeconds.toString())
       setPromptCacheAccountingEnabled(globalConfig.promptCacheAccountingEnabled)
+      setPromptCacheSimScaleHit(globalConfig.promptCacheSimScaleHit ?? true)
       setPreferUpstreamInputTokens(
         globalConfig.preferUpstreamInputTokens ?? false
       )
@@ -277,6 +279,14 @@ export function SettingsPage() {
       promptCacheAccountingEnabled !== globalConfig.promptCacheAccountingEnabled
     ) {
       globalPayload.promptCacheAccountingEnabled = promptCacheAccountingEnabled
+      hasGlobalChanges = true
+    }
+
+    if (
+      globalConfig &&
+      promptCacheSimScaleHit !== globalConfig.promptCacheSimScaleHit
+    ) {
+      globalPayload.promptCacheSimScaleHit = promptCacheSimScaleHit
       hasGlobalChanges = true
     }
 
@@ -670,6 +680,23 @@ export function SettingsPage() {
                 <Switch
                   checked={promptCacheAccountingEnabled}
                   onCheckedChange={setPromptCacheAccountingEnabled}
+                  disabled={isPending}
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <div>
+                  <label className="text-sm font-medium">
+                    Cache 比例「只缩放真实命中」
+                  </label>
+                  <p className="text-xs text-muted-foreground">
+                    开启（默认）：API Key 的 cacheRead 比例只缩放真实命中的
+                    cache_read，未命中不伪造、保留真实 cache_creation；
+                    关闭则回到旧行为（按总输入比例切分给 cache_read、creation 清零）
+                  </p>
+                </div>
+                <Switch
+                  checked={promptCacheSimScaleHit}
+                  onCheckedChange={setPromptCacheSimScaleHit}
                   disabled={isPending}
                 />
               </div>

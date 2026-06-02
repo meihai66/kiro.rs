@@ -98,6 +98,12 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub prompt_cache_accounting_enabled: bool,
 
+    /// cache 比例模拟模式（仅当 API Key 配置了 cacheRead pct 时生效）：
+    /// true=只缩放真实命中的 cache_read（命中才处理，默认）；
+    /// false=按总输入比例切分给 cache_read（旧行为，不论是否命中）。
+    #[serde(default = "default_true")]
+    pub prompt_cache_sim_scale_hit: bool,
+
     /// 是否优先采用上游真实输入 token（contextUsageEvent）作为 usage 口径，
     /// 上游未返回时回退本地估算。默认 false（保持本地估算口径）
     #[serde(default)]
@@ -646,6 +652,7 @@ impl Default for Config {
             compression: CompressionConfig::default(),
             prompt_cache_ttl_seconds: default_prompt_cache_ttl_seconds(),
             prompt_cache_accounting_enabled: default_true(),
+            prompt_cache_sim_scale_hit: default_true(),
             prefer_upstream_input_tokens: false,
             default_endpoint: default_endpoint(),
             proxy_pool_enabled: false,

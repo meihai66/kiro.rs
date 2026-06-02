@@ -248,6 +248,8 @@ pub(crate) struct FinalUsage<'a> {
     metering: Option<&'a MeteringEvent>,
     /// per-API-Key 的 cache_read 模拟比例
     cache_sim_pct: Option<u32>,
+    /// cache 模拟模式：true=只缩放真实命中并保留真实 creation；false=按总输入比例（旧行为）
+    cache_sim_scale_hit: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -506,6 +508,7 @@ impl SseStateManager {
                     cu.cache_read_input_tokens,
                     cu.cache_creation_input_tokens,
                     pct,
+                    usage.cache_sim_scale_hit,
                 );
                 (i, c, r)
             } else {
@@ -604,6 +607,9 @@ pub struct StreamContext {
     strip_thinking_leading_newline: bool,
     /// per-API-Key 的 cache_read 模拟比例（0..=100）。None 表示不模拟，输出真实值。
     pub cache_sim_pct: Option<u32>,
+    /// cache 模拟模式：true=只缩放真实命中的 cache_read 并保留真实 creation（默认）；
+    /// false=按总输入比例切分给 cache_read、creation 清零（旧行为）。
+    pub cache_sim_scale_hit: bool,
     /// 是否优先采用上游真实输入 token（context_input_tokens）作为 usage 口径，
     /// 上游未返回时回退本地估算 input_tokens。
     pub prefer_upstream_input: bool,
@@ -637,6 +643,7 @@ impl StreamContext {
             metering: None,
             strip_thinking_leading_newline: false,
             cache_sim_pct: None,
+            cache_sim_scale_hit: true,
             prefer_upstream_input: false,
         }
     }
@@ -676,6 +683,7 @@ impl StreamContext {
                 cu.cache_read_input_tokens,
                 cu.cache_creation_input_tokens,
                 pct,
+                self.cache_sim_scale_hit,
             );
             (i, c, r)
         } else {
@@ -1257,6 +1265,7 @@ impl StreamContext {
             cache_usage: self.cache_usage,
             metering: self.metering.as_ref(),
             cache_sim_pct: self.cache_sim_pct,
+            cache_sim_scale_hit: self.cache_sim_scale_hit,
         }));
         events
     }
