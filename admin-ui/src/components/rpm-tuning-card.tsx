@@ -68,28 +68,38 @@ export function RpmTuningCard({ hours }: RpmTuningCardProps) {
   })
   const { data: creds } = useCredentials()
 
-  // id -> 凭据实时信息（当前上限 / 累计 429 / 邮箱）
+  // id -> 凭据实时信息（当前上限 / 累计 429 / 邮箱 / 是否禁用）
   const credMap = useMemo(() => {
     const m = new Map<
       number,
-      { email: string | null; credentialRpm: number | null; rateLimitCount: number }
+      {
+        email: string | null
+        credentialRpm: number | null
+        rateLimitCount: number
+        disabled: boolean
+      }
     >()
     for (const c of creds?.credentials ?? []) {
       m.set(c.id, {
         email: c.email ?? null,
         credentialRpm: c.credentialRpm ?? null,
         rateLimitCount: c.rateLimitCount ?? 0,
+        disabled: c.disabled,
       })
     }
     return m
   }, [creds])
 
-  // 有样本的号在前，按观测峰值降序
+  // 仅保留「当前仍存在且未禁用」的号（剔除已删除/已禁用凭据的历史样本）；
+  // 再按观测峰值降序。
   const entries = useMemo(() => {
-    const list = [...(analysis?.entries ?? [])]
+    const list = (analysis?.entries ?? []).filter((e) => {
+      const info = credMap.get(e.id)
+      return info != null && !info.disabled
+    })
     list.sort((a, b) => b.observedPeakRpm - a.observedPeakRpm)
     return list
-  }, [analysis])
+  }, [analysis, credMap])
 
   const handleApply = (id: number, value: number) => {
     applyMut.mutate(

@@ -1,5 +1,11 @@
 # Changelog
 
+## [v1.1.60] - 2026-06-02
+
+### 修复
+
+- **「最佳 RPM」调参卡片剔除已删除/已禁用凭据** — `rpm-tuning-card` 的 `credMap` 新增 `disabled` 字段，`entries` 列表过滤为「当前仍存在且未禁用」的凭据（剔除已删除/已禁用凭据的历史样本），避免对失效凭据展示推荐 RPM (`admin-ui/src/components/rpm-tuning-card.tsx`)
+
 ## [v1.1.59] - 2026-06-02
 
 ### 新增
