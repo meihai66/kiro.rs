@@ -498,10 +498,23 @@ impl AdminService {
             .map(|e| (e.id, e.email.clone()))
             .collect();
 
+        // 「调参」语义只针对当前仍在管理、且启用中的凭据：rpm_history 会保留已删除/已禁用
+        // 凭据的历史采样（purge 前最多 7 天），若不过滤会让调参卡片统计到陈旧凭据。
+        // 已删除凭据不在快照中；已禁用凭据在快照中但 disabled=true，两者都剔除。
+        let active_ids: std::collections::HashSet<u64> = snapshot
+            .entries
+            .iter()
+            .filter(|e| !e.disabled)
+            .map(|e| e.id)
+            .collect();
+
         // 按凭据分组原始 (rpm, rl_count) 数据点
         let mut by_cred: std::collections::HashMap<u64, Vec<(u32, u32)>> =
             std::collections::HashMap::new();
         for (id, rpm, rl) in rows {
+            if !active_ids.contains(&id) {
+                continue;
+            }
             by_cred.entry(id).or_default().push((rpm, rl));
         }
 
@@ -3141,6 +3154,57 @@ mod tests {
             prompt_cache_runtime,
             known_endpoints,
         )
+    }
+
+    #[test]
+    fn test_rpm_analysis_excludes_deleted_and_disabled() {
+        // rpm_history 无外键约束，已删除凭据的采样会残留（purge 前最多 7 天）。
+        // 造三组采样：id1 启用、id2 禁用、id3 已删除（不在 token_manager 中）。
+        let db_path = env::temp_dir().join(format!(
+            "kiro-rpm-analysis-test-{}-{}.db",
+            std::process::id(),
+            fastrand::u64(..)
+        ));
+        let store = crate::storage::Store::open(&db_path).unwrap();
+        let minute_ts = chrono::Utc::now().timestamp() / 60;
+        for id in [1u64, 2, 3] {
+            store.record_rpm(id, minute_ts, 10, 0).unwrap();
+        }
+
+        // token_manager：cred1 启用 → id 1；cred2 disabled=true → id 2；不存在 id 3
+        let config = Config::default();
+        let cred1 = KiroCredentials::default();
+        let mut cred2 = KiroCredentials::default();
+        cred2.disabled = true;
+        let tm = Arc::new(
+            MultiTokenManager::new(config.clone(), vec![cred1, cred2], None, None, false).unwrap(),
+        );
+
+        let service = AdminService::new(
+            tm,
+            None,
+            Arc::new(RwLock::new(config)),
+            Arc::new(RwLock::new(CompressionConfig::default())),
+            Arc::new(RwLock::new(PromptCacheRuntime::new(300, true, true))),
+            HashSet::new(),
+        )
+        .with_store(store);
+
+        let ids: Vec<u64> = service
+            .rpm_analysis(1)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![1],
+            "「最佳 RPM」只应统计启用中且仍存在的凭据（剔除禁用 id2 与已删除 id3）"
+        );
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(format!("{}-wal", db_path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", db_path.display()));
     }
 
     fn read_persisted_config(service: &AdminService) -> Config {

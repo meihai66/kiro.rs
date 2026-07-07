@@ -967,6 +967,10 @@ pub struct MultiTokenManager {
     last_stats_save_at: Mutex<Option<Instant>>,
     /// 统计数据是否有未落盘更新
     stats_dirty: AtomicBool,
+    /// 凭据持久化串行锁：保证「取凭据快照 → 全量写库」整段互斥。
+    /// replace_all_credentials 是「清空 + 批量插入」，若两个并发 persist 各自在锁外取到
+    /// 不同新旧程度的快照，后提交者会用过期快照覆盖先提交者的改动（last-writer-wins 丢改动）。
+    persist_lock: Mutex<()>,
 }
 
 /// 凭据可用性诊断：被禁用的凭据
@@ -1208,6 +1212,7 @@ impl MultiTokenManager {
             background_refresher: None,
             last_stats_save_at: Mutex::new(None),
             stats_dirty: AtomicBool::new(false),
+            persist_lock: Mutex::new(()),
         };
 
         // 同步凭据级 RPM 覆盖到 rate_limiter（避免重启后丢失节流配置）
@@ -2441,6 +2446,10 @@ impl MultiTokenManager {
     /// - `Err(_)` - 写入失败
     fn persist_credentials(&self) -> anyhow::Result<bool> {
         use anyhow::Context;
+
+        // 串行化整段「取快照 → 全量写库」，避免并发 persist 用过期快照覆盖新改动。
+        // 在持锁期间才取快照，保证写入的一定是当下最新的全量状态（最后提交者写最新态）。
+        let _persist_guard = self.persist_lock.lock();
 
         // 收集要持久化的凭据快照（带"自动禁用不落盘"逻辑）
         let credentials: Vec<KiroCredentials> = {
