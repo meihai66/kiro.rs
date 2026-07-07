@@ -632,13 +632,28 @@ pub(crate) async fn set_user_preference(
 /// 调用上游 ListAvailableProfiles 获取首个 profileArn。
 /// 主要用途：IdC 账号在 setUserPreference 时缺 profileArn，先尝试拉取；
 /// 拉取失败则由调用方走 FALLBACK_IDC_PROFILE_ARN 兜底。
+/// Enterprise（Q Developer）账号的 profile 未必在凭据的认证 region，需要跨区探测。
+/// Kiro IDE 客户端也是探这几个区。
+pub(crate) const PROFILE_PROBE_REGIONS: &[&str] = &["us-east-1", "eu-central-1"];
+
 pub(crate) async fn list_available_profiles(
     credentials: &KiroCredentials,
     config: &Config,
     token: &str,
     proxy: Option<&ProxyConfig>,
 ) -> anyhow::Result<String> {
-    let region = credentials.effective_api_region(config);
+    let region = credentials.effective_api_region(config).to_string();
+    list_available_profiles_in_region(credentials, config, token, proxy, &region).await
+}
+
+/// 在指定 region 调 ListAvailableProfiles，返回首个 profileArn。
+pub(crate) async fn list_available_profiles_in_region(
+    credentials: &KiroCredentials,
+    config: &Config,
+    token: &str,
+    proxy: Option<&ProxyConfig>,
+    region: &str,
+) -> anyhow::Result<String> {
     let url = format!("https://q.{}.amazonaws.com/ListAvailableProfiles", region);
     let machine_id = machine_id::generate_from_credentials(credentials, config)
         .ok_or_else(|| anyhow::anyhow!("无法生成 machineId"))?;
@@ -2413,6 +2428,12 @@ impl MultiTokenManager {
                 .ok_or_else(|| anyhow::anyhow!("没有可用的 accessToken"))?
         };
 
+        // Enterprise IdC / Q Developer 的数据面必须带 profileArn，缺失时会被上游 403 拒绝。
+        // 在此按需解析并写回凭据（首次解析后持久化，后续请求直接命中）。
+        let creds = self
+            .ensure_idc_profile_arn(id, creds, &config, &token)
+            .await;
+
         // 从 entry 取实时指标 Arc，给请求路径使用
         let (in_flight, rpm) = {
             let entries = self.entries.lock();
@@ -2430,6 +2451,105 @@ impl MultiTokenManager {
             in_flight,
             rpm,
         })
+    }
+
+    /// 为缺 profileArn 的 IdC / SSO-OIDC 凭据解析 profileArn 并写回（持久化）。
+    ///
+    /// Enterprise（Q Developer）账号的数据面 generateAssistantResponse 必须携带 profileArn，
+    /// 否则上游返回 403「User is not authorized to make this call.」。通过 ListAvailableProfiles
+    /// 取真实 profileArn；失败时退回固定兜底 ARN（个人/BuilderId 场景）。非 IdC/SSO 或已有
+    /// profileArn 的凭据原样返回。
+    async fn ensure_idc_profile_arn(
+        &self,
+        id: u64,
+        mut creds: KiroCredentials,
+        config: &Config,
+        token: &str,
+    ) -> KiroCredentials {
+        let needs_profile_arn = creds
+            .profile_arn
+            .as_deref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true);
+        if !needs_profile_arn || creds.is_api_key_credential() {
+            return creds;
+        }
+        // 与 IdeEndpoint::is_aws_sso_oidc_credentials 一致：idc/builder-id/iam，或带 clientId+clientSecret
+        let auth_is_sso_oidc = creds
+            .auth_method
+            .as_deref()
+            .map(|m| {
+                m.eq_ignore_ascii_case("idc")
+                    || m.eq_ignore_ascii_case("builder-id")
+                    || m.eq_ignore_ascii_case("iam")
+            })
+            .unwrap_or(false)
+            || (creds.client_id.is_some() && creds.client_secret.is_some());
+        if !auth_is_sso_oidc {
+            return creds;
+        }
+
+        let proxy = match self.effective_proxy_for_cred(&creds) {
+            Ok(p) => p,
+            Err(_) => return creds,
+        };
+
+        // 跨区探测：账号的认证/OIDC region（凭据 region）未必是 Q Developer profile 所在的
+        // 数据面 region——Enterprise 账号 profile 常在 eu-central-1，而认证在 us-east-1。
+        // 逐个候选 region 调 ListAvailableProfiles，命中即用；解析到的 ARN 已含正确 region，
+        // 后续数据面 host 由 effective_api_region 从 ARN 解析（见 credentials.rs）。
+        let mut candidate_regions: Vec<String> =
+            vec![creds.effective_api_region(config).to_string()];
+        for r in PROFILE_PROBE_REGIONS {
+            if !candidate_regions.iter().any(|x| x == r) {
+                candidate_regions.push((*r).to_string());
+            }
+        }
+        let mut resolved: Option<String> = None;
+        for region in &candidate_regions {
+            match list_available_profiles_in_region(&creds, config, token, proxy.as_ref(), region)
+                .await
+            {
+                Ok(found) => {
+                    tracing::info!(
+                        credential_id = id,
+                        region = %region,
+                        "ListAvailableProfiles 解析到 profileArn"
+                    );
+                    resolved = Some(found);
+                    break;
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        credential_id = id,
+                        region = %region,
+                        error = %e,
+                        "该 region 无 profile，继续探测下一个"
+                    );
+                }
+            }
+        }
+        let arn = match resolved {
+            Some(arn) => arn,
+            None => {
+                tracing::warn!(
+                    credential_id = id,
+                    "所有候选 region 均未解析到 profileArn，使用兜底 ARN"
+                );
+                FALLBACK_IDC_PROFILE_ARN.to_string()
+            }
+        };
+        creds.profile_arn = Some(arn.clone());
+        {
+            let mut entries = self.entries.lock();
+            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                entry.credentials.profile_arn = Some(arn);
+            }
+        }
+        if let Err(e) = self.persist_credentials() {
+            tracing::warn!("IdC profileArn 解析后持久化失败（不影响本次请求）: {}", e);
+        }
+        creds
     }
 
     /// 标记指定凭据的 accessToken 失效（强制触发后续刷新）

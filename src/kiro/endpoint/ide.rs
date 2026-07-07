@@ -59,26 +59,32 @@ impl IdeEndpoint {
         request_body: &str,
         credentials: &KiroCredentials,
     ) -> anyhow::Result<String> {
-        if Self::is_aws_sso_oidc_credentials(credentials) {
-            let mut request: serde_json::Value = serde_json::from_str(request_body)?;
-            if let Some(obj) = request.as_object_mut() {
-                obj.remove("profileArn");
-            }
-            return Ok(serde_json::to_string(&request)?);
-        }
-
-        let Some(profile_arn) = Self::mcp_profile_arn_header_value(credentials) else {
-            return Ok(request_body.to_string());
-        };
+        // 有 profileArn 就注入请求体，没有则移除。
+        // 关键：Enterprise IdC / Q Developer 的数据面 generateAssistantResponse 必须带 profileArn，
+        // 否则上游返回 403「User is not authorized to make this call.」。此前对所有 IdC/SSO 凭据
+        // 一律剔除 profileArn（假设走默认 profile），对企业账号是错的。profileArn 由
+        // token_manager 在 try_ensure_token 阶段通过 ListAvailableProfiles 解析并写回凭据。
+        let profile_arn = credentials
+            .profile_arn
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
 
         let mut request: serde_json::Value = serde_json::from_str(request_body)?;
         let obj = request
             .as_object_mut()
             .ok_or_else(|| anyhow::anyhow!("request body is not a JSON object"))?;
-        obj.insert(
-            "profileArn".to_string(),
-            serde_json::Value::String(profile_arn.to_string()),
-        );
+        match profile_arn {
+            Some(arn) => {
+                obj.insert(
+                    "profileArn".to_string(),
+                    serde_json::Value::String(arn.to_string()),
+                );
+            }
+            None => {
+                obj.remove("profileArn");
+            }
+        }
         Ok(serde_json::to_string(&request)?)
     }
 }

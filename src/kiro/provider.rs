@@ -1973,7 +1973,9 @@ mod tests {
     }
 
     #[test]
-    fn test_ide_endpoint_inject_profile_arn_idc_removes_field() {
+    fn test_ide_endpoint_inject_profile_arn_idc_injects_credential_arn() {
+        // IdC 凭据带 profileArn（如 Enterprise/Q Developer）时，必须把凭据的 profileArn 注入
+        // 请求体（覆盖 body 里的旧值），否则上游 403「User is not authorized」。
         let mut credentials = KiroCredentials::default();
         credentials.auth_method = Some("idc".to_string());
         credentials.profile_arn = Some("arn:aws:sso::111111111:profile/idc-profile".to_string());
@@ -1992,7 +1994,10 @@ mod tests {
         let result = endpoint.transform_api_body(request_body, &ctx).unwrap();
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert!(parsed.get("profileArn").is_none());
+        assert_eq!(
+            parsed.get("profileArn").and_then(|v| v.as_str()),
+            Some("arn:aws:sso::111111111:profile/idc-profile")
+        );
         assert!(parsed.get("conversationState").is_some());
     }
 
@@ -2039,11 +2044,16 @@ mod tests {
         let result = endpoint.transform_api_body(request_body, &ctx).unwrap();
 
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert!(parsed.get("profileArn").is_none());
+        // 凭据带 profileArn（client_id+client_secret 视为 SSO-OIDC）时注入凭据的 profileArn
+        assert_eq!(
+            parsed.get("profileArn").and_then(|v| v.as_str()),
+            Some("arn:aws:sso::111111111:profile/test")
+        );
     }
 
     #[test]
     fn test_ide_endpoint_inject_profile_arn_without_credential_arn() {
+        // 凭据无 profileArn 时，移除请求体里可能残留的脏 profileArn（profileArn 只应来自凭据）
         let mut credentials = KiroCredentials::default();
         credentials.auth_method = Some("social".to_string());
         assert!(credentials.profile_arn.is_none());
@@ -2061,7 +2071,9 @@ mod tests {
         };
         let result = endpoint.transform_api_body(request_body, &ctx).unwrap();
 
-        assert_eq!(result, request_body);
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert!(parsed.get("profileArn").is_none());
+        assert!(parsed.get("conversationState").is_some());
     }
 
     #[test]
