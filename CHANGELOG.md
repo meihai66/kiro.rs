@@ -1,5 +1,17 @@
 # Changelog
 
+## [v1.1.62] - 2026-07-07
+
+### 新增
+
+- **对齐参考项目的 4 项上游处理** — 参照 `chaogei/Kiro-account-manager` 补齐落后处理：① `machineId` 改用不随刷新轮换的稳定种子派生（`client_id > email > 凭据 id`，`refresh_token` 仅兜底），消除「同设备每小时换机器码」的异常指纹；③ `build_client` 增加 `tcp_keepalive(60s)` + HTTP/2 keep-alive PING(30s/15s, while-idle) + `pool_idle_timeout(90s)`，在 ~45s 内发现「响应头后半开挂起」的死连接而非挂满 720s 总超时（不误伤模型长思考静默）；④ 内置封号关键字（`TEMPORARILY_SUSPENDED`/`ACCOUNT_SUSPENDED`/`AccountSuspendedException`）并入 `match_auto_disable_pattern` 始终生效，命中即永久隔离并切号，额度用尽（402/QuotaExceeded）新增按 `last_used_at` 的 1 小时窗口自动复检恢复；⑤ `MessagesRequest` 新增 `temperature`/`top_p` 透传（仅客户端显式提供时才带 `inferenceConfig`），`tool_choice` 生效（`none` 不下发工具、`type=tool` 只下发指定工具、`auto/any` 原样），`normalize_json_schema` 递归规范化嵌套子 schema (`src/kiro/machine_id.rs`, `src/http_client.rs`, `src/kiro/token_manager.rs`, `src/anthropic/converter.rs`, `src/anthropic/types.rs`)
+- **对齐 Kiro-Go 接口调用（profileArn 区域路由 + maxResults + Accept 头）** — 参照 `ngh1105/Kiro-Go`：数据面 region 优先从 profileArn 的 ARN 解析（`effective_api_region` 优先级 `api_region > profileArn region > region 字段 > 全局默认`，新增 `region_from_profile_arn` 解析器），避免认证/OIDC region 与 profile 实际数据面 region 不同（如认证 us-east-1、profile 在 eu-central-1）导致 403；`ListAvailableModels` 加 `maxResults=50`、`ListAvailableProfiles` body 改 `{"maxResults":10}` 对齐真实客户端；IDE 数据面请求补 `Accept: */*` 对齐客户端指纹 (`src/kiro/model/credentials.rs`, `src/kiro/endpoint/cli.rs`, `src/kiro/endpoint/ide.rs`, `src/kiro/token_manager.rs`)
+
+### 修复
+
+- **支持 Azure 企业 SSO / Enterprise IdC 账号（跨区 profileArn 解析 + 注入）** — 用真实 Enterprise（Q Developer POWER，Azure AD 联邦）账号实测定位并修复 `generateAssistantResponse` 403：① `inject_profile_arn` 不再对所有 IdC/SSO 凭据一律剔除 profileArn，改为凭据带 profileArn 就注入（Enterprise/Q Developer 数据面必须携带，否则 403「User is not authorized」）、无则仅移除脏值；② 新增跨区探测 `PROFILE_PROBE_REGIONS=[us-east-1, eu-central-1]`，对缺 profileArn 的 IdC/SSO 凭据逐区调 `ListAvailableProfiles`，命中即用并持久化，配合 ARN 区域路由自动指向正确数据面 host。实测 IdC 刷新 → 跨区解析 profileArn → 数据面 200 (`src/kiro/endpoint/ide.rs`, `src/kiro/provider.rs`, `src/kiro/token_manager.rs`)
+- **修复审查发现的回归与边界问题** — 【High】`ensure_idc_profile_arn` 只持久化真实解析到的 profileArn，两区探测均失败（含瞬时网络/代理抖动）时兜底 ARN 仅用于本次请求（内存），不再写回导致 `needs_profile_arn` 永久 false、企业号永久 403 无自愈；【Med】跨区探测用 `refresh_lock_for(id)` 去重 + 锁内二次检查消除惊群、`ListAvailableProfiles` 超时 60s→20s；【Med】`recover_expired_quota` 恢复时重置 `last_acquired_at=now`，避免月度耗尽的死号因 LRU「等最久」被优先选中；【Med】`normalize_json_schema` 撤销删除 `$ref/$defs/definitions/$id`（单删 $ref 未递归的分支残留悬空引用反而更易 400），保留递归修 null properties/required；【Med】封号关键字改为只在结构化错误字段（`__type/reason/message/error.*`）匹配、不再对整个响应体 contains，避免上游回显 prompt 误判并天然避开瞬态 429/5xx；【Med】`inferenceConfig` 不再透传 maxTokens（客户端常传极大值易 400）、`temperature`/`top_p` clamp 到 [0,1]；【Low】`tool_choice type=tool` 缺 name → 回退 auto（原样下发工具而非清空）(`src/anthropic/converter.rs`, `src/anthropic/handlers.rs`, `src/kiro/token_manager.rs`)
+
 ## [v1.1.61] - 2026-07-07
 
 ### 新增
