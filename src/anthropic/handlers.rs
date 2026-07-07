@@ -1284,13 +1284,16 @@ pub async fn post_messages(
     // 通过 endpoint.transform_api_body 动态注入；启动期 state.profile_arn 仅作
     // 兜底，多凭据切号时不能用作请求体里的固定值——cherry-pick 53df562）
     let tool_name_map = conversion_result.tool_name_map;
-    // 采样参数透传：仅当客户端显式提供 temperature/top_p 时才带 inferenceConfig（含 maxTokens），
-    // 否则完全维持既有行为（不发 inferenceConfig），零风险。
+    // 采样参数透传：仅当客户端显式提供 temperature/top_p 时才带 inferenceConfig，否则完全
+    // 维持既有行为（不发 inferenceConfig）。不透传 maxTokens——不同模型输出上限不一，客户端
+    // 常传很大的 max_tokens（如 200000/1M 上下文），直接透传易触发上游 400；且把 maxTokens 与
+    // 采样参数解耦，避免「加个 temperature 就把原本能过的请求打成 400」。temperature/top_p
+    // clamp 到上游接受的 [0,1]。
     let inference_config = (payload.temperature.is_some() || payload.top_p.is_some()).then(|| {
         crate::kiro::model::requests::kiro::InferenceConfig {
-            max_tokens: (payload.max_tokens > 0).then_some(payload.max_tokens),
-            temperature: payload.temperature,
-            top_p: payload.top_p,
+            max_tokens: None,
+            temperature: payload.temperature.map(|t| t.clamp(0.0, 1.0)),
+            top_p: payload.top_p.map(|p| p.clamp(0.0, 1.0)),
         }
     });
     let mut kiro_request = KiroRequest {

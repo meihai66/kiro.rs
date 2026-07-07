@@ -94,28 +94,20 @@ fn normalize_json_schema(schema: serde_json::Value) -> serde_json::Value {
         }
     }
 
-    // 递归清理嵌套子 schema：修复畸形 properties/required，并去掉上游 CodeWhisperer 可能
-    // 不支持的 JSON Schema 元字段（$ref / $defs / definitions / $id）——带这些的 MCP 工具
-    // 原样透传会触发上游 400。根层保留 $schema（缺失会 400），只在子层删除引用类元字段。
-    strip_unsupported_schema_meta(&mut obj);
+    // 递归修复嵌套子 schema 里畸形的 properties/required（null / 非法类型）。
+    // 注意：不删除 $ref/$defs/definitions——参考实现（Kiro-Go 系）均不删这些，只清
+    // additionalProperties/空 required；若单删 $ref 而在未递归到的分支（additionalProperties/
+    // patternProperties 等）里留下 $ref，会指向已删的 $defs 形成悬空引用，反而更易 400。
     normalize_schema_children(&mut obj);
 
     serde_json::Value::Object(obj)
 }
 
-/// 删除上游可能不支持的引用/元 schema 字段（$ref/$defs/definitions/$id）。
-/// 被 $ref 引用的子 schema 会退化为空对象（=任意类型），不精确但避免 400。
-fn strip_unsupported_schema_meta(obj: &mut serde_json::Map<String, serde_json::Value>) {
-    for k in ["$ref", "$defs", "definitions", "$id"] {
-        obj.remove(k);
-    }
-}
-
-/// 递归规范化一个子 schema 节点：只做「修复畸形字段 + 去引用元字段」，
-/// 不强加 type/properties（子节点可能是 string/number/array 等非 object 类型）。
+/// 递归规范化一个子 schema 节点：只做「修复畸形 properties/required」，
+/// 不强加 type/properties（子节点可能是 string/number/array 等非 object 类型），
+/// 也不删除 $ref/$defs（避免制造悬空引用）。
 fn normalize_schema_node(node: &mut serde_json::Value) {
     if let serde_json::Value::Object(obj) = node {
-        strip_unsupported_schema_meta(obj);
         normalize_schema_children(obj);
     }
 }
@@ -501,17 +493,20 @@ pub fn convert_request(
     {
         Some("none") => None,
         Some("tool") => {
-            let forced = req
+            match req
                 .tool_choice
                 .as_ref()
                 .and_then(|v| v.get("name"))
-                .and_then(|v| v.as_str());
-            req.tools.as_ref().map(|ts| {
-                ts.iter()
-                    .filter(|t| forced.is_some_and(|n| n == t.name))
-                    .cloned()
-                    .collect()
-            })
+                .and_then(|v| v.as_str())
+            {
+                // 只下发指定工具（近似强制调用）
+                Some(forced) => req
+                    .tools
+                    .as_ref()
+                    .map(|ts| ts.iter().filter(|t| t.name == forced).cloned().collect()),
+                // type=tool 但缺 name（畸形）→ 回退 auto，原样下发工具而非清空
+                None => req.tools.clone(),
+            }
         }
         _ => req.tools.clone(),
     };

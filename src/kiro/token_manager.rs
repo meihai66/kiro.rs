@@ -241,6 +241,31 @@ fn is_temporarily_suspended_error(err: &anyhow::Error) -> bool {
     BUILTIN_SUSPEND_PATTERNS.iter().any(|p| s.contains(p))
 }
 
+/// 只在响应体的**结构化错误字段**（`__type`/`reason`/`message`/`error.*`）里匹配封号关键字，
+/// 命中返回具体关键字。相比对整个 body 做 contains，可避免把被上游回显的**用户 prompt** 里
+/// 出现的同名字符串（如 prompt 里提到 `AccountSuspendedException`）误判为封号；也天然避开
+/// 瞬态 429/5xx（其 reason/message 不含这些封号码）。非 JSON 或字段缺失时返回 None。
+fn structured_suspend_pattern(body: &str) -> Option<&'static str> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let fields = [
+        v.get("__type").and_then(|x| x.as_str()),
+        v.get("reason").and_then(|x| x.as_str()),
+        v.get("message").and_then(|x| x.as_str()),
+        v.pointer("/error/reason").and_then(|x| x.as_str()),
+        v.pointer("/error/message").and_then(|x| x.as_str()),
+        v.pointer("/Error/Code").and_then(|x| x.as_str()),
+    ];
+    for field in fields.into_iter().flatten() {
+        if let Some(p) = BUILTIN_SUSPEND_PATTERNS
+            .iter()
+            .find(|p| field.contains(**p))
+        {
+            return Some(*p);
+        }
+    }
+    None
+}
+
 /// 验证凭据的基本有效性
 pub(crate) fn validate_credential_secret(credentials: &KiroCredentials) -> anyhow::Result<()> {
     if credentials.is_api_key_credential() {
@@ -629,22 +654,9 @@ pub(crate) async fn set_user_preference(
     Ok(())
 }
 
-/// 调用上游 ListAvailableProfiles 获取首个 profileArn。
-/// 主要用途：IdC 账号在 setUserPreference 时缺 profileArn，先尝试拉取；
-/// 拉取失败则由调用方走 FALLBACK_IDC_PROFILE_ARN 兜底。
 /// Enterprise（Q Developer）账号的 profile 未必在凭据的认证 region，需要跨区探测。
 /// Kiro IDE 客户端也是探这几个区。
 pub(crate) const PROFILE_PROBE_REGIONS: &[&str] = &["us-east-1", "eu-central-1"];
-
-pub(crate) async fn list_available_profiles(
-    credentials: &KiroCredentials,
-    config: &Config,
-    token: &str,
-    proxy: Option<&ProxyConfig>,
-) -> anyhow::Result<String> {
-    let region = credentials.effective_api_region(config).to_string();
-    list_available_profiles_in_region(credentials, config, token, proxy, &region).await
-}
 
 /// 在指定 region 调 ListAvailableProfiles，返回首个 profileArn。
 pub(crate) async fn list_available_profiles_in_region(
@@ -664,7 +676,9 @@ pub(crate) async fn list_available_profiles_in_region(
         config.system_version, config.node_version, kiro_version, machine_id
     );
 
-    let client = build_client(proxy, 60, config.tls_backend)?;
+    // ListAvailableProfiles 是轻量调用，且首请求会跨区串行探测多个 region——用较短超时
+    // （20s）避免某区不可达时把首请求拖到数十秒。
+    let client = build_client(proxy, 20, config.tls_backend)?;
     let response = client
         .post(&url)
         .header("content-type", "application/json")
@@ -1294,11 +1308,10 @@ impl MultiTokenManager {
 
     /// 检查错误响应 body 是否命中"自动禁用"配置规则；命中返回该 pattern 字符串
     pub fn match_auto_disable_pattern(&self, body: &str) -> Option<String> {
-        // 内置封号关键字始终生效（零配置），命中即永久隔离；再叠加用户配置的规则。
-        for p in BUILTIN_SUSPEND_PATTERNS {
-            if body.contains(p) {
-                return Some((*p).to_string());
-            }
+        // 内置封号关键字始终生效（零配置），命中即永久隔离。只在结构化错误字段里匹配，
+        // 避免把上游回显的用户 prompt 里的同名字符串误判、也避开瞬态 429/5xx。
+        if let Some(p) = structured_suspend_pattern(body) {
+            return Some(p.to_string());
         }
         let cfg = self.config.read();
         for p in &cfg.auto_disable_patterns {
@@ -2489,6 +2502,25 @@ impl MultiTokenManager {
             return creds;
         }
 
+        // 去重：与 token 刷新共用同一把每凭据锁，避免新凭据首次并发的 N 个请求各探一遍
+        // （惊群 + 首请求高延迟）。到这里 try_ensure_token 的刷新锁已释放，不会自锁。
+        let refresh_lock = self.refresh_lock_for(id);
+        let _guard = refresh_lock.lock().await;
+        // 二次检查：可能已被并发的另一个请求解析并写回
+        {
+            let entries = self.entries.lock();
+            if let Some(arn) = entries
+                .iter()
+                .find(|e| e.id == id)
+                .and_then(|e| e.credentials.profile_arn.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                creds.profile_arn = Some(arn.to_string());
+                return creds;
+            }
+        }
+
         let proxy = match self.effective_proxy_for_cred(&creds) {
             Ok(p) => p,
             Err(_) => return creds,
@@ -2529,25 +2561,30 @@ impl MultiTokenManager {
                 }
             }
         }
-        let arn = match resolved {
-            Some(arn) => arn,
+        match resolved {
+            Some(arn) => {
+                // 只持久化「真实解析到」的 profileArn。
+                creds.profile_arn = Some(arn.clone());
+                {
+                    let mut entries = self.entries.lock();
+                    if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                        entry.credentials.profile_arn = Some(arn);
+                    }
+                }
+                if let Err(e) = self.persist_credentials() {
+                    tracing::warn!("IdC profileArn 解析后持久化失败（不影响本次请求）: {}", e);
+                }
+            }
             None => {
+                // 两区都没解析到——无法区分「瞬时网络/代理抖动」与「确实无 profile」。
+                // 本次请求用兜底 ARN 应急，但【不写回凭据、不持久化】，下次请求会重新探测，
+                // 避免瞬时失败把凭据永久钉在错误兜底 ARN 上（企业号→永久 403 且无自愈）。
                 tracing::warn!(
                     credential_id = id,
-                    "所有候选 region 均未解析到 profileArn，使用兜底 ARN"
+                    "所有候选 region 均未解析到 profileArn，本次用兜底 ARN（不持久化，下次重试）"
                 );
-                FALLBACK_IDC_PROFILE_ARN.to_string()
+                creds.profile_arn = Some(FALLBACK_IDC_PROFILE_ARN.to_string());
             }
-        };
-        creds.profile_arn = Some(arn.clone());
-        {
-            let mut entries = self.entries.lock();
-            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-                entry.credentials.profile_arn = Some(arn);
-            }
-        }
-        if let Err(e) = self.persist_credentials() {
-            tracing::warn!("IdC profileArn 解析后持久化失败（不影响本次请求）: {}", e);
         }
         creds
     }
@@ -3024,6 +3061,11 @@ impl MultiTokenManager {
                 entry.disable_reason = None;
                 entry.auto_heal_reason = None;
                 entry.failure_count = 0;
+                // 重置 LRU 时间戳为「刚用过」：额度可能仍未真正 reset（月度额度要几周），
+                // 若保留旧的（1h 前）时间戳，选号器会把它当「等最久」优先选中 → 每次复检都先
+                // 命中这个死号拿 402、浪费一次用户请求。置为 now 让它排到队尾，仅在健康号忙/
+                // 故障转移时才被探测。
+                entry.last_acquired_at = Some(std::time::Instant::now());
                 recovered += 1;
                 tracing::info!(
                     "凭据 #{} 额度复检窗口到期，自动重新启用（下次请求会复检额度）",
@@ -3610,54 +3652,11 @@ impl MultiTokenManager {
 
         let proxy = self.effective_proxy_for_cred(&credentials)?;
 
-        // IdC 账号开启超额需要 profileArn，但 IdC token 刷新时未必返回。
-        // 缺失则先试 ListAvailableProfiles，再退回固定兜底 ARN，并持久化。
-        let mut credentials = credentials;
-        let needs_profile_arn = credentials
-            .profile_arn
-            .as_deref()
-            .map(|s| s.trim().is_empty())
-            .unwrap_or(true);
-        let auth_is_idc = credentials
-            .auth_method
-            .as_deref()
-            .map(|m| {
-                m.eq_ignore_ascii_case("idc")
-                    || m.eq_ignore_ascii_case("builder-id")
-                    || m.eq_ignore_ascii_case("iam")
-            })
-            .unwrap_or(false);
-        if needs_profile_arn && auth_is_idc {
-            let arn = match list_available_profiles(&credentials, &config, &token, proxy.as_ref())
-                .await
-            {
-                Ok(arn) => {
-                    tracing::info!(
-                        credential_id = id,
-                        "IdC 缺 profileArn，通过 ListAvailableProfiles 获取成功"
-                    );
-                    arn
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        credential_id = id,
-                        error = %e,
-                        "IdC 缺 profileArn 且 ListAvailableProfiles 失败，使用兜底 ARN"
-                    );
-                    FALLBACK_IDC_PROFILE_ARN.to_string()
-                }
-            };
-            credentials.profile_arn = Some(arn.clone());
-            {
-                let mut entries = self.entries.lock();
-                if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-                    entry.credentials.profile_arn = Some(arn);
-                }
-            }
-            if let Err(e) = self.persist_credentials() {
-                tracing::warn!("IdC profileArn 兜底后持久化失败（不影响本次请求）: {}", e);
-            }
-        }
+        // IdC 账号开启超额需要 profileArn，但 IdC token 刷新时未必返回。复用 ensure_idc_profile_arn
+        // 跨区解析（解析失败时用兜底 ARN 但不持久化，避免瞬时失败永久钉死错误 ARN）。
+        let credentials = self
+            .ensure_idc_profile_arn(id, credentials, &config, &token)
+            .await;
 
         match set_user_preference(&credentials, &config, &token, &normalized, proxy.as_ref()).await
         {
@@ -4383,6 +4382,37 @@ mod tests {
         let credentials = KiroCredentials::default();
         let tm = TokenManager::new(config, credentials, None);
         assert!(tm.credentials().access_token.is_none());
+    }
+
+    #[test]
+    fn test_structured_suspend_pattern_matches_only_error_fields() {
+        // 结构化错误字段命中封号关键字
+        assert_eq!(
+            structured_suspend_pattern(r#"{"reason":"ACCOUNT_SUSPENDED"}"#),
+            Some("ACCOUNT_SUSPENDED")
+        );
+        assert_eq!(
+            structured_suspend_pattern(r#"{"__type":"AccountSuspendedException","message":"x"}"#),
+            Some("AccountSuspendedException")
+        );
+        assert_eq!(
+            structured_suspend_pattern(r#"{"error":{"reason":"TEMPORARILY_SUSPENDED"}}"#),
+            Some("TEMPORARILY_SUSPENDED")
+        );
+        // 用户 prompt 里出现同名字符串（在 conversationState 等非错误字段）不应误判为封号
+        assert_eq!(
+            structured_suspend_pattern(
+                r#"{"conversationState":{"content":"explain AccountSuspendedException"},"reason":"THROTTLING"}"#
+            ),
+            None
+        );
+        // 普通 429/瞬态错误不误判
+        assert_eq!(
+            structured_suspend_pattern(r#"{"message":"Too many requests","reason":"THROTTLING"}"#),
+            None
+        );
+        // 非 JSON
+        assert_eq!(structured_suspend_pattern("Internal Server Error"), None);
     }
 
     #[test]
