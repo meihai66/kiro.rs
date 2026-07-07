@@ -180,18 +180,26 @@ impl CooldownManager {
         let duration = custom_duration
             .unwrap_or_else(|| self.calculate_cooldown_duration(reason, entry.trigger_count));
 
-        entry.started_at = now;
-        entry.expires_at = now + duration;
+        // 不缩短已有的更长冷却：取「现有到期」与「now + 新时长」的较晚者。
+        // 例如凭据已因容量压力进入 300s 冷却，此时一个迟到的普通 429（60s）不应把它
+        // 缩短到 60s。清除冷却应走 clear_cooldown，而非用更短的新冷却覆盖。
+        let new_expires = now + duration;
+        if new_expires >= entry.expires_at {
+            entry.started_at = now;
+            entry.expires_at = new_expires;
+        }
+        // 返回实际生效的剩余时长（可能大于新计算的 duration），供调用方设置 Retry-After。
+        let effective = entry.expires_at.saturating_duration_since(now);
 
         tracing::info!(
             credential_id = %credential_id,
             reason = %reason.description(),
-            duration_secs = %duration.as_secs(),
+            duration_secs = %effective.as_secs(),
             trigger_count = %entry.trigger_count,
             "凭据进入冷却"
         );
 
-        duration
+        effective
     }
 
     /// 检查凭据是否在冷却中
@@ -360,6 +368,48 @@ mod tests {
             manager.set_cooldown_with_duration(1, CooldownReason::ServerError, Some(custom));
 
         assert_eq!(duration, custom);
+    }
+
+    #[test]
+    fn test_cooldown_shorter_does_not_shorten_existing() {
+        let manager = CooldownManager::new();
+        // 先设一个 300s 长冷却（如容量压力）
+        let long = manager.set_cooldown_with_duration(
+            1,
+            CooldownReason::ServerError,
+            Some(Duration::from_secs(300)),
+        );
+        assert!(long.as_secs() >= 299);
+        // 迟到的 60s 短冷却不应把它缩短
+        let after = manager.set_cooldown_with_duration(
+            1,
+            CooldownReason::RateLimitExceeded,
+            Some(Duration::from_secs(60)),
+        );
+        assert!(
+            after.as_secs() >= 290,
+            "短冷却不应缩短已有的长冷却，实际剩余 {}s",
+            after.as_secs()
+        );
+        let (_, remaining) = manager.check_cooldown(1).unwrap();
+        assert!(remaining.as_secs() >= 290);
+    }
+
+    #[test]
+    fn test_cooldown_longer_extends_existing() {
+        let manager = CooldownManager::new();
+        manager.set_cooldown_with_duration(
+            1,
+            CooldownReason::RateLimitExceeded,
+            Some(Duration::from_secs(30)),
+        );
+        // 更长的新冷却应当延长到期时间
+        let after = manager.set_cooldown_with_duration(
+            1,
+            CooldownReason::ServerError,
+            Some(Duration::from_secs(120)),
+        );
+        assert!(after.as_secs() >= 115);
     }
 
     #[test]

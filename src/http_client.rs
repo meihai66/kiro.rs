@@ -49,7 +49,12 @@ pub fn build_client(
     timeout_secs: u64,
     tls_backend: TlsBackend,
 ) -> anyhow::Result<Client> {
-    let mut builder = Client::builder().timeout(Duration::from_secs(timeout_secs));
+    // 单独的建连超时：仅覆盖 TCP/TLS 建连阶段。避免死代理/死上游在建连处一直挂起
+    // 到整体 timeout（可达数百秒）才失败——叠加重试会放大成数十分钟不可用。
+    const CONNECT_TIMEOUT_SECS: u64 = 30;
+    let mut builder = Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS));
 
     match tls_backend {
         TlsBackend::Rustls => {

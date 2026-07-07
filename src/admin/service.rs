@@ -9,6 +9,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::anthropic::PromptCacheRuntime;
+use crate::common::redact::mask_url_userinfo;
 use crate::common::utf8::floor_char_boundary;
 use crate::http_client::ProxyConfig;
 use crate::kiro::model::credentials::KiroCredentials;
@@ -1767,7 +1768,8 @@ impl AdminService {
         tracing::info!(
             index,
             has_embedded_proxy = embedded_proxy.is_some(),
-            embedded_proxy_url = embedded_proxy.as_ref().map(|p| p.url.as_str()),
+            // 代理 url 可能形如 socks5://user:pass@host:port，脱敏后再记日志
+            embedded_proxy_url = ?embedded_proxy.as_ref().map(|p| mask_url_userinfo(&p.url)),
             pool_enabled = self.proxy_pool.is_some(),
             "import-token-json: 解析单项"
         );
@@ -1784,7 +1786,7 @@ impl AdminService {
                 Err(e) => {
                     tracing::warn!(
                         index,
-                        proxy_url = %p.url,
+                        proxy_url = %mask_url_userinfo(&p.url),
                         error = %e,
                         "import-token-json: 内嵌代理加入池失败"
                     );

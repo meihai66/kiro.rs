@@ -59,6 +59,22 @@ impl Store {
             migration::ensure_schema(&conn)?;
         }
 
+        // 库内明文存放凭据/token，收紧文件权限为仅属主可读写（0600），纵深防御防同机其他
+        // 本地用户读取。WAL/SHM 会镜像库内容，一并收紧。best-effort：失败不阻断启动。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for suffix in ["", "-wal", "-shm"] {
+                let p = PathBuf::from(format!("{}{}", db_path.display(), suffix));
+                if p.exists()
+                    && let Err(e) =
+                        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600))
+                {
+                    tracing::warn!("收紧数据库文件权限失败 {}: {}", p.display(), e);
+                }
+            }
+        }
+
         Ok(Arc::new(Self { pool, db_path }))
     }
 
