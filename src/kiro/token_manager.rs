@@ -228,8 +228,17 @@ fn replace_error_message_field(body: &str, new_message: &str) -> Option<String> 
     }
 }
 
+/// 内置「账号封禁/暂停」关键字（零配置生效）：命中即认定该账号被上游风控封禁，
+/// 应永久隔离该凭据并切号，而不是当作普通失败反复重试。
+const BUILTIN_SUSPEND_PATTERNS: &[&str] = &[
+    "TEMPORARILY_SUSPENDED",
+    "ACCOUNT_SUSPENDED",
+    "AccountSuspendedException",
+];
+
 fn is_temporarily_suspended_error(err: &anyhow::Error) -> bool {
-    err.to_string().contains("TEMPORARILY_SUSPENDED")
+    let s = err.to_string();
+    BUILTIN_SUSPEND_PATTERNS.iter().any(|p| s.contains(p))
 }
 
 /// 验证凭据的基本有效性
@@ -577,7 +586,10 @@ pub(crate) async fn set_user_preference(
 ) -> anyhow::Result<()> {
     let normalized = overage_status.trim().to_ascii_uppercase();
     if normalized != "ENABLED" && normalized != "DISABLED" {
-        bail!("overage_status 必须是 ENABLED 或 DISABLED，收到: {}", overage_status);
+        bail!(
+            "overage_status 必须是 ENABLED 或 DISABLED，收到: {}",
+            overage_status
+        );
     }
 
     let machine_id = machine_id::generate_from_credentials(credentials, config)
@@ -631,10 +643,7 @@ pub(crate) async fn list_available_profiles(
     let machine_id = machine_id::generate_from_credentials(credentials, config)
         .ok_or_else(|| anyhow::anyhow!("无法生成 machineId"))?;
     let kiro_version = &config.kiro_version;
-    let amz_user_agent = format!(
-        "aws-sdk-js/1.0.0 KiroIDE-{}-{}",
-        kiro_version, machine_id
-    );
+    let amz_user_agent = format!("aws-sdk-js/1.0.0 KiroIDE-{}-{}", kiro_version, machine_id);
     let user_agent = format!(
         "aws-sdk-js/1.0.0 ua/2.1 os/{} lang/js md/nodejs#{} api/codewhispererruntime#1.0.0 m/N,E KiroIDE-{}-{}",
         config.system_version, config.node_version, kiro_version, machine_id
@@ -1009,6 +1018,11 @@ const MODEL_UNAVAILABLE_THRESHOLD: u32 = 2;
 /// 全局禁用恢复时间（分钟）
 const GLOBAL_DISABLE_RECOVERY_MINUTES: i64 = 5;
 
+/// 额度用尽（402/QuotaExceeded）自动复检窗口（小时）。
+/// 到期后重新启用凭据，下次请求会复检额度——覆盖「瞬时 402」与「月度额度重置」，
+/// 避免额度类禁用只能靠人工/重启恢复。窗口内不恢复（immediately after 禁用不会立刻复活）。
+const QUOTA_AUTO_RECOVERY_HOURS: i64 = 1;
+
 /// 统计数据持久化防抖间隔
 const STATS_SAVE_DEBOUNCE: StdDuration = StdDuration::from_secs(30);
 
@@ -1265,6 +1279,12 @@ impl MultiTokenManager {
 
     /// 检查错误响应 body 是否命中"自动禁用"配置规则；命中返回该 pattern 字符串
     pub fn match_auto_disable_pattern(&self, body: &str) -> Option<String> {
+        // 内置封号关键字始终生效（零配置），命中即永久隔离；再叠加用户配置的规则。
+        for p in BUILTIN_SUSPEND_PATTERNS {
+            if body.contains(p) {
+                return Some((*p).to_string());
+            }
+        }
         let cfg = self.config.read();
         for p in &cfg.auto_disable_patterns {
             let trimmed = p.trim();
@@ -1295,8 +1315,7 @@ impl MultiTokenManager {
                 let pat = pat.trim();
                 if !pat.is_empty() && body.contains(pat) {
                     return Some(
-                        replace_error_message_field(body, repl)
-                            .unwrap_or_else(|| repl.to_string()),
+                        replace_error_message_field(body, repl).unwrap_or_else(|| repl.to_string()),
                     );
                 }
             }
@@ -1669,7 +1688,10 @@ impl MultiTokenManager {
 
         // 读取冷却快速 bail 阈值（来自 Config，0 表示禁用快速 bail）
         let cooldown_bail_threshold = {
-            let secs = self.config.read().all_credentials_cooldown_bail_threshold_secs;
+            let secs = self
+                .config
+                .read()
+                .all_credentials_cooldown_bail_threshold_secs;
             if secs == 0 {
                 StdDuration::from_secs(u64::MAX / 2) // 用极大值代表"永不 bail"
             } else {
@@ -1867,11 +1889,7 @@ impl MultiTokenManager {
                 }
 
                 // 按优先级选出候选集合；同优先级时，优先选择仅运行时的环境变量凭据，再做 LRU 选择
-                let min_priority = candidates
-                    .iter()
-                    .map(|(_, p, _, _)| *p)
-                    .min()
-                    .unwrap_or(0);
+                let min_priority = candidates.iter().map(|(_, p, _, _)| *p).min().unwrap_or(0);
                 let prefer_runtime_only = candidates
                     .iter()
                     .any(|(_, p, runtime_only, _)| *p == min_priority && *runtime_only);
@@ -2734,10 +2752,7 @@ impl MultiTokenManager {
             // 开启「允许超额使用」时不禁用，由上游决定是否实际放行
             if entry.credentials.allow_overuse {
                 entry.last_used_at = Some(Utc::now().to_rfc3339());
-                tracing::warn!(
-                    "凭据 #{} 额度用尽但已开启允许超额使用，保持启用状态",
-                    id
-                );
+                tracing::warn!("凭据 #{} 额度用尽但已开启允许超额使用，保持启用状态", id);
                 return entries.iter().any(|e| !e.disabled);
             }
 
@@ -2824,13 +2839,17 @@ impl MultiTokenManager {
     ///
     /// 返回是否执行了恢复
     pub fn check_and_recover(&self) -> bool {
+        // 额度用尽（QuotaExceeded）按时自动复检，独立于全局熔断恢复：到窗口即重新启用，
+        // 下次请求复检额度。覆盖瞬时 402 与月度额度重置，避免只能人工/重启恢复。
+        let quota_recovered = self.recover_expired_quota();
+
         let should_recover = {
             let recovery_time = self.global_recovery_time.lock();
             recovery_time.map(|t| Utc::now() >= t).unwrap_or(false)
         };
 
         if !should_recover {
-            return false;
+            return quota_recovered;
         }
 
         let mut entries = self.entries.lock();
@@ -2855,7 +2874,44 @@ impl MultiTokenManager {
             tracing::info!("已自动恢复 {} 个凭据", recovered_count);
         }
 
-        recovered_count > 0
+        recovered_count > 0 || quota_recovered
+    }
+
+    /// 复检并恢复「额度用尽」（QuotaExceeded）到达自动复检窗口的凭据。
+    /// 以 `last_used_at`（在 report_quota_exhausted 时被设为禁用时刻）为基准，
+    /// 超过 [`QUOTA_AUTO_RECOVERY_HOURS`] 即重新启用；开启 allow_overuse 的凭据不在此列
+    /// （它们本就不因额度被禁用）。返回是否恢复了任意凭据。
+    fn recover_expired_quota(&self) -> bool {
+        let now = Utc::now();
+        let mut entries = self.entries.lock();
+        let mut recovered = 0;
+        for entry in entries.iter_mut() {
+            if !entry.disabled
+                || entry.disable_reason != Some(DisableReason::QuotaExceeded)
+                || entry.credentials.allow_overuse
+            {
+                continue;
+            }
+            // 无禁用时间戳时保守地允许复检（避免永久卡死）
+            let due = entry
+                .last_used_at
+                .as_deref()
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                .map(|t| now >= t.with_timezone(&Utc) + Duration::hours(QUOTA_AUTO_RECOVERY_HOURS))
+                .unwrap_or(true);
+            if due {
+                entry.disabled = false;
+                entry.disable_reason = None;
+                entry.auto_heal_reason = None;
+                entry.failure_count = 0;
+                recovered += 1;
+                tracing::info!(
+                    "凭据 #{} 额度复检窗口到期，自动重新启用（下次请求会复检额度）",
+                    entry.id
+                );
+            }
+        }
+        recovered > 0
     }
 
     /// 累计 429 触发次数（在 provider 收到 429 响应时调用）
@@ -2910,10 +2966,7 @@ impl MultiTokenManager {
         let mut entries = self.entries.lock();
         if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
             if entry.credentials.allow_overuse {
-                tracing::info!(
-                    "凭据 #{} 余额不足但已开启允许超额使用，保持启用状态",
-                    id
-                );
+                tracing::info!("凭据 #{} 余额不足但已开启允许超额使用，保持启用状态", id);
                 return;
             }
             entry.disabled = true;
@@ -2987,7 +3040,11 @@ impl MultiTokenManager {
 
         let total = credential_ids.len();
         let concurrency = (self.config.read().balance_refresh_concurrency.max(1) as usize).min(256);
-        tracing::info!("正在初始化 {} 个凭据的余额（并发 {}）...", total, concurrency);
+        tracing::info!(
+            "正在初始化 {} 个凭据的余额（并发 {}）...",
+            total,
+            concurrency
+        );
 
         // 有界并发查询：每个凭据走各自代理出口，并发刷新不会撞同一 IP 的上游限流。
         use futures::stream::StreamExt;
@@ -3070,16 +3127,13 @@ impl MultiTokenManager {
                         .clone()
                         .or_else(|| credential_secret_hash(&e.credentials));
 
-                    let (cooldown_reason, cooldown_remaining_secs) = match self
-                        .cooldown_manager
-                        .check_cooldown(e.id)
-                    {
-                        Some((reason, remaining)) => (
-                            Some(format!("{:?}", reason)),
-                            Some(remaining.as_secs()),
-                        ),
-                        None => (None, None),
-                    };
+                    let (cooldown_reason, cooldown_remaining_secs) =
+                        match self.cooldown_manager.check_cooldown(e.id) {
+                            Some((reason, remaining)) => {
+                                (Some(format!("{:?}", reason)), Some(remaining.as_secs()))
+                            }
+                            None => (None, None),
+                        };
 
                     CredentialEntrySnapshot {
                         id: e.id,
@@ -3187,12 +3241,7 @@ impl MultiTokenManager {
         let entries = self.entries.lock();
         entries
             .iter()
-            .filter_map(|e| {
-                e.credentials
-                    .proxy_slot_id
-                    .clone()
-                    .map(|slot| (e.id, slot))
-            })
+            .filter_map(|e| e.credentials.proxy_slot_id.clone().map(|slot| (e.id, slot)))
             .collect()
     }
 
@@ -3259,8 +3308,7 @@ impl MultiTokenManager {
         let interval = rpm
             .filter(|&v| v > 0)
             .map(|v| (60_000u64 / v as u64).max(1));
-        self.rate_limiter
-            .set_credential_min_interval(id, interval);
+        self.rate_limiter.set_credential_min_interval(id, interval);
 
         self.persist_credentials()?;
         Ok(())
@@ -3318,10 +3366,7 @@ impl MultiTokenManager {
     }
 
     /// 拉取该凭据支持的模型列表（上游 ListAvailableModels）
-    pub async fn list_available_models_for(
-        &self,
-        id: u64,
-    ) -> anyhow::Result<serde_json::Value> {
+    pub async fn list_available_models_for(&self, id: u64) -> anyhow::Result<serde_json::Value> {
         let config = self.config.read().clone();
         let credentials = {
             let entries = self.entries.lock();
@@ -3384,8 +3429,9 @@ impl MultiTokenManager {
         if !status.is_success() {
             anyhow::bail!("ListAvailableModels 返回 {}: {}", status, body);
         }
-        let value: serde_json::Value = serde_json::from_str(&body)
-            .map_err(|e| anyhow::anyhow!("解析 ListAvailableModels 响应失败: {} (body={})", e, body))?;
+        let value: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+            anyhow::anyhow!("解析 ListAvailableModels 响应失败: {} (body={})", e, body)
+        })?;
         Ok(value)
     }
 
@@ -3503,10 +3549,7 @@ impl MultiTokenManager {
                     }
                 }
                 if let Err(e) = self.persist_credentials() {
-                    tracing::warn!(
-                        "overage_status 更新后持久化失败（不影响本次请求）: {}",
-                        e
-                    );
+                    tracing::warn!("overage_status 更新后持久化失败（不影响本次请求）: {}", e);
                 }
                 Ok(normalized)
             }
@@ -3594,77 +3637,77 @@ impl MultiTokenManager {
         // 检查是否需要刷新 token
         let needs_refresh = is_token_expired(&credentials) || is_token_expiring_soon(&credentials);
 
-        let token =
-            if credentials.is_api_key_credential() {
-                credentials
-                    .kiro_api_key
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("凭据无 kiroApiKey"))?
-            } else if needs_refresh {
-                let _refresh_guard = self.refresh_lock_for(id);
-                let _guard = _refresh_guard.lock().await;
-                let current_creds = {
-                    let entries = self.entries.lock();
-                    entries
-                        .iter()
-                        .find(|e| e.id == id)
-                        .map(|e| e.credentials.clone())
-                        .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
-                };
+        let token = if credentials.is_api_key_credential() {
+            credentials
+                .kiro_api_key
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("凭据无 kiroApiKey"))?
+        } else if needs_refresh {
+            let _refresh_guard = self.refresh_lock_for(id);
+            let _guard = _refresh_guard.lock().await;
+            let current_creds = {
+                let entries = self.entries.lock();
+                entries
+                    .iter()
+                    .find(|e| e.id == id)
+                    .map(|e| e.credentials.clone())
+                    .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
+            };
 
-                if is_token_expired(&current_creds) || is_token_expiring_soon(&current_creds) {
-                    let proxy = self.effective_proxy_for_cred(&current_creds)?;
-                    let new_creds =
-                        match refresh_token_with_id(&current_creds, &config, proxy.as_ref(), id)
-                            .await
-                        {
-                            Ok(creds) => creds,
-                            Err(err) => {
-                                if is_invalid_grant_error(&err) {
-                                    self.record_disable_event(
-                                        id,
-                                        DisableReason::AuthenticationFailed,
-                                        None,
-                                        format!(
-                                            "余额查询前 Token 刷新失败（invalid_grant）: {}",
-                                            err
-                                        ),
-                                        None,
-                                        None,
-                                        None,
-                                        None,
-                                        None,
-                                    );
-                                    self.mark_authentication_failed(id);
-                                }
-                                return Err(err);
-                            }
-                        };
-                    {
-                        let mut entries = self.entries.lock();
-                        if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-                            entry.credentials = new_creds.clone();
-                            // 更新哈希缓存
-                            entry.refresh_token_hash = credential_secret_hash(&new_creds);
+            if is_token_expired(&current_creds) || is_token_expiring_soon(&current_creds) {
+                let proxy = self.effective_proxy_for_cred(&current_creds)?;
+                let new_creds = match refresh_token_with_id(
+                    &current_creds,
+                    &config,
+                    proxy.as_ref(),
+                    id,
+                )
+                .await
+                {
+                    Ok(creds) => creds,
+                    Err(err) => {
+                        if is_invalid_grant_error(&err) {
+                            self.record_disable_event(
+                                id,
+                                DisableReason::AuthenticationFailed,
+                                None,
+                                format!("余额查询前 Token 刷新失败（invalid_grant）: {}", err),
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                            );
+                            self.mark_authentication_failed(id);
                         }
+                        return Err(err);
                     }
-                    // 持久化失败只记录警告，不影响本次请求
-                    if let Err(e) = self.persist_credentials() {
-                        tracing::warn!("Token 刷新后持久化失败（不影响本次请求）: {}", e);
+                };
+                {
+                    let mut entries = self.entries.lock();
+                    if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                        entry.credentials = new_creds.clone();
+                        // 更新哈希缓存
+                        entry.refresh_token_hash = credential_secret_hash(&new_creds);
                     }
-                    new_creds
-                        .access_token
-                        .ok_or_else(|| anyhow::anyhow!("刷新后无 access_token"))?
-                } else {
-                    current_creds
-                        .access_token
-                        .ok_or_else(|| anyhow::anyhow!("凭据无 access_token"))?
                 }
+                // 持久化失败只记录警告，不影响本次请求
+                if let Err(e) = self.persist_credentials() {
+                    tracing::warn!("Token 刷新后持久化失败（不影响本次请求）: {}", e);
+                }
+                new_creds
+                    .access_token
+                    .ok_or_else(|| anyhow::anyhow!("刷新后无 access_token"))?
             } else {
-                credentials
+                current_creds
                     .access_token
                     .ok_or_else(|| anyhow::anyhow!("凭据无 access_token"))?
-            };
+            }
+        } else {
+            credentials
+                .access_token
+                .ok_or_else(|| anyhow::anyhow!("凭据无 access_token"))?
+        };
 
         let credentials = {
             let entries = self.entries.lock();
@@ -3778,7 +3821,10 @@ impl MultiTokenManager {
     ///
     /// 用于「暂不绑定代理」场景：尚无可用代理槽时强制走上游验证只会失败，
     /// 改为直接落库，由调用方负责把凭据置为禁用，待手动绑定代理后再激活。
-    pub async fn add_credential_unverified(&self, new_cred: KiroCredentials) -> anyhow::Result<u64> {
+    pub async fn add_credential_unverified(
+        &self,
+        new_cred: KiroCredentials,
+    ) -> anyhow::Result<u64> {
         self.add_credential_inner(new_cred, false).await
     }
 
@@ -4243,7 +4289,8 @@ mod tests {
 
     #[test]
     fn test_replace_error_message_field_nested_anthropic_style() {
-        let body = r#"{"type":"error","error":{"type":"rate_limit_error","message":"Rate limit hit"}}"#;
+        let body =
+            r#"{"type":"error","error":{"type":"rate_limit_error","message":"Rate limit hit"}}"#;
         let out = replace_error_message_field(body, "已限流").unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["error"]["message"], "已限流");
@@ -4266,8 +4313,7 @@ mod tests {
     #[test]
     fn test_match_error_replacement_keeps_json_shell() {
         let mut config = Config::default();
-        config.error_replace_rules =
-            vec!["MONTHLY_REQUEST_COUNT===请稍后重试".to_string()];
+        config.error_replace_rules = vec!["MONTHLY_REQUEST_COUNT===请稍后重试".to_string()];
         let mut cred = KiroCredentials::default();
         cred.refresh_token = Some("dummy".repeat(40));
         let mgr = MultiTokenManager::new(config, vec![cred], None, None, false).unwrap();
@@ -4537,8 +4583,7 @@ mod tests {
             creds.push(c);
         }
 
-        let manager =
-            Arc::new(MultiTokenManager::new(config, creds, None, None, false).unwrap());
+        let manager = Arc::new(MultiTokenManager::new(config, creds, None, None, false).unwrap());
 
         // 4 个号的命中计数（id 从 1 开始）
         let counters: Arc<[AtomicU32; 4]> = Arc::new([
@@ -4562,7 +4607,9 @@ mod tests {
             h.await.unwrap();
         }
 
-        let counts: Vec<u32> = (0..4).map(|i| counters[i].load(Ordering::Relaxed)).collect();
+        let counts: Vec<u32> = (0..4)
+            .map(|i| counters[i].load(Ordering::Relaxed))
+            .collect();
         let min = *counts.iter().min().unwrap();
         let max = *counts.iter().max().unwrap();
         let sum: u32 = counts.iter().sum();
@@ -4587,9 +4634,14 @@ mod tests {
     /// 最终返回哪个由 rate_limiter 计时决定——本质上非确定，此前正是这里导致约 1/5 概率 flaky。
     #[test]
     fn test_select_best_candidate_id_prefers_least_recently_acquired() {
-        let manager =
-            MultiTokenManager::new(Config::default(), vec![KiroCredentials::default()], None, None, false)
-                .unwrap();
+        let manager = MultiTokenManager::new(
+            Config::default(),
+            vec![KiroCredentials::default()],
+            None,
+            None,
+            false,
+        )
+        .unwrap();
 
         let now = std::time::Instant::now();
         let older = now - std::time::Duration::from_secs(10);
@@ -4672,6 +4724,7 @@ mod tests {
         manager.report_quota_exhausted(2);
         assert_eq!(manager.available_count(), 0);
 
+        // 刚禁用（在自动复检窗口内）时不应被恢复
         let err = manager.acquire_context().await.err().unwrap().to_string();
         assert!(
             err.contains("所有凭据均已禁用"),
@@ -4679,6 +4732,36 @@ mod tests {
             err
         );
         assert_eq!(manager.available_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_multi_token_manager_quota_recovers_after_window() {
+        let config = Config::default();
+        let cred1 = KiroCredentials::default();
+        let cred2 = KiroCredentials::default();
+        let manager =
+            MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
+
+        manager.report_quota_exhausted(1);
+        manager.report_quota_exhausted(2);
+        // 窗口内：check_and_recover 不应恢复
+        manager.check_and_recover();
+        assert_eq!(manager.available_count(), 0, "复检窗口内不应恢复额度凭据");
+
+        // 把 last_used_at（禁用时刻）拨到窗口之外，模拟额度冷却到期
+        {
+            let mut entries = manager.entries.lock();
+            let past = (Utc::now() - Duration::hours(QUOTA_AUTO_RECOVERY_HOURS + 1)).to_rfc3339();
+            for e in entries.iter_mut() {
+                e.last_used_at = Some(past.clone());
+            }
+        }
+        assert!(manager.check_and_recover(), "窗口到期后应恢复额度凭据");
+        assert_eq!(
+            manager.available_count(),
+            2,
+            "两个额度用尽的凭据窗口到期后都应被重新启用"
+        );
     }
 
     #[tokio::test]

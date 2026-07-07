@@ -35,6 +35,21 @@ pub struct KiroRequest {
     /// Profile ARN（可选）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile_arn: Option<String>,
+    /// 采样/长度参数（可选；仅当客户端提供 temperature/top_p 时带上，透传给上游）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inference_config: Option<InferenceConfig>,
+}
+
+/// 采样/长度参数，对应 Kiro payload 顶层的 `inferenceConfig`
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct InferenceConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
 }
 #[cfg(test)]
 mod tests {

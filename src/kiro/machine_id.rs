@@ -50,18 +50,41 @@ pub fn generate_from_credentials(credentials: &KiroCredentials, config: &Config)
         return Some(normalized);
     }
 
-    // 使用 refreshToken 生成
-    if let Some(ref refresh_token) = credentials.refresh_token
-        && !refresh_token.is_empty()
-    {
-        return Some(sha256_hex(&format!("KotlinNativeAPI/{}", refresh_token)));
+    // 从「不随 token 刷新而变化」的稳定账号标识派生，保证同一账号的 machineId 长期稳定。
+    // 真实 Kiro 客户端的 machineId 是设备级、跨会话不变的；若用会轮换的 refresh_token 派生
+    // （IdC/Social 刷新约每小时轮换一次），machineId 就会随之改变，形成「同一设备每小时换机器码」
+    // 的强异常指纹。优先级：IdC client_id > email > 凭据自增 id。
+    let stable_seed = credentials
+        .client_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            credentials
+                .email
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        })
+        .map(str::to_string)
+        .or_else(|| credentials.id.map(|id| format!("cred-{id}")));
+    if let Some(seed) = stable_seed {
+        return Some(sha256_hex(&format!("KiroDevice/{seed}")));
     }
 
-    // API Key 模式下使用 API Key 稳定派生
+    // API Key 不会轮换，可稳定派生
     if let Some(ref api_key) = credentials.kiro_api_key
         && !api_key.is_empty()
     {
         return Some(sha256_hex(&format!("KiroAPIKey/{}", api_key)));
+    }
+
+    // 最后兜底：只有 refresh_token 可用（无 id/email/client_id 的临时凭据，罕见）。
+    // 注意 refresh_token 会轮换，此路径下 machineId 会随刷新变化，仅作降级。
+    if let Some(ref refresh_token) = credentials.refresh_token
+        && !refresh_token.is_empty()
+    {
+        return Some(sha256_hex(&format!("KotlinNativeAPI/{}", refresh_token)));
     }
 
     // 没有有效的凭证
@@ -111,6 +134,46 @@ mod tests {
 
         let result = generate_from_credentials(&credentials, &config);
         assert_eq!(result, Some("b".repeat(64)));
+    }
+
+    #[test]
+    fn test_machine_id_stable_across_refresh_token_rotation() {
+        let config = Config::default();
+        // 同一账号（id 相同），刷新后 refresh_token 轮换
+        let mut c1 = KiroCredentials::default();
+        c1.id = Some(7);
+        c1.refresh_token = Some("refresh-token-A".to_string());
+        let mut c2 = KiroCredentials::default();
+        c2.id = Some(7);
+        c2.refresh_token = Some("refresh-token-B-rotated".to_string());
+        // machineId 不应随 refresh_token 轮换而变化
+        assert_eq!(
+            generate_from_credentials(&c1, &config),
+            generate_from_credentials(&c2, &config)
+        );
+
+        // 不同账号（id 不同）machineId 应不同
+        let mut c3 = KiroCredentials::default();
+        c3.id = Some(8);
+        c3.refresh_token = Some("refresh-token-A".to_string());
+        assert_ne!(
+            generate_from_credentials(&c1, &config),
+            generate_from_credentials(&c3, &config)
+        );
+
+        // client_id（IdC 稳定标识）优先于 id，且不随 refresh_token 变化
+        let mut idc1 = KiroCredentials::default();
+        idc1.id = Some(7);
+        idc1.client_id = Some("oidc-client-xyz".to_string());
+        idc1.refresh_token = Some("rt-1".to_string());
+        let mut idc2 = KiroCredentials::default();
+        idc2.id = Some(99); // 即便 id 不同，只要 client_id 相同就应稳定
+        idc2.client_id = Some("oidc-client-xyz".to_string());
+        idc2.refresh_token = Some("rt-2".to_string());
+        assert_eq!(
+            generate_from_credentials(&idc1, &config),
+            generate_from_credentials(&idc2, &config)
+        );
     }
 
     #[test]

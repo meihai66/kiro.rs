@@ -25,8 +25,8 @@ use parking_lot::RwLock;
 
 use super::error::AdminServiceError;
 use super::types::{
-    AddCredentialRequest, AddCredentialResponse, BalanceResponse, BatchProxyExtendRequest,
-    BatchProxyDeleteRequest, BatchProxyItemResult, BatchProxyResponse, BatchProxySlotsRequest,
+    AddCredentialRequest, AddCredentialResponse, BalanceResponse, BatchProxyDeleteRequest,
+    BatchProxyExtendRequest, BatchProxyItemResult, BatchProxyResponse, BatchProxySlotsRequest,
     BatchProxyUnbindRequest, BindProxyRequest, CachedBalanceItem, CachedBalancesResponse,
     CredentialStatusItem, CredentialsStatusResponse, ExportCredentialsRequest,
     ExportCredentialsResponse, ExportSkippedItem, ImportAction, ImportItemResult,
@@ -136,10 +136,7 @@ impl AdminService {
     }
 
     /// 注入 ApiKeyManager（启动期一次性）
-    pub fn with_api_key_manager(
-        mut self,
-        mgr: Arc<crate::api_key_manager::ApiKeyManager>,
-    ) -> Self {
+    pub fn with_api_key_manager(mut self, mgr: Arc<crate::api_key_manager::ApiKeyManager>) -> Self {
         self.api_key_manager = Some(mgr);
         self
     }
@@ -321,9 +318,7 @@ impl AdminService {
         let provider = self
             .kiro_provider
             .as_ref()
-            .ok_or_else(|| {
-                AdminServiceError::InvalidRequest("KiroProvider 未初始化".to_string())
-            })?
+            .ok_or_else(|| AdminServiceError::InvalidRequest("KiroProvider 未初始化".to_string()))?
             .clone();
 
         let model = req.model.trim();
@@ -359,6 +354,8 @@ impl AdminService {
             system: None,
             tools: None,
             tool_choice: None,
+            temperature: None,
+            top_p: None,
             thinking: None,
             output_config: None,
             metadata: None,
@@ -370,6 +367,7 @@ impl AdminService {
         let kiro_request = crate::kiro::model::requests::kiro::KiroRequest {
             conversation_state: conversion.conversation_state,
             profile_arn: None,
+            inference_config: None,
         };
         let body = serde_json::to_string(&kiro_request)
             .map_err(|e| AdminServiceError::InternalError(format!("序列化失败: {}", e)))?;
@@ -382,10 +380,7 @@ impl AdminService {
                 .call_api_with_credential(cid, &body)
                 .await
                 .map_err(|e| {
-                    AdminServiceError::InternalError(format!(
-                        "凭据 #{} 测试失败: {}",
-                        cid, e
-                    ))
+                    AdminServiceError::InternalError(format!("凭据 #{} 测试失败: {}", cid, e))
                 })?
         } else {
             provider
@@ -432,9 +427,10 @@ impl AdminService {
     /// - 每个凭据 success_count / rate_limit_count 归零
     /// 不动：last_used_at、RPM 历史、错误日志、连续失败计数。
     pub fn reset_all_stats(&self) -> Result<u64, AdminServiceError> {
-        let store = self.store.as_ref().ok_or_else(|| {
-            AdminServiceError::InvalidRequest("清空统计需要 SQLite store".into())
-        })?;
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| AdminServiceError::InvalidRequest("清空统计需要 SQLite store".into()))?;
         let api_keys_reset = store
             .reset_all_request_counts()
             .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
@@ -469,10 +465,7 @@ impl AdminService {
     }
 
     /// 取过去 hours 小时所有凭据汇总的每分钟 RPM
-    pub fn rpm_history_aggregate(
-        &self,
-        hours: i64,
-    ) -> Result<Vec<(i64, u32)>, AdminServiceError> {
+    pub fn rpm_history_aggregate(&self, hours: i64) -> Result<Vec<(i64, u32)>, AdminServiceError> {
         let store = self.store.as_ref().ok_or_else(|| {
             AdminServiceError::InvalidRequest("RPM 历史功能需要 SQLite store".into())
         })?;
@@ -699,7 +692,11 @@ impl AdminService {
         let store = self.store.as_ref().ok_or_else(|| {
             AdminServiceError::InvalidRequest("错误日志功能需要 SQLite store".into())
         })?;
-        let before = if let Some(s) = req.before.as_deref().map(str::trim).filter(|s| !s.is_empty())
+        let before = if let Some(s) = req
+            .before
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
         {
             Some(
                 chrono::DateTime::parse_from_rfc3339(s)
@@ -880,11 +877,7 @@ impl AdminService {
     }
 
     /// 设置单凭据 RPM 上限（None 表示清除覆盖，沿用全局 credentialRpm）
-    pub fn set_credential_rpm(
-        &self,
-        id: u64,
-        rpm: Option<u32>,
-    ) -> Result<(), AdminServiceError> {
+    pub fn set_credential_rpm(&self, id: u64, rpm: Option<u32>) -> Result<(), AdminServiceError> {
         let normalized = rpm.filter(|&v| v > 0);
         self.token_manager
             .set_credential_rpm_for(id, normalized)
@@ -1189,7 +1182,8 @@ impl AdminService {
                 prepick_slot = pool.pick_idle_candidate(warning_hours);
                 if prepick_slot.is_none() {
                     return Err(AdminServiceError::InvalidRequest(
-                        "代理池无可用代理（剩余槽位 + 有效期充足），请先导入代理或减少阈值".to_string(),
+                        "代理池无可用代理（剩余槽位 + 有效期充足），请先导入代理或减少阈值"
+                            .to_string(),
                     ));
                 }
             } else {
@@ -1256,8 +1250,9 @@ impl AdminService {
                     );
                     match pool.auto_bind(credential_id, warning_hours) {
                         Ok(other) => {
-                            let _ =
-                                self.token_manager.set_proxy_slot(credential_id, Some(other));
+                            let _ = self
+                                .token_manager
+                                .set_proxy_slot(credential_id, Some(other));
                         }
                         Err(e2) => {
                             pool.push_alert(
@@ -1514,9 +1509,7 @@ impl AdminService {
 
             match self.token_manager.add_credential(cred).await {
                 Ok(id) => {
-                    if let (Some(pool), Some(slot)) =
-                        (&self.proxy_pool, current_slot.as_deref())
-                    {
+                    if let (Some(pool), Some(slot)) = (&self.proxy_pool, current_slot.as_deref()) {
                         pool.clear_recent_failure(slot);
                     }
                     return (Ok(id), current_slot);
@@ -1527,9 +1520,7 @@ impl AdminService {
                         // 非网络错：凭据无效 / AWS 限流 / 4xx5xx 等，重试无意义
                         return (Err(self.classify_add_error(e)), current_slot);
                     }
-                    if let (Some(pool), Some(slot)) =
-                        (&self.proxy_pool, current_slot.as_deref())
-                    {
+                    if let (Some(pool), Some(slot)) = (&self.proxy_pool, current_slot.as_deref()) {
                         pool.mark_recent_failure(slot);
                         tracing::warn!(
                             slot,
@@ -1593,11 +1584,10 @@ impl AdminService {
     /// - 必须有 `refresh_token`（api_key 模式无法走 OAuth 导入流程，记入 `skipped`）
     /// - IdC 凭据会携带 `clientId` / `clientSecret`
     /// - 代理绑定不跟随导出（按用户偏好，导入后重新绑定）
-    pub fn export_credentials(
-        &self,
-        req: ExportCredentialsRequest,
-    ) -> ExportCredentialsResponse {
-        let creds = self.token_manager.export_credentials_by_ids(&req.credential_ids);
+    pub fn export_credentials(&self, req: ExportCredentialsRequest) -> ExportCredentialsResponse {
+        let creds = self
+            .token_manager
+            .export_credentials_by_ids(&req.credential_ids);
         let returned_ids: HashSet<u64> = creds.iter().filter_map(|c| c.id).collect();
 
         let mut items: Vec<TokenJsonItem> = Vec::with_capacity(creds.len());
@@ -1631,9 +1621,7 @@ impl AdminService {
                 }
             };
 
-            if auth_method == "idc"
-                && (c.client_id.is_none() || c.client_secret.is_none())
-            {
+            if auth_method == "idc" && (c.client_id.is_none() || c.client_secret.is_none()) {
                 skipped.push(ExportSkippedItem {
                     credential_id: id,
                     reason: "IdC 凭据缺少 clientId / clientSecret".to_string(),
@@ -1903,12 +1891,7 @@ impl AdminService {
                         .token_manager
                         .set_proxy_slot(credential_id, Some(slot.clone()));
                     if effective_slot.as_deref() != Some(slot.as_str()) {
-                        tracing::info!(
-                            credential_id,
-                            slot,
-                            "批量导入：占槽时切换到 {}",
-                            slot
-                        );
+                        tracing::info!(credential_id, slot, "批量导入：占槽时切换到 {}", slot);
                     }
                 }
                 Err(e) => {
@@ -1964,7 +1947,9 @@ impl AdminService {
 
         let raw_url = proxy_info.url.trim();
         if raw_url.is_empty() {
-            return Err(AdminServiceError::InvalidRequest("代理 URL 为空".to_string()));
+            return Err(AdminServiceError::InvalidRequest(
+                "代理 URL 为空".to_string(),
+            ));
         }
         let (clean_url, username, password) = parse_proxy_url_with_auth(raw_url)
             .map_err(|e| AdminServiceError::InvalidRequest(format!("代理 URL 无效: {}", e)))?;
@@ -2853,7 +2838,10 @@ impl AdminService {
     }
 
     /// 凭据 → 解绑代理（不允许"未绑定 + 启用"，所以解绑会同时禁用）
-    pub fn unbind_proxy_from_credential(&self, credential_id: u64) -> Result<(), AdminServiceError> {
+    pub fn unbind_proxy_from_credential(
+        &self,
+        credential_id: u64,
+    ) -> Result<(), AdminServiceError> {
         let pool = self.require_proxy_pool()?;
 
         let snapshot = self.token_manager.snapshot();

@@ -527,12 +527,7 @@ fn classify_error_kind(err: &Error, status_code: u16) -> &'static str {
 }
 
 /// 异步把一条错误响应写入 SQLite。失败仅打日志，不影响响应。
-fn record_error_log(
-    ctx: &ErrorLogContext,
-    err: &Error,
-    status_code: u16,
-    response_body: String,
-) {
+fn record_error_log(ctx: &ErrorLogContext, err: &Error, status_code: u16, response_body: String) {
     // 是否启用 + 状态码黑名单（缺 store/config 时不记录）
     let (Some(store), Some(global_config)) = (
         ctx.state.store.as_ref().cloned(),
@@ -1075,8 +1070,7 @@ pub async fn get_models(OriginalUri(uri): OriginalUri) -> impl IntoResponse {
 /// POST /v1/messages
 ///
 /// 创建消息（对话）
-type AuthSlot =
-    std::sync::Arc<parking_lot::Mutex<Option<crate::api_key_manager::AuthGuard>>>;
+type AuthSlot = std::sync::Arc<parking_lot::Mutex<Option<crate::api_key_manager::AuthGuard>>>;
 
 pub async fn post_messages(
     OriginalUri(uri): OriginalUri,
@@ -1290,9 +1284,19 @@ pub async fn post_messages(
     // 通过 endpoint.transform_api_body 动态注入；启动期 state.profile_arn 仅作
     // 兜底，多凭据切号时不能用作请求体里的固定值——cherry-pick 53df562）
     let tool_name_map = conversion_result.tool_name_map;
+    // 采样参数透传：仅当客户端显式提供 temperature/top_p 时才带 inferenceConfig（含 maxTokens），
+    // 否则完全维持既有行为（不发 inferenceConfig），零风险。
+    let inference_config = (payload.temperature.is_some() || payload.top_p.is_some()).then(|| {
+        crate::kiro::model::requests::kiro::InferenceConfig {
+            max_tokens: (payload.max_tokens > 0).then_some(payload.max_tokens),
+            temperature: payload.temperature,
+            top_p: payload.top_p,
+        }
+    });
     let mut kiro_request = KiroRequest {
         conversation_state: conversion_result.conversation_state,
         profile_arn: None,
+        inference_config,
     };
 
     let mut request_body = match serde_json::to_string(&kiro_request) {
@@ -2236,6 +2240,8 @@ mod tests {
                 cache_control: None,
             }]),
             tool_choice: None,
+            temperature: None,
+            top_p: None,
             thinking: None,
             output_config: None,
             metadata: None,
@@ -2420,6 +2426,7 @@ mod tests {
                 ))
                 .with_history(vec![KiroMessage::user("history", "model")]),
             profile_arn: None,
+            inference_config: None,
         };
         if let KiroMessage::User(user) = &mut kiro_request.conversation_state.history[0] {
             user.user_input_message.images = vec![KiroImage::from_base64("png", big.clone())];

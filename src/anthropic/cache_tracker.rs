@@ -554,6 +554,8 @@ mod tests {
                 cache_control: None,
             }]),
             tool_choice: None,
+            temperature: None,
+            top_p: None,
             thinking: None,
             output_config: None,
             metadata: None,

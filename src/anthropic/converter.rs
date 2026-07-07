@@ -94,7 +94,61 @@ fn normalize_json_schema(schema: serde_json::Value) -> serde_json::Value {
         }
     }
 
+    // 递归清理嵌套子 schema：修复畸形 properties/required，并去掉上游 CodeWhisperer 可能
+    // 不支持的 JSON Schema 元字段（$ref / $defs / definitions / $id）——带这些的 MCP 工具
+    // 原样透传会触发上游 400。根层保留 $schema（缺失会 400），只在子层删除引用类元字段。
+    strip_unsupported_schema_meta(&mut obj);
+    normalize_schema_children(&mut obj);
+
     serde_json::Value::Object(obj)
+}
+
+/// 删除上游可能不支持的引用/元 schema 字段（$ref/$defs/definitions/$id）。
+/// 被 $ref 引用的子 schema 会退化为空对象（=任意类型），不精确但避免 400。
+fn strip_unsupported_schema_meta(obj: &mut serde_json::Map<String, serde_json::Value>) {
+    for k in ["$ref", "$defs", "definitions", "$id"] {
+        obj.remove(k);
+    }
+}
+
+/// 递归规范化一个子 schema 节点：只做「修复畸形字段 + 去引用元字段」，
+/// 不强加 type/properties（子节点可能是 string/number/array 等非 object 类型）。
+fn normalize_schema_node(node: &mut serde_json::Value) {
+    if let serde_json::Value::Object(obj) = node {
+        strip_unsupported_schema_meta(obj);
+        normalize_schema_children(obj);
+    }
+}
+
+/// 递归处理 properties.* / items / anyOf|oneOf|allOf 下的子 schema，并把畸形的
+/// `properties`(非 object)、`required`(非数组) 修复为合法形态。
+fn normalize_schema_children(obj: &mut serde_json::Map<String, serde_json::Value>) {
+    if let Some(props) = obj.get_mut("properties") {
+        match props {
+            serde_json::Value::Object(map) => {
+                for v in map.values_mut() {
+                    normalize_schema_node(v);
+                }
+            }
+            // properties 为 null / 非 object → 修成空对象
+            _ => *props = serde_json::Value::Object(serde_json::Map::new()),
+        }
+    }
+    if let Some(items) = obj.get_mut("items") {
+        match items {
+            serde_json::Value::Array(arr) => arr.iter_mut().for_each(normalize_schema_node),
+            other => normalize_schema_node(other),
+        }
+    }
+    for key in ["anyOf", "oneOf", "allOf"] {
+        if let Some(serde_json::Value::Array(arr)) = obj.get_mut(key) {
+            arr.iter_mut().for_each(normalize_schema_node);
+        }
+    }
+    // required 存在但非数组（如 null）→ 修成空数组
+    if obj.get("required").is_some_and(|r| !r.is_array()) {
+        obj.insert("required".to_string(), serde_json::Value::Array(Vec::new()));
+    }
 }
 
 /// 追加到 Write 工具 description 末尾的内容
@@ -436,10 +490,36 @@ pub fn convert_request(
         &mut remaining_image_budget,
     )?;
 
-    // 6. 转换工具定义（超长名称自动缩短并记录映射）
+    // 6. tool_choice 处理：Kiro 无原生 tool_choice，只能通过收窄「下发的工具列表」近似——
+    //    none → 不下发任何工具（模型无法调用）；type=tool 指定某工具 → 只下发该工具（强制调用）；
+    //    auto / any / 缺省 → 原样下发。
+    let effective_tools: Option<Vec<AnthropicTool>> = match req
+        .tool_choice
+        .as_ref()
+        .and_then(|v| v.get("type"))
+        .and_then(|v| v.as_str())
+    {
+        Some("none") => None,
+        Some("tool") => {
+            let forced = req
+                .tool_choice
+                .as_ref()
+                .and_then(|v| v.get("name"))
+                .and_then(|v| v.as_str());
+            req.tools.as_ref().map(|ts| {
+                ts.iter()
+                    .filter(|t| forced.is_some_and(|n| n == t.name))
+                    .cloned()
+                    .collect()
+            })
+        }
+        _ => req.tools.clone(),
+    };
+
+    // 转换工具定义（超长名称自动缩短并记录映射）
     let mut tool_name_map = HashMap::new();
     let mut tools = convert_tools(
-        &req.tools,
+        &effective_tools,
         compression_config.tool_description_max_chars,
         &mut tool_name_map,
     );
@@ -1688,6 +1768,8 @@ mod tests {
             system: None,
             tools: None,
             tool_choice: None,
+            temperature: None,
+            top_p: None,
             thinking: None,
             output_config: None,
             metadata: None,
@@ -1767,12 +1849,19 @@ mod tests {
             system: None,
             tools: None, // 没有提供工具定义
             tool_choice: None,
+            temperature: None,
+            top_p: None,
             thinking: None,
             output_config: None,
             metadata: None,
         };
 
-        let result = convert_request(&req, &CompressionConfig::default(), &ModelMappingConfig::default()).unwrap();
+        let result = convert_request(
+            &req,
+            &CompressionConfig::default(),
+            &ModelMappingConfig::default(),
+        )
+        .unwrap();
 
         // 验证 tools 列表中包含了历史中使用的工具的占位符定义
         let tools = &result
@@ -1862,6 +1951,8 @@ mod tests {
             system: None,
             tools: None,
             tool_choice: None,
+            temperature: None,
+            top_p: None,
             thinking: None,
             output_config: None,
             metadata: Some(Metadata {
@@ -1871,7 +1962,12 @@ mod tests {
             }),
         };
 
-        let result = convert_request(&req, &CompressionConfig::default(), &ModelMappingConfig::default()).unwrap();
+        let result = convert_request(
+            &req,
+            &CompressionConfig::default(),
+            &ModelMappingConfig::default(),
+        )
+        .unwrap();
         assert_eq!(
             result.conversation_state.conversation_id,
             "a0662283-7fd3-4399-a7eb-52b9a717ae88"
@@ -1894,12 +1990,19 @@ mod tests {
             system: None,
             tools: None,
             tool_choice: None,
+            temperature: None,
+            top_p: None,
             thinking: None,
             output_config: None,
             metadata: None,
         };
 
-        let result = convert_request(&req, &CompressionConfig::default(), &ModelMappingConfig::default()).unwrap();
+        let result = convert_request(
+            &req,
+            &CompressionConfig::default(),
+            &ModelMappingConfig::default(),
+        )
+        .unwrap();
         // 验证生成的是有效的 UUID 格式
         assert_eq!(result.conversation_state.conversation_id.len(), 36);
         assert_eq!(
@@ -2346,12 +2449,19 @@ mod tests {
                 cache_control: None,
             }]),
             tool_choice: None,
+            temperature: None,
+            top_p: None,
             thinking: None,
             output_config: None,
             metadata: None,
         };
 
-        let result = convert_request(&req, &CompressionConfig::default(), &ModelMappingConfig::default()).unwrap();
+        let result = convert_request(
+            &req,
+            &CompressionConfig::default(),
+            &ModelMappingConfig::default(),
+        )
+        .unwrap();
         let tools = &result
             .conversation_state
             .current_message
@@ -2405,12 +2515,19 @@ mod tests {
             system: None,
             tools: None,
             tool_choice: None,
+            temperature: None,
+            top_p: None,
             thinking: None,
             output_config: None,
             metadata: None,
         };
 
-        let result = convert_request(&req, &CompressionConfig::default(), &ModelMappingConfig::default()).unwrap();
+        let result = convert_request(
+            &req,
+            &CompressionConfig::default(),
+            &ModelMappingConfig::default(),
+        )
+        .unwrap();
         let content = &result
             .conversation_state
             .current_message
@@ -2461,12 +2578,19 @@ mod tests {
             system: None,
             tools: None,
             tool_choice: None,
+            temperature: None,
+            top_p: None,
             thinking: None,
             output_config: None,
             metadata: None,
         };
 
-        let result = convert_request(&req, &CompressionConfig::default(), &ModelMappingConfig::default()).unwrap();
+        let result = convert_request(
+            &req,
+            &CompressionConfig::default(),
+            &ModelMappingConfig::default(),
+        )
+        .unwrap();
 
         let mut found = false;
         for msg in &result.conversation_state.history {
@@ -2525,12 +2649,19 @@ mod tests {
                 cache_control: None,
             }]),
             tool_choice: None,
+            temperature: None,
+            top_p: None,
             thinking: None,
             output_config: None,
             metadata: None,
         };
 
-        let result = convert_request(&req, &CompressionConfig::default(), &ModelMappingConfig::default()).unwrap();
+        let result = convert_request(
+            &req,
+            &CompressionConfig::default(),
+            &ModelMappingConfig::default(),
+        )
+        .unwrap();
 
         // 孤立 tool_result 会被过滤
         assert!(
@@ -2699,12 +2830,19 @@ mod tests {
             system: Some(system.clone()),
             tools: None,
             tool_choice: None,
+            temperature: None,
+            top_p: None,
             thinking: None,
             output_config: None,
             metadata: None,
         };
 
-        let result = convert_request(&req_no_tools, &CompressionConfig::default(), &ModelMappingConfig::default()).unwrap();
+        let result = convert_request(
+            &req_no_tools,
+            &CompressionConfig::default(),
+            &ModelMappingConfig::default(),
+        )
+        .unwrap();
         let first_user = &result.conversation_state.history[0];
         match first_user {
             Message::User(u) => {
@@ -2735,12 +2873,19 @@ mod tests {
                 cache_control: None,
             }]),
             tool_choice: None,
+            temperature: None,
+            top_p: None,
             thinking: None,
             output_config: None,
             metadata: None,
         };
 
-        let result = convert_request(&req_with_write, &CompressionConfig::default(), &ModelMappingConfig::default()).unwrap();
+        let result = convert_request(
+            &req_with_write,
+            &CompressionConfig::default(),
+            &ModelMappingConfig::default(),
+        )
+        .unwrap();
         let first_user = &result.conversation_state.history[0];
         match first_user {
             Message::User(u) => {
@@ -2771,13 +2916,19 @@ mod tests {
                 cache_control: None,
             }]),
             tool_choice: None,
+            temperature: None,
+            top_p: None,
             thinking: None,
             output_config: None,
             metadata: None,
         };
 
-        let result =
-            convert_request(&req_no_system_with_edit, &CompressionConfig::default(), &ModelMappingConfig::default()).unwrap();
+        let result = convert_request(
+            &req_no_system_with_edit,
+            &CompressionConfig::default(),
+            &ModelMappingConfig::default(),
+        )
+        .unwrap();
         let first_user = &result.conversation_state.history[0];
         match first_user {
             Message::User(u) => {
@@ -2806,6 +2957,8 @@ mod tests {
             system: None,
             tools: None,
             tool_choice: None,
+            temperature: None,
+            top_p: None,
             thinking: Some(Thinking {
                 thinking_type: "adaptive".to_string(),
                 budget_tokens: 0,
@@ -2831,6 +2984,8 @@ mod tests {
             system: None,
             tools: None,
             tool_choice: None,
+            temperature: None,
+            top_p: None,
             thinking: Some(Thinking {
                 thinking_type: "adaptive".to_string(),
                 budget_tokens: 0,
@@ -2908,12 +3063,18 @@ mod tests {
             system: None,
             tools: None,
             tool_choice: None,
+            temperature: None,
+            top_p: None,
             thinking: None,
             output_config: None,
             metadata: None,
         };
 
-        let result = convert_request(&req, &CompressionConfig::default(), &ModelMappingConfig::default());
+        let result = convert_request(
+            &req,
+            &CompressionConfig::default(),
+            &ModelMappingConfig::default(),
+        );
         assert!(result.is_ok(), "prefill 场景不应报错: {:?}", result.err());
         let state = result.unwrap().conversation_state;
         assert_eq!(
@@ -2938,12 +3099,19 @@ mod tests {
             system: None,
             tools: None,
             tool_choice: None,
+            temperature: None,
+            top_p: None,
             thinking: None,
             output_config: None,
             metadata: None,
         };
 
-        let err = convert_request(&req, &CompressionConfig::default(), &ModelMappingConfig::default()).unwrap_err();
+        let err = convert_request(
+            &req,
+            &CompressionConfig::default(),
+            &ModelMappingConfig::default(),
+        )
+        .unwrap_err();
         assert!(
             matches!(err, ConversionError::EmptyMessages),
             "只有 assistant 消息时应返回 EmptyMessages，实际: {:?}",
@@ -2967,12 +3135,19 @@ mod tests {
             system: None,
             tools: None,
             tool_choice: None,
+            temperature: None,
+            top_p: None,
             thinking: None,
             output_config: None,
             metadata: None,
         };
 
-        let err = convert_request(&req, &CompressionConfig::default(), &ModelMappingConfig::default()).unwrap_err();
+        let err = convert_request(
+            &req,
+            &CompressionConfig::default(),
+            &ModelMappingConfig::default(),
+        )
+        .unwrap_err();
         assert!(
             matches!(err, ConversionError::EmptyMessageContent),
             "空消息内容应返回 EmptyMessageContent，实际: {:?}",
@@ -2999,12 +3174,19 @@ mod tests {
             system: None,
             tools: None,
             tool_choice: None,
+            temperature: None,
+            top_p: None,
             thinking: None,
             output_config: None,
             metadata: None,
         };
 
-        let err = convert_request(&req, &CompressionConfig::default(), &ModelMappingConfig::default()).unwrap_err();
+        let err = convert_request(
+            &req,
+            &CompressionConfig::default(),
+            &ModelMappingConfig::default(),
+        )
+        .unwrap_err();
         assert!(
             matches!(err, ConversionError::EmptyMessageContent),
             "仅包含空白文本的消息应返回 EmptyMessageContent，实际: {:?}",
@@ -3034,12 +3216,19 @@ mod tests {
             system: None,
             tools: None,
             tool_choice: None,
+            temperature: None,
+            top_p: None,
             thinking: None,
             output_config: None,
             metadata: None,
         };
 
-        let err = convert_request(&req, &CompressionConfig::default(), &ModelMappingConfig::default()).unwrap_err();
+        let err = convert_request(
+            &req,
+            &CompressionConfig::default(),
+            &ModelMappingConfig::default(),
+        )
+        .unwrap_err();
         assert!(
             matches!(err, ConversionError::EmptyMessageContent),
             "prefill 回退后的空 user 消息应返回 EmptyMessageContent，实际: {:?}",
@@ -3135,13 +3324,19 @@ mod tests {
             system: None,
             tools: None,
             tool_choice: None,
+            temperature: None,
+            top_p: None,
             thinking: None,
             output_config: None,
             metadata: None,
         };
 
         // 转换应成功，不应因 tool_use/tool_result 配对失败而报错
-        let result = convert_request(&req, &CompressionConfig::default(), &ModelMappingConfig::default());
+        let result = convert_request(
+            &req,
+            &CompressionConfig::default(),
+            &ModelMappingConfig::default(),
+        );
         assert!(
             result.is_ok(),
             "连续 assistant 消息场景不应报错: {:?}",

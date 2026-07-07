@@ -132,7 +132,7 @@ pub struct Metadata {
 #[derive(Debug, Clone, Deserialize)]
 pub struct MessagesRequest {
     pub model: String,
-    /// 为 Anthropic API 兼容保留，实际不透传给 Kiro 上游
+    /// 客户端请求的最大输出 token；仅当带了采样参数时随 inferenceConfig 一起透传上游
     pub max_tokens: i32,
     pub messages: Vec<Message>,
     #[serde(default)]
@@ -140,8 +140,13 @@ pub struct MessagesRequest {
     #[serde(default, deserialize_with = "deserialize_system")]
     pub system: Option<Vec<SystemMessage>>,
     pub tools: Option<Vec<Tool>>,
-    #[allow(dead_code)]
     pub tool_choice: Option<serde_json::Value>,
+    /// 采样温度（客户端提供时透传给 Kiro inferenceConfig）
+    #[serde(default)]
+    pub temperature: Option<f64>,
+    /// nucleus 采样 top_p（客户端提供时透传给 Kiro inferenceConfig）
+    #[serde(default)]
+    pub top_p: Option<f64>,
     pub thinking: Option<Thinking>,
     pub output_config: Option<OutputConfig>,
     /// Claude Code 请求中的 metadata，包含 session 信息
@@ -325,8 +330,7 @@ pub struct CountTokensResponse {
 /// - 其他模型: 200,000 tokens
 pub fn get_context_window_size(model: &str) -> i32 {
     let model_lower = model.to_lowercase();
-    let is_opus_or_sonnet =
-        model_lower.contains("opus") || model_lower.contains("sonnet");
+    let is_opus_or_sonnet = model_lower.contains("opus") || model_lower.contains("sonnet");
     let is_1m_version = model_lower.contains("4-6")
         || model_lower.contains("4.6")
         || model_lower.contains("4-7")

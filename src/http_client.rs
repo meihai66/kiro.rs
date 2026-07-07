@@ -54,7 +54,16 @@ pub fn build_client(
     const CONNECT_TIMEOUT_SECS: u64 = 30;
     let mut builder = Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
-        .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS));
+        .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+        // 死连接检测：用 TCP keepalive + HTTP/2 PING 主动探活，而非读超时。
+        // 主动探活能在 ~45s 内发现「发完响应头后半开挂起」的死连接（否则要挂满 timeout_secs
+        // 才失败、白占凭据与连接），同时不会误伤模型长思考期间的正常静默（读超时会）。
+        .tcp_keepalive(Duration::from_secs(60))
+        .http2_keep_alive_interval(Duration::from_secs(30))
+        .http2_keep_alive_timeout(Duration::from_secs(15))
+        .http2_keep_alive_while_idle(true)
+        // 连接池空闲连接上限时间，避免长期空闲连接被中间设备静默丢弃后仍被复用
+        .pool_idle_timeout(Duration::from_secs(90));
 
     match tls_backend {
         TlsBackend::Rustls => {
