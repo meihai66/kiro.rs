@@ -1219,8 +1219,18 @@ pub async fn post_messages(
     // 转换请求（图片处理 + 输入压缩为 CPU 密集型同步操作，放到阻塞线程池执行，
     // 避免占用 async worker 线程，导致高并发下 admin / 代理测试等轻量请求被饿死）
     let compression_config_for_convert = compression_config.clone();
+    // 模型映射配置（热更新）：配置了规则时完全接管映射，未命中即「模型不存在」
+    let model_mapping_for_convert = state
+        .global_config
+        .as_ref()
+        .map(|c| c.read().model_mapping.clone())
+        .unwrap_or_default();
     let (payload, convert_outcome) = match tokio::task::spawn_blocking(move || {
-        let result = convert_request(&payload, &compression_config_for_convert);
+        let result = convert_request(
+            &payload,
+            &compression_config_for_convert,
+            &model_mapping_for_convert,
+        );
         (payload, result)
     })
     .await

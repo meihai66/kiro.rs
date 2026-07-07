@@ -1039,6 +1039,8 @@ pub struct GlobalConfigResponse {
     pub error_log_excluded_status_codes: Vec<u16>,
     /// 模型定价（用于「产出价值」统计）
     pub pricing: crate::model::config::PricingConfig,
+    /// 模型映射（请求模型名 → 上游 Kiro 模型 ID；为空则用内置映射）
+    pub model_mapping: crate::model::config::ModelMappingConfig,
 }
 
 /// 压缩配置响应
@@ -1120,6 +1122,8 @@ pub struct UpdateGlobalConfigRequest {
     pub error_log_excluded_status_codes: Option<Vec<u16>>,
     /// 模型定价（可选；提供则整体替换）
     pub pricing: Option<crate::model::config::PricingConfig>,
+    /// 模型映射（可选；提供则整体替换规则列表）
+    pub model_mapping: Option<crate::model::config::ModelMappingConfig>,
 }
 
 /// 更新压缩配置请求

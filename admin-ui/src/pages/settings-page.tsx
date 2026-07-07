@@ -13,6 +13,7 @@ import {
 import { extractErrorMessage } from '@/lib/utils'
 import { storage } from '@/lib/storage'
 import type {
+  ModelMappingConfig,
   PricingConfig,
   UpdateCompressionConfigRequest,
   UpdateGlobalConfigRequest,
@@ -89,6 +90,31 @@ const draftToPricing = (d: PricingDraft): PricingConfig => ({
     cacheWrite: numOf(d.default.cacheWrite),
   },
   multiplier: d.multiplier.trim() === '' ? 1 : numOf(d.multiplier),
+})
+
+// 模型映射编辑态
+type ModelMappingRuleDraft = {
+  label: string
+  match: string
+  matchType: string
+  model: string
+}
+type ModelMappingDraft = { rules: ModelMappingRuleDraft[] }
+const modelMappingToDraft = (m: ModelMappingConfig): ModelMappingDraft => ({
+  rules: (m.rules ?? []).map((r) => ({
+    label: r.label,
+    match: r.match,
+    matchType: r.matchType,
+    model: r.model,
+  })),
+})
+const draftToModelMapping = (d: ModelMappingDraft): ModelMappingConfig => ({
+  rules: d.rules.map((r) => ({
+    label: r.label.trim(),
+    match: r.match.trim(),
+    matchType: r.matchType,
+    model: r.model.trim(),
+  })),
 })
 
 export function SettingsPage() {
@@ -177,6 +203,11 @@ export function SettingsPage() {
     pricingToDraft(DEFAULT_PRICING)
   )
 
+  // 模型映射（请求模型名 → 上游 Kiro 模型 ID）
+  const [modelMapping, setModelMapping] = useState<ModelMappingDraft>({
+    rules: [],
+  })
+
   const isLoading = globalLoading || proxyLoading
   const isPending = globalPending || proxyPending
 
@@ -242,6 +273,9 @@ export function SettingsPage() {
       setCMaxRequestBodyBytes(c.maxRequestBodyBytes.toString())
       if (globalConfig.pricing) {
         setPricing(pricingToDraft(globalConfig.pricing))
+      }
+      if (globalConfig.modelMapping) {
+        setModelMapping(modelMappingToDraft(globalConfig.modelMapping))
       }
     }
     if (proxyConfig) {
@@ -515,6 +549,16 @@ export function SettingsPage() {
       hasGlobalChanges = true
     }
 
+    // 模型映射（整体替换规则列表；JSON 深比较检测变更）
+    if (
+      globalConfig &&
+      JSON.stringify(draftToModelMapping(modelMapping)) !==
+        JSON.stringify(globalConfig.modelMapping)
+    ) {
+      globalPayload.modelMapping = draftToModelMapping(modelMapping)
+      hasGlobalChanges = true
+    }
+
     const proxyPayload: Record<string, string | null> = {
       proxyUrl: proxyUrl.trim() || null,
     }
@@ -572,6 +616,26 @@ export function SettingsPage() {
     }))
   const removeRule = (idx: number) =>
     setPricing((p) => ({ ...p, rules: p.rules.filter((_, i) => i !== idx) }))
+
+  // 模型映射规则增删改
+  const updateMappingRule = (
+    idx: number,
+    key: keyof ModelMappingRuleDraft,
+    value: string
+  ) =>
+    setModelMapping((m) => ({
+      rules: m.rules.map((r, i) => (i === idx ? { ...r, [key]: value } : r)),
+    }))
+  const addMappingRule = () =>
+    setModelMapping((m) => ({
+      rules: [
+        ...m.rules,
+        { label: '', match: '', matchType: 'contains', model: '' },
+      ],
+    }))
+  const removeMappingRule = (idx: number) =>
+    setModelMapping((m) => ({ rules: m.rules.filter((_, i) => i !== idx) }))
+
   const updateDefault = (key: keyof PricingRateDraft, value: string) =>
     setPricing((p) => ({
       ...p,
@@ -867,6 +931,96 @@ export function SettingsPage() {
                   所有模型按上面定价算出的价值，最终都会再 × 此倍率（默认 1）。
                   例如想把展示价值整体打 1.5 倍就填 1.5。
                 </p>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* 模型映射（支持哪些模型） */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">模型映射（支持哪些模型）</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <p className="text-xs text-muted-foreground">
+                配置「请求的模型名 → 上游 Kiro 模型 ID」。自上而下第一条命中的规则生效；
+                <b>一旦配置了规则，就完全由这里接管</b>：未命中任何规则的模型会直接返回「模型不存在」，
+                不做故障转移/退避、也不回退内置映射。留空则使用内置默认映射。
+              </p>
+              <div className="space-y-2">
+                <div className="hidden md:grid grid-cols-[1fr_1.4fr_0.9fr_1.4fr_auto] gap-2 text-xs text-muted-foreground px-1">
+                  <span>标签</span>
+                  <span>匹配串</span>
+                  <span>方式</span>
+                  <span>目标 Kiro 模型 ID</span>
+                  <span></span>
+                </div>
+                {modelMapping.rules.map((rule, idx) => (
+                  <div
+                    key={idx}
+                    className="grid grid-cols-2 md:grid-cols-[1fr_1.4fr_0.9fr_1.4fr_auto] gap-2 items-center"
+                  >
+                    <Input
+                      value={rule.label}
+                      placeholder="标签"
+                      onChange={(e) =>
+                        updateMappingRule(idx, 'label', e.target.value)
+                      }
+                      disabled={isPending}
+                    />
+                    <Input
+                      value={rule.match}
+                      placeholder="如 opus-4-8"
+                      onChange={(e) =>
+                        updateMappingRule(idx, 'match', e.target.value)
+                      }
+                      disabled={isPending}
+                    />
+                    <select
+                      className="flex h-9 w-full rounded-md border border-input bg-transparent px-2 py-1 text-sm"
+                      value={rule.matchType}
+                      onChange={(e) =>
+                        updateMappingRule(idx, 'matchType', e.target.value)
+                      }
+                      disabled={isPending}
+                    >
+                      <option value="contains">包含</option>
+                      <option value="prefix">前缀</option>
+                      <option value="exact">精确</option>
+                      <option value="glob">通配</option>
+                    </select>
+                    <Input
+                      value={rule.model}
+                      placeholder="如 claude-opus-4.8"
+                      onChange={(e) =>
+                        updateMappingRule(idx, 'model', e.target.value)
+                      }
+                      disabled={isPending}
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => removeMappingRule(idx)}
+                      disabled={isPending}
+                    >
+                      删除
+                    </Button>
+                  </div>
+                ))}
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={addMappingRule}
+                  disabled={isPending}
+                >
+                  + 添加规则
+                </Button>
+                {modelMapping.rules.length === 0 && (
+                  <p className="text-[11px] text-muted-foreground">
+                    当前未配置任何规则，使用内置默认映射（sonnet / opus / haiku 各版本）。
+                  </p>
+                )}
               </div>
             </CardContent>
           </Card>

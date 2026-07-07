@@ -689,6 +689,22 @@ export interface PricingConfig {
   multiplier: number
 }
 
+// 模型映射（请求模型名 → 上游 Kiro 模型 ID）
+export interface ModelMappingRule {
+  label: string
+  /** 匹配串（匹配请求里的模型名） */
+  match: string
+  /** 匹配方式：exact | prefix | contains | glob */
+  matchType: string
+  /** 命中后实际发给上游的 Kiro 模型 ID（如 claude-opus-4.8） */
+  model: string
+}
+
+export interface ModelMappingConfig {
+  /** 有序规则，自上而下第一条命中者生效；未命中即「模型不存在」 */
+  rules: ModelMappingRule[]
+}
+
 export interface GlobalConfigResponse {
   region: string
   credentialRpm: number | null
@@ -719,6 +735,7 @@ export interface GlobalConfigResponse {
   errorLogMaxAgeDays: number
   errorLogExcludedStatusCodes: number[]
   pricing: PricingConfig
+  modelMapping: ModelMappingConfig
 }
 
 export interface UpdateCompressionConfigRequest {
@@ -764,6 +781,7 @@ export interface UpdateGlobalConfigRequest {
   errorLogMaxAgeDays?: number
   errorLogExcludedStatusCodes?: number[]
   pricing?: PricingConfig
+  modelMapping?: ModelMappingConfig
 }
 
 // ===== 错误日志 =====

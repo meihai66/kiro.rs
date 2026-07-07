@@ -18,7 +18,7 @@ use crate::kiro::model::requests::tool::{
 
 use super::types::{ContentBlock, MessagesRequest, Tool as AnthropicTool};
 use crate::anthropic::compressor::CompressionStats;
-use crate::model::config::CompressionConfig;
+use crate::model::config::{CompressionConfig, ModelMappingConfig};
 
 /// 单请求图片总数上限（所有消息合计，含 GIF 抽帧后的帧数）
 const MAX_TOTAL_IMAGES: usize = 20;
@@ -193,6 +193,19 @@ pub fn map_model(model: &str) -> Option<String> {
     }
 }
 
+/// 解析模型名到上游 Kiro 模型 ID。
+///
+/// - 配置了 `model_mapping` 规则时：完全由配置接管，未命中任何规则即返回 `None`
+///   （上层据此返回「模型不存在」，不再回退内置映射，也不做退避）。
+/// - 未配置规则时：回退到内置 [`map_model`]，保持既有行为。
+pub fn resolve_model(model: &str, mapping: &ModelMappingConfig) -> Option<String> {
+    if mapping.is_empty() {
+        map_model(model)
+    } else {
+        mapping.resolve(model)
+    }
+}
+
 /// 判断模型名是否为 agentic 变体
 pub fn is_agentic_model(model: &str) -> bool {
     model.to_lowercase().ends_with("-agentic")
@@ -338,9 +351,10 @@ fn create_placeholder_tool(name: &str) -> KiroTool {
 pub fn convert_request(
     req: &MessagesRequest,
     compression_config: &CompressionConfig,
+    model_mapping: &ModelMappingConfig,
 ) -> Result<ConversionResult, ConversionError> {
-    // 1. 映射模型
-    let model_id = map_model(&req.model)
+    // 1. 映射模型（配置了 model_mapping 时完全由其接管，未命中即「模型不存在」）
+    let model_id = resolve_model(&req.model, model_mapping)
         .ok_or_else(|| ConversionError::UnsupportedModel(req.model.clone()))?;
 
     // 2. 检查消息列表
@@ -1476,7 +1490,7 @@ fn merge_assistant_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::config::CompressionConfig;
+    use crate::model::config::{CompressionConfig, ModelMappingConfig, ModelMappingRule};
 
     #[test]
     fn test_map_model_sonnet() {
@@ -1547,6 +1561,36 @@ mod tests {
     #[test]
     fn test_map_model_unsupported() {
         assert!(map_model("gpt-4").is_none());
+    }
+
+    #[test]
+    fn test_resolve_model_config_overrides_builtin() {
+        // 空配置 → 回退内置映射（保持既有行为）
+        let empty = ModelMappingConfig::default();
+        assert_eq!(
+            resolve_model("claude-opus-4-8", &empty).as_deref(),
+            Some(KIRO_MODEL_OPUS_4_8)
+        );
+        assert_eq!(
+            resolve_model("claude-sonnet-4-6", &empty).as_deref(),
+            Some(KIRO_MODEL_SONNET_4_6)
+        );
+
+        // 非空配置 → 完全接管：命中走配置，未命中即 None（不回退内置、不退避）
+        let cfg = ModelMappingConfig {
+            rules: vec![ModelMappingRule {
+                label: "only sonnet".to_string(),
+                pattern: "sonnet".to_string(),
+                match_type: "contains".to_string(),
+                model: "claude-sonnet-4.6".to_string(),
+            }],
+        };
+        assert_eq!(
+            resolve_model("claude-sonnet-4-5", &cfg).as_deref(),
+            Some("claude-sonnet-4.6")
+        );
+        // opus 在配置里没有规则 → 即便内置能映射也返回 None（模型不存在）
+        assert!(resolve_model("claude-opus-4-8", &cfg).is_none());
     }
 
     #[test]
@@ -1728,7 +1772,7 @@ mod tests {
             metadata: None,
         };
 
-        let result = convert_request(&req, &CompressionConfig::default()).unwrap();
+        let result = convert_request(&req, &CompressionConfig::default(), &ModelMappingConfig::default()).unwrap();
 
         // 验证 tools 列表中包含了历史中使用的工具的占位符定义
         let tools = &result
@@ -1827,7 +1871,7 @@ mod tests {
             }),
         };
 
-        let result = convert_request(&req, &CompressionConfig::default()).unwrap();
+        let result = convert_request(&req, &CompressionConfig::default(), &ModelMappingConfig::default()).unwrap();
         assert_eq!(
             result.conversation_state.conversation_id,
             "a0662283-7fd3-4399-a7eb-52b9a717ae88"
@@ -1855,7 +1899,7 @@ mod tests {
             metadata: None,
         };
 
-        let result = convert_request(&req, &CompressionConfig::default()).unwrap();
+        let result = convert_request(&req, &CompressionConfig::default(), &ModelMappingConfig::default()).unwrap();
         // 验证生成的是有效的 UUID 格式
         assert_eq!(result.conversation_state.conversation_id.len(), 36);
         assert_eq!(
@@ -2307,7 +2351,7 @@ mod tests {
             metadata: None,
         };
 
-        let result = convert_request(&req, &CompressionConfig::default()).unwrap();
+        let result = convert_request(&req, &CompressionConfig::default(), &ModelMappingConfig::default()).unwrap();
         let tools = &result
             .conversation_state
             .current_message
@@ -2366,7 +2410,7 @@ mod tests {
             metadata: None,
         };
 
-        let result = convert_request(&req, &CompressionConfig::default()).unwrap();
+        let result = convert_request(&req, &CompressionConfig::default(), &ModelMappingConfig::default()).unwrap();
         let content = &result
             .conversation_state
             .current_message
@@ -2422,7 +2466,7 @@ mod tests {
             metadata: None,
         };
 
-        let result = convert_request(&req, &CompressionConfig::default()).unwrap();
+        let result = convert_request(&req, &CompressionConfig::default(), &ModelMappingConfig::default()).unwrap();
 
         let mut found = false;
         for msg in &result.conversation_state.history {
@@ -2486,7 +2530,7 @@ mod tests {
             metadata: None,
         };
 
-        let result = convert_request(&req, &CompressionConfig::default()).unwrap();
+        let result = convert_request(&req, &CompressionConfig::default(), &ModelMappingConfig::default()).unwrap();
 
         // 孤立 tool_result 会被过滤
         assert!(
@@ -2660,7 +2704,7 @@ mod tests {
             metadata: None,
         };
 
-        let result = convert_request(&req_no_tools, &CompressionConfig::default()).unwrap();
+        let result = convert_request(&req_no_tools, &CompressionConfig::default(), &ModelMappingConfig::default()).unwrap();
         let first_user = &result.conversation_state.history[0];
         match first_user {
             Message::User(u) => {
@@ -2696,7 +2740,7 @@ mod tests {
             metadata: None,
         };
 
-        let result = convert_request(&req_with_write, &CompressionConfig::default()).unwrap();
+        let result = convert_request(&req_with_write, &CompressionConfig::default(), &ModelMappingConfig::default()).unwrap();
         let first_user = &result.conversation_state.history[0];
         match first_user {
             Message::User(u) => {
@@ -2733,7 +2777,7 @@ mod tests {
         };
 
         let result =
-            convert_request(&req_no_system_with_edit, &CompressionConfig::default()).unwrap();
+            convert_request(&req_no_system_with_edit, &CompressionConfig::default(), &ModelMappingConfig::default()).unwrap();
         let first_user = &result.conversation_state.history[0];
         match first_user {
             Message::User(u) => {
@@ -2869,7 +2913,7 @@ mod tests {
             metadata: None,
         };
 
-        let result = convert_request(&req, &CompressionConfig::default());
+        let result = convert_request(&req, &CompressionConfig::default(), &ModelMappingConfig::default());
         assert!(result.is_ok(), "prefill 场景不应报错: {:?}", result.err());
         let state = result.unwrap().conversation_state;
         assert_eq!(
@@ -2899,7 +2943,7 @@ mod tests {
             metadata: None,
         };
 
-        let err = convert_request(&req, &CompressionConfig::default()).unwrap_err();
+        let err = convert_request(&req, &CompressionConfig::default(), &ModelMappingConfig::default()).unwrap_err();
         assert!(
             matches!(err, ConversionError::EmptyMessages),
             "只有 assistant 消息时应返回 EmptyMessages，实际: {:?}",
@@ -2928,7 +2972,7 @@ mod tests {
             metadata: None,
         };
 
-        let err = convert_request(&req, &CompressionConfig::default()).unwrap_err();
+        let err = convert_request(&req, &CompressionConfig::default(), &ModelMappingConfig::default()).unwrap_err();
         assert!(
             matches!(err, ConversionError::EmptyMessageContent),
             "空消息内容应返回 EmptyMessageContent，实际: {:?}",
@@ -2960,7 +3004,7 @@ mod tests {
             metadata: None,
         };
 
-        let err = convert_request(&req, &CompressionConfig::default()).unwrap_err();
+        let err = convert_request(&req, &CompressionConfig::default(), &ModelMappingConfig::default()).unwrap_err();
         assert!(
             matches!(err, ConversionError::EmptyMessageContent),
             "仅包含空白文本的消息应返回 EmptyMessageContent，实际: {:?}",
@@ -2995,7 +3039,7 @@ mod tests {
             metadata: None,
         };
 
-        let err = convert_request(&req, &CompressionConfig::default()).unwrap_err();
+        let err = convert_request(&req, &CompressionConfig::default(), &ModelMappingConfig::default()).unwrap_err();
         assert!(
             matches!(err, ConversionError::EmptyMessageContent),
             "prefill 回退后的空 user 消息应返回 EmptyMessageContent，实际: {:?}",
@@ -3097,7 +3141,7 @@ mod tests {
         };
 
         // 转换应成功，不应因 tool_use/tool_result 配对失败而报错
-        let result = convert_request(&req, &CompressionConfig::default());
+        let result = convert_request(&req, &CompressionConfig::default(), &ModelMappingConfig::default());
         assert!(
             result.is_ok(),
             "连续 assistant 消息场景不应报错: {:?}",

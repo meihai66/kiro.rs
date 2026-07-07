@@ -364,7 +364,8 @@ impl AdminService {
             metadata: None,
         };
         let compression = self.compression_config.read().clone();
-        let conversion = crate::anthropic::convert_request(&payload, &compression)
+        let model_mapping = self.config.read().model_mapping.clone();
+        let conversion = crate::anthropic::convert_request(&payload, &compression, &model_mapping)
             .map_err(|e| AdminServiceError::InvalidRequest(format!("请求转换失败: {}", e)))?;
         let kiro_request = crate::kiro::model::requests::kiro::KiroRequest {
             conversation_state: conversion.conversation_state,
@@ -2144,6 +2145,7 @@ impl AdminService {
             error_log_max_age_days: config.error_log_max_age_days,
             error_log_excluded_status_codes: config.error_log_excluded_status_codes.clone(),
             pricing: config.pricing.clone(),
+            model_mapping: config.model_mapping.clone(),
         }
     }
 
@@ -2360,6 +2362,9 @@ impl AdminService {
             }
             if let Some(pricing) = &req.pricing {
                 config.pricing = pricing.clone();
+            }
+            if let Some(model_mapping) = &req.model_mapping {
+                config.model_mapping = model_mapping.clone();
             }
 
             config
@@ -3246,6 +3251,7 @@ mod tests {
             error_log_max_age_days: None,
             error_log_excluded_status_codes: None,
             pricing: None,
+            model_mapping: None,
         };
 
         let result = service.update_global_config(req).await;
@@ -3292,6 +3298,7 @@ mod tests {
             error_log_max_age_days: None,
             error_log_excluded_status_codes: None,
             pricing: None,
+            model_mapping: None,
         };
 
         let result = service.update_global_config(req).await;
@@ -3337,6 +3344,7 @@ mod tests {
             error_log_max_age_days: None,
             error_log_excluded_status_codes: None,
             pricing: None,
+            model_mapping: None,
         };
 
         let result = service.update_global_config(req).await;
@@ -3382,6 +3390,7 @@ mod tests {
             error_log_max_age_days: None,
             error_log_excluded_status_codes: None,
             pricing: None,
+            model_mapping: None,
         };
 
         let result = service.update_global_config(req).await;
@@ -3424,6 +3433,7 @@ mod tests {
             error_log_max_age_days: None,
             error_log_excluded_status_codes: None,
             pricing: None,
+            model_mapping: None,
         };
 
         let result = service.update_global_config(req).await;

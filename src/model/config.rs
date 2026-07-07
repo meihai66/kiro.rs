@@ -239,6 +239,11 @@ pub struct Config {
     #[serde(default)]
     pub pricing: PricingConfig,
 
+    /// 模型映射（请求的模型名 → 上游 Kiro 模型 ID）。
+    /// 为空（默认）时回退到内置映射；非空时完全接管，未命中即「模型不存在」。
+    #[serde(default)]
+    pub model_mapping: ModelMappingConfig,
+
     /// 配置文件路径（运行时元数据，不写入 JSON）
     #[serde(skip)]
     config_path: Option<PathBuf>,
@@ -375,6 +380,72 @@ impl PricingConfig {
 
 fn default_match_type() -> String {
     "contains".to_string()
+}
+
+/// 一条模型映射规则（自上而下第一条命中者生效）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelMappingRule {
+    /// 展示用标签（如 "Opus 4.8"）
+    #[serde(default)]
+    pub label: String,
+    /// 匹配串（匹配请求里的模型名）
+    #[serde(rename = "match", default)]
+    pub pattern: String,
+    /// 匹配方式：exact | prefix | contains | glob
+    #[serde(default = "default_match_type")]
+    pub match_type: String,
+    /// 命中后实际发给上游的 Kiro 模型 ID（如 "claude-opus-4.8"）
+    #[serde(default)]
+    pub model: String,
+}
+
+impl ModelMappingRule {
+    /// 判断模型名是否命中本规则（大小写不敏感）
+    pub fn matches(&self, model: &str) -> bool {
+        let p = self.pattern.trim();
+        if p.is_empty() {
+            return false;
+        }
+        let model_l = model.to_ascii_lowercase();
+        let pat_l = p.to_ascii_lowercase();
+        match self.match_type.as_str() {
+            "exact" => model_l == pat_l,
+            "prefix" => model_l.starts_with(&pat_l),
+            "glob" => glob_match(&pat_l, &model_l),
+            // 默认含「contains」
+            _ => model_l.contains(&pat_l),
+        }
+    }
+}
+
+/// 模型映射配置：有序规则，自上而下第一条命中者生效。
+///
+/// 为空时上层回退到内置映射；非空时完全接管：未命中任何规则即视为「模型不存在」，
+/// 不再回退内置默认——由使用方（converter）决定回退语义，本结构只做规则匹配。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelMappingConfig {
+    /// 有序匹配规则
+    #[serde(default)]
+    pub rules: Vec<ModelMappingRule>,
+}
+
+impl ModelMappingConfig {
+    /// 是否未配置任何规则
+    pub fn is_empty(&self) -> bool {
+        self.rules.is_empty()
+    }
+
+    /// 按序匹配，返回命中规则的目标 Kiro 模型 ID；无规则或都不命中返回 `None`。
+    /// 命中规则但目标为空串同样视为未命中（配置无效）。
+    pub fn resolve(&self, model: &str) -> Option<String> {
+        self.rules
+            .iter()
+            .find(|r| r.matches(model))
+            .map(|r| r.model.trim().to_string())
+            .filter(|m| !m.is_empty())
+    }
 }
 
 /// 极简 glob 匹配：仅支持 `*`（任意串）与 `?`（任意单字符），其余字面匹配。
@@ -681,6 +752,7 @@ impl Default for Config {
             error_log_max_age_days: default_error_log_max_age_days(),
             error_log_excluded_status_codes: Vec::new(),
             pricing: PricingConfig::default(),
+            model_mapping: ModelMappingConfig::default(),
             config_path: None,
         }
     }
@@ -795,6 +867,51 @@ mod tests {
         assert!(!rule("glob", "claude-haiku-*").matches("claude-opus-4-6"));
         // 大小写不敏感
         assert!(rule("contains", "OPUS").matches("claude-opus-4-6"));
+    }
+
+    #[test]
+    fn test_model_mapping_resolve() {
+        let rule = |pat: &str, mt: &str, model: &str| ModelMappingRule {
+            label: String::new(),
+            pattern: pat.to_string(),
+            match_type: mt.to_string(),
+            model: model.to_string(),
+        };
+
+        // 空配置：无规则 → None（回退语义由 converter 决定）
+        assert!(ModelMappingConfig::default().is_empty());
+        assert!(ModelMappingConfig::default().resolve("claude-opus-4-8").is_none());
+
+        let cfg = ModelMappingConfig {
+            rules: vec![
+                rule("opus-4-8", "contains", "claude-opus-4.8"),
+                rule("opus", "contains", "claude-opus-4.6"),
+                rule("claude-sonnet-4-6", "exact", "claude-sonnet-4.6"),
+            ],
+        };
+        // 自上而下第一条命中
+        assert_eq!(
+            cfg.resolve("claude-opus-4-8-thinking").as_deref(),
+            Some("claude-opus-4.8")
+        );
+        assert_eq!(
+            cfg.resolve("claude-opus-4-6").as_deref(),
+            Some("claude-opus-4.6")
+        );
+        // exact 只精确匹配
+        assert_eq!(
+            cfg.resolve("claude-sonnet-4-6").as_deref(),
+            Some("claude-sonnet-4.6")
+        );
+        assert!(cfg.resolve("claude-sonnet-4-6-thinking").is_none());
+        // 未命中任何规则 → None（模型不存在）
+        assert!(cfg.resolve("gpt-4").is_none());
+
+        // 命中但目标为空串 → 视为未命中
+        let cfg_empty_target = ModelMappingConfig {
+            rules: vec![rule("haiku", "contains", "")],
+        };
+        assert!(cfg_empty_target.resolve("claude-haiku-4-5").is_none());
     }
 
     #[test]
