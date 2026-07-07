@@ -50,7 +50,10 @@ fn mask_user_id(user_id: Option<&str>) -> String {
         Some(id) => {
             let len = id.len();
             if len > 12 {
-                format!("{}***{}", &id[..4], &id[len - 4..])
+                // user_id 客户端可控，按字节裸切多字节 UTF-8 会 panic，回退到最近字符边界
+                let prefix_end = floor_char_boundary(id, 4);
+                let suffix_start = floor_char_boundary(id, len - 4);
+                format!("{}***{}", &id[..prefix_end], &id[suffix_start..])
             } else {
                 "***".to_string()
             }
@@ -2983,6 +2986,16 @@ impl MultiTokenManager {
             .map(|id| async move {
                 match self.get_usage_limits_for(id).await {
                     Ok(limits) => {
+                        // 上游返回 200 但无 usageBreakdownList 时，usage_limit()/current_usage() 都会回退到 0，
+                        // 「数据缺失」不等于「余额为零」，据此禁用（InsufficientBalance 不可自愈）会误伤全部凭据。
+                        // 此处保持启用并跳过判定，真实欠费会在后续请求由上游 402 等权威信号处理。
+                        if !limits.has_usage_data() {
+                            tracing::warn!(
+                                "凭据 #{} 余额响应缺少 usageBreakdownList，跳过余额判定（保持启用）",
+                                id
+                            );
+                            return true;
+                        }
                         let used = limits.current_usage();
                         let limit = limits.usage_limit();
                         let remaining = (limit - used).max(0.0);
@@ -3811,42 +3824,42 @@ impl MultiTokenManager {
             }
         };
 
-        // 4. 分配新 ID
+        // 4-6. 在同一把锁内「分配 ID → 构建 entry → push」。
+        // 到这里所有 .await（token 刷新/余额查询）都已完成，下面全是同步计算，
+        // 因此可以整段持锁：避免两个并发 add 在锁外各自算出相同的 max+1 得到重复 ID
+        // —— 重复 ID 会让后续 replace_all_credentials 因主键冲突整事务回滚，导致持久化永久失败。
         let new_id = {
-            let entries = self.entries.lock();
-            entries.iter().map(|e| e.id).max().unwrap_or(0) + 1
-        };
-
-        // 5. 设置 ID 并保留用户输入的元数据
-        validated_cred.id = Some(new_id);
-        validated_cred.priority = new_cred.priority;
-        validated_cred.auth_method = new_cred.auth_method.clone();
-        validated_cred.canonicalize_auth_method();
-        validated_cred.client_id = new_cred.client_id;
-        validated_cred.client_secret = new_cred.client_secret;
-        validated_cred.region = new_cred.region;
-        validated_cred.machine_id = new_cred.machine_id;
-        validated_cred.email = new_cred.email;
-        validated_cred.api_region = new_cred.api_region;
-        validated_cred.proxy_slot_id = new_cred.proxy_slot_id;
-        validated_cred.kiro_api_key = new_cred.kiro_api_key;
-        validated_cred.allow_overuse = new_cred.allow_overuse;
-        validated_cred.rpm = new_cred.rpm.filter(|&v| v > 0);
-
-        // 为新凭据生成设备指纹
-        let fingerprint_seed = validated_cred
-            .refresh_token
-            .as_deref()
-            .or(validated_cred.kiro_api_key.as_deref())
-            .or(validated_cred.machine_id.as_deref())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("credential-{}", new_id));
-        let fingerprint = Fingerprint::generate_from_seed(&fingerprint_seed);
-
-        let entry_secret_hash = credential_secret_hash(&validated_cred);
-
-        {
             let mut entries = self.entries.lock();
+            let new_id = entries.iter().map(|e| e.id).max().unwrap_or(0) + 1;
+
+            // 5. 设置 ID 并保留用户输入的元数据
+            validated_cred.id = Some(new_id);
+            validated_cred.priority = new_cred.priority;
+            validated_cred.auth_method = new_cred.auth_method.clone();
+            validated_cred.canonicalize_auth_method();
+            validated_cred.client_id = new_cred.client_id;
+            validated_cred.client_secret = new_cred.client_secret;
+            validated_cred.region = new_cred.region;
+            validated_cred.machine_id = new_cred.machine_id;
+            validated_cred.email = new_cred.email;
+            validated_cred.api_region = new_cred.api_region;
+            validated_cred.proxy_slot_id = new_cred.proxy_slot_id;
+            validated_cred.kiro_api_key = new_cred.kiro_api_key;
+            validated_cred.allow_overuse = new_cred.allow_overuse;
+            validated_cred.rpm = new_cred.rpm.filter(|&v| v > 0);
+
+            // 为新凭据生成设备指纹
+            let fingerprint_seed = validated_cred
+                .refresh_token
+                .as_deref()
+                .or(validated_cred.kiro_api_key.as_deref())
+                .or(validated_cred.machine_id.as_deref())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("credential-{}", new_id));
+            let fingerprint = Fingerprint::generate_from_seed(&fingerprint_seed);
+
+            let entry_secret_hash = credential_secret_hash(&validated_cred);
+
             entries.push(CredentialEntry {
                 id: new_id,
                 credentials: validated_cred,
@@ -3866,7 +3879,9 @@ impl MultiTokenManager {
                 rate_limit_count: Arc::new(AtomicU32::new(0)),
                 model_usage: HashMap::new(),
             });
-        }
+
+            new_id
+        };
 
         // 同步凭据级 RPM 到 rate_limiter（避免重启或重复添加时漏配）
         if let Some(rpm) = new_cred.rpm.filter(|&v| v > 0) {
@@ -4193,6 +4208,18 @@ mod tests {
         let credentials = KiroCredentials::default();
         let tm = TokenManager::new(config, credentials, None);
         assert!(tm.credentials().access_token.is_none());
+    }
+
+    #[test]
+    fn test_mask_user_id_multibyte_no_panic() {
+        // 回归：user_id 来自客户端，含多字节字符时曾用 &id[..4]/&id[len-4..] 裸切片 panic。
+        assert_eq!(mask_user_id(None), "None");
+        assert_eq!(mask_user_id(Some("short")), "***"); // len <= 12
+        // 首尾均为多字节，byte 4 / len-4 都可能落在字符中间；只要不 panic 且做了掩码即可
+        let masked = mask_user_id(Some("你好世界你好世界你好世界"));
+        assert!(masked.contains("***"));
+        // ASCII 长串保持原行为：前 4 + *** + 后 4
+        assert_eq!(mask_user_id(Some("abcdefghijklmnop")), "abcd***mnop");
     }
 
     #[test]
@@ -4543,37 +4570,44 @@ mod tests {
         );
     }
 
-    /// LRU 选号：连续 acquire 时应"等了最久的优先"被再次选中。
+    /// LRU 选号核心：从未被选中（None）优先；都用过时 `last_acquired_at` 最早者优先。
     ///
-    /// 两个凭据均未被用过时第一次走轮询；之后下一次 acquire 必须挑到
-    /// 上一次没被选中的那个（因为它的 last_acquired_at 仍然是 None / 更旧）。
-    #[tokio::test]
-    async fn test_multi_token_manager_acquire_context_lru_prefers_least_recently_acquired() {
-        let config = Config::default();
-        let mut cred1 = KiroCredentials::default();
-        cred1.access_token = Some("t1".to_string());
-        cred1.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
-        let mut cred2 = KiroCredentials::default();
-        cred2.access_token = Some("t2".to_string());
-        cred2.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
-
+    /// 直接单元测试 `select_best_candidate_id`，而不是走 `acquire_context` 端到端路径：
+    /// 端到端时被选中的凭据会立刻进入 rate_limiter 的最小间隔限制（其计时独立于
+    /// `last_acquired_at`），两个凭据在毫秒内相继被 acquire 会同时被限流并触发重试轮转，
+    /// 最终返回哪个由 rate_limiter 计时决定——本质上非确定，此前正是这里导致约 1/5 概率 flaky。
+    #[test]
+    fn test_select_best_candidate_id_prefers_least_recently_acquired() {
         let manager =
-            MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
+            MultiTokenManager::new(Config::default(), vec![KiroCredentials::default()], None, None, false)
+                .unwrap();
 
-        let ctx1 = manager.acquire_context().await.unwrap();
-        // 让两次 acquire 之间留出足够时间差，避免 CI 繁忙时 Instant 精度抖动
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        let ctx2 = manager.acquire_context().await.unwrap();
-        assert_ne!(
-            ctx1.id, ctx2.id,
-            "第二次 acquire 应当选中上一次没被选中的号（LRU）"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-        let ctx3 = manager.acquire_context().await.unwrap();
+        let now = std::time::Instant::now();
+        let older = now - std::time::Duration::from_secs(10);
+        let newer = now;
+
+        // 从未用过（None）优先于任何已用过的（Some），与顺序无关
         assert_eq!(
-            ctx3.id, ctx1.id,
-            "第三次 acquire 应当再回到第一次的号（它已经成为'等最久'的那一个）"
+            manager.select_best_candidate_id(&[(1, Some(newer)), (2, None)]),
+            Some(2)
         );
+        assert_eq!(
+            manager.select_best_candidate_id(&[(1, None), (2, Some(newer))]),
+            Some(1)
+        );
+
+        // 都用过：last_acquired_at 最早（elapsed 最久）的优先，与列表顺序无关
+        assert_eq!(
+            manager.select_best_candidate_id(&[(1, Some(older)), (2, Some(newer))]),
+            Some(1)
+        );
+        assert_eq!(
+            manager.select_best_candidate_id(&[(1, Some(newer)), (2, Some(older))]),
+            Some(2)
+        );
+
+        // 空候选返回 None
+        assert_eq!(manager.select_best_candidate_id(&[]), None);
     }
 
     #[tokio::test]

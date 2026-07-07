@@ -250,11 +250,12 @@ fn extract_session_id(user_id: &str) -> Option<String> {
         let session_part = &user_id[pos + 8..]; // "session_" 长度为 8
         // session_part 应该是 UUID 格式: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
         // 验证是否是有效的 UUID 格式（36 字符，包含 4 个连字符）
-        if session_part.len() >= 36 {
-            let uuid_str = &session_part[..36];
-            if is_valid_uuid(uuid_str) {
-                return Some(uuid_str.to_string());
-            }
+        // 用 get(..36) 而非裸切片：user_id 客户端可控，若第 36 字节落在多字节字符中间，裸切片会 panic。
+        // 合法 UUID 全为 ASCII，非字符边界时 get 返回 None，跳过即可。
+        if let Some(uuid_str) = session_part.get(..36)
+            && is_valid_uuid(uuid_str)
+        {
+            return Some(uuid_str.to_string());
         }
     }
     None
@@ -1769,6 +1770,17 @@ mod tests {
         let user_id = "user_xxx_session_invalid-uuid";
         let session_id = extract_session_id(user_id);
         assert_eq!(session_id, None);
+    }
+
+    #[test]
+    fn test_extract_session_id_multibyte_no_panic() {
+        // 回归：user_id 客户端可控，"session_" 后的第 36 字节落在多字节字符中间时
+        // 曾用裸切片 &session_part[..36] 触发 panic。现应安全返回 None。
+        let user_id = "user_session_你好世界你好世界你好世界你好世界"; // 全多字节，非 ASCII UUID
+        assert_eq!(extract_session_id(user_id), None);
+        // 边界：session_ 后紧跟一个多字节字符使 byte 36 不在字符边界
+        let user_id2 = "session_你1234567890123456789012345678901234";
+        assert_eq!(extract_session_id(user_id2), None);
     }
 
     #[test]

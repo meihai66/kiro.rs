@@ -63,8 +63,12 @@ pub struct KiroProvider {
     default_client: RwLock<Client>,
     /// 全局代理配置
     global_proxy: RwLock<Option<ProxyConfig>>,
-    /// 凭据级代理 client 缓存（key: credential_id）
-    client_cache: Mutex<HashMap<u64, Client>>,
+    /// 凭据级代理 client 缓存（key: credential_id → (建缓存时的 effective_proxy, client)）
+    ///
+    /// 存入当时的代理配置，命中时与当前 effective_proxy 比对：
+    /// 代理池轮换 / admin 换绑或解绑只更新凭据的 proxy_slot 而不经过本 provider，
+    /// 若仅按 id 缓存会让凭据一直复用旧（可能已过期）代理的 client。
+    client_cache: Mutex<HashMap<u64, (Option<ProxyConfig>, Client)>>,
     /// 端点实现注册表（第一阶段只注册 ide）
     endpoints: HashMap<String, Arc<dyn KiroEndpoint>>,
     /// 默认端点名称
@@ -184,9 +188,12 @@ impl KiroProvider {
 
         {
             let cache = self.client_cache.lock();
-            if let Some(client) = cache.get(&ctx.id) {
+            if let Some((cached_proxy, client)) = cache.get(&ctx.id)
+                && *cached_proxy == effective_proxy
+            {
                 return Ok(client.clone());
             }
+            // 未命中或代理已变更（轮换/换绑/解绑）→ 落到下面重建并覆盖缓存
         }
 
         let config = self.token_manager.config();
@@ -194,7 +201,7 @@ impl KiroProvider {
 
         {
             let mut cache = self.client_cache.lock();
-            cache.insert(ctx.id, client.clone());
+            cache.insert(ctx.id, (effective_proxy.clone(), client.clone()));
         }
 
         Ok(client)
@@ -225,6 +232,15 @@ impl KiroProvider {
         tokio::spawn(async move {
             match tm.get_usage_limits_for(id).await {
                 Ok(resp) => {
+                    // 无 usageBreakdownList 时用量会回退到 0，「数据缺失」≠「余额为零」，
+                    // 不能据此用不可自愈的 InsufficientBalance 禁用凭据。保持启用，跳过判定。
+                    if !resp.has_usage_data() {
+                        tracing::warn!(
+                            "凭据 #{} 余额响应缺少 usageBreakdownList，跳过余额判定（保持启用）",
+                            id
+                        );
+                        return;
+                    }
                     let remaining = resp.usage_limit() - resp.current_usage();
                     tm.update_balance_cache(id, remaining);
                     tracing::debug!("凭据 #{} 余额缓存已刷新: {:.2}", id, remaining);

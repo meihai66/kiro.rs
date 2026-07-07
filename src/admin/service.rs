@@ -71,7 +71,10 @@ fn mask_key(key: &str) -> String {
     if key.len() <= 12 {
         return "***".to_string();
     }
-    format!("{}***{}", &key[..8], &key[key.len() - 4..])
+    // 自定义 API Key 可含多字节字符，按字节裸切会 panic，回退到最近字符边界
+    let prefix_end = floor_char_boundary(key, 8);
+    let suffix_start = floor_char_boundary(key, key.len() - 4);
+    format!("{}***{}", &key[..prefix_end], &key[suffix_start..])
 }
 
 fn generate_api_key() -> String {
@@ -3084,6 +3087,18 @@ mod tests {
     use std::collections::HashSet;
     use std::env;
     use std::fs;
+
+    #[test]
+    fn test_mask_key_multibyte_no_panic() {
+        // 回归：自定义 API Key 可含多字节字符，曾用 &key[..8]/&key[len-4..] 裸切片 panic，
+        // 且 list_api_keys 每次都会 mask → 列表页被永久打挂。现应安全。
+        assert_eq!(mask_key("short"), "***"); // len <= 12
+        // 含多字节且长度 > 12 字节：只要不 panic 且做了掩码
+        let masked = mask_key("你好世界你好世界你好");
+        assert!(masked.contains("***"));
+        // ASCII 长串保持原行为：前 8 + *** + 后 4
+        assert_eq!(mask_key("ksk_abcdefghijklmnop"), "ksk_abcd***mnop");
+    }
 
     fn create_test_service() -> AdminService {
         let config_path = env::temp_dir().join(format!(

@@ -200,6 +200,14 @@ impl UsageLimitsResponse {
         self.usage_breakdown_list.first()
     }
 
+    /// 响应中是否带有可用的用量明细数据。
+    ///
+    /// 用于区分「上游返回 200 但 usageBreakdownList 为空/缺失」与「真实余额为零」：
+    /// 前者 `usage_limit()`/`current_usage()` 都会回退到 0，若据此判定余额不足会误禁用凭据。
+    pub fn has_usage_data(&self) -> bool {
+        !self.usage_breakdown_list.is_empty()
+    }
+
     /// 获取总使用限额（精确值）
     ///
     /// 累加基础额度、激活的免费试用额度和激活的奖励额度
@@ -258,5 +266,31 @@ impl UsageLimitsResponse {
         }
 
         total
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_has_usage_data_empty_response() {
+        // 上游返回 200 但无 usageBreakdownList：has_usage_data 应为 false，
+        // 且 usage_limit()/current_usage() 回退到 0（调用方据此跳过禁用判定）。
+        let resp: UsageLimitsResponse = serde_json::from_str("{}").unwrap();
+        assert!(!resp.has_usage_data());
+        assert_eq!(resp.usage_limit(), 0.0);
+        assert_eq!(resp.current_usage(), 0.0);
+    }
+
+    #[test]
+    fn test_has_usage_data_with_breakdown() {
+        let resp: UsageLimitsResponse = serde_json::from_str(
+            r#"{"usageBreakdownList":[{"usageLimitWithPrecision":100.0,"currentUsageWithPrecision":30.0}]}"#,
+        )
+        .unwrap();
+        assert!(resp.has_usage_data());
+        assert_eq!(resp.usage_limit(), 100.0);
+        assert_eq!(resp.current_usage(), 30.0);
     }
 }
