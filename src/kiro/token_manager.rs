@@ -659,7 +659,7 @@ pub(crate) async fn list_available_profiles(
         .header("amz-sdk-invocation-id", uuid::Uuid::new_v4().to_string())
         .header("amz-sdk-request", "attempt=1; max=1")
         .header("Connection", "close")
-        .body("{}")
+        .body(r#"{"maxResults":10}"#)
         .send()
         .await?;
 

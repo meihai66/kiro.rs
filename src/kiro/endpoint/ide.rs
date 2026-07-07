@@ -115,6 +115,8 @@ impl KiroEndpoint for IdeEndpoint {
             .header("x-amz-user-agent", self.x_amz_user_agent(ctx))
             .header("user-agent", self.user_agent(ctx))
             .header("host", self.host(ctx))
+            // 真实 Kiro IDE 数据面请求带 Accept: */*（reqwest 默认不加），对齐客户端指纹
+            .header("Accept", "*/*")
             .header("amz-sdk-invocation-id", Uuid::new_v4().to_string())
             .header("amz-sdk-request", "attempt=1; max=3")
             .header("Authorization", format!("Bearer {}", ctx.token));
@@ -231,7 +233,11 @@ impl KiroEndpoint for IdeEndpoint {
 
     fn list_models_parts(&self, ctx: &RequestContext<'_>) -> anyhow::Result<ListModelsParts> {
         let host = self.host(ctx);
-        let mut url = format!("https://{}/ListAvailableModels?origin=AI_EDITOR", host);
+        // maxResults=50 对齐真实客户端，避免只拿到默认页大小的模型列表
+        let mut url = format!(
+            "https://{}/ListAvailableModels?origin=AI_EDITOR&maxResults=50",
+            host
+        );
         if let Some(profile_arn) = Self::mcp_profile_arn_header_value(ctx.credentials) {
             url.push_str(&format!("&profileArn={}", urlencoding::encode(profile_arn)));
         }

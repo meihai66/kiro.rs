@@ -233,7 +233,10 @@ impl KiroEndpoint for CliEndpoint {
 
     fn list_models_parts(&self, ctx: &RequestContext<'_>) -> anyhow::Result<ListModelsParts> {
         let host = self.host(ctx);
-        let mut url = format!("https://{}/ListAvailableModels?origin={}", host, CLI_ORIGIN);
+        let mut url = format!(
+            "https://{}/ListAvailableModels?origin={}&maxResults=50",
+            host, CLI_ORIGIN
+        );
         if let Some(profile_arn) = ctx
             .credentials
             .profile_arn

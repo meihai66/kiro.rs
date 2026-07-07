@@ -135,6 +135,21 @@ fn canonicalize_auth_method_value(value: &str) -> &str {
     }
 }
 
+/// 从 Kiro/CodeWhisperer 的 profile ARN 中解析数据面 region。
+///
+/// ARN 形如 `arn:aws:codewhisperer:{region}:{account}:profile/{id}`，第 4 段即 region。
+/// 仅当 service 段为 `codewhisperer` 时才认，避免误解析其它 ARN。返回借用自入参的切片。
+fn region_from_profile_arn(arn: Option<&str>) -> Option<&str> {
+    let parts: Vec<&str> = arn?.trim().splitn(6, ':').collect();
+    if parts.len() >= 6 && parts[0] == "arn" && parts[2] == "codewhisperer" {
+        let region = parts[3].trim();
+        if !region.is_empty() {
+            return Some(region);
+        }
+    }
+    None
+}
+
 /// 凭据配置（支持单对象或数组格式）
 ///
 /// 自动识别配置文件格式：
@@ -241,6 +256,10 @@ impl KiroCredentials {
         self.api_region
             .as_deref()
             .filter(|s| !s.trim().is_empty())
+            // profileArn 里的数据面 region 优先于 region 字段：region 常是认证/OIDC region，
+            // 可能与 profile 实际 provision 的数据面 region 不同（如 Azure 租户认证在 us-east-1、
+            // profile 在 eu-central-1）。此时若不看 ARN 就会把数据面请求打到错误地区 → 403。
+            .or_else(|| region_from_profile_arn(self.profile_arn.as_deref()))
             .or_else(|| self.region.as_deref().filter(|s| !s.trim().is_empty()))
             .unwrap_or(config.effective_api_region())
     }
@@ -778,6 +797,38 @@ mod tests {
         };
 
         assert_eq!(creds.effective_api_region(&config), "cred-region");
+    }
+
+    #[test]
+    fn test_effective_api_region_prefers_profile_arn_over_region() {
+        let config = Config::default();
+        // region 是认证 region（us-east-1），但 profile 实际在 eu-central-1
+        let creds = KiroCredentials {
+            region: Some("us-east-1".to_string()),
+            profile_arn: Some(
+                "arn:aws:codewhisperer:eu-central-1:123456789012:profile/ABCD".to_string(),
+            ),
+            ..Default::default()
+        };
+        assert_eq!(creds.effective_api_region(&config), "eu-central-1");
+
+        // 显式 api_region 仍最高优先（用户覆盖）
+        let creds2 = KiroCredentials {
+            api_region: Some("ap-southeast-1".to_string()),
+            profile_arn: Some(
+                "arn:aws:codewhisperer:eu-central-1:123456789012:profile/ABCD".to_string(),
+            ),
+            ..Default::default()
+        };
+        assert_eq!(creds2.effective_api_region(&config), "ap-southeast-1");
+
+        // 非 codewhisperer ARN 不误解析
+        let creds3 = KiroCredentials {
+            region: Some("us-east-1".to_string()),
+            profile_arn: Some("arn:aws:iam::123456789012:role/foo".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(creds3.effective_api_region(&config), "us-east-1");
     }
 
     #[test]
