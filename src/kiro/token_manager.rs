@@ -3837,8 +3837,15 @@ impl MultiTokenManager {
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
         };
 
-        let proxy = self.effective_proxy_for_cred(&credentials)?;
+        // Enterprise/Q Developer 账号的 getUsageLimits 也必须带正确 region + profileArn，否则 403。
+        // 与数据面一致，在此按需跨区解析并写回 profileArn（解析后 effective_api_region 会从 ARN
+        // 得到正确的数据面 region）。
         let config = self.config.read().clone();
+        let credentials = self
+            .ensure_idc_profile_arn(id, credentials, &config, &token)
+            .await;
+
+        let proxy = self.effective_proxy_for_cred(&credentials)?;
         match get_usage_limits(&credentials, &config, &token, proxy.as_ref()).await {
             Ok(usage) => {
                 let mut should_persist = false;

@@ -161,7 +161,16 @@ impl KiroEndpoint for IdeEndpoint {
             "https://{}/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST&isEmailRequired=true",
             host
         );
-        if let Some(profile_arn) = Self::mcp_profile_arn_header_value(ctx.credentials) {
+        // getUsageLimits 的 profileArn 走 URL query（不是 x-amzn-kiro-profile-arn 头），Enterprise/
+        // Q Developer 账号需要它，IdC/SSO 也应带（参考 Kiro-Go）。用凭据自身的 profileArn，不用
+        // mcp_profile_arn_header_value（后者对 SSO 返回 None——那是给 MCP 头抑制用的）。
+        if let Some(profile_arn) = ctx
+            .credentials
+            .profile_arn
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             url.push_str(&format!("&profileArn={}", urlencoding::encode(profile_arn)));
         }
 
