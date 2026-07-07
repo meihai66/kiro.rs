@@ -1,5 +1,18 @@
 # Changelog
 
+## [v1.1.61] - 2026-07-07
+
+### 新增
+
+- **设置页可配置模型映射（支持哪些模型）** — 新增 `ModelMappingRule` / `ModelMappingConfig`（复用 `PricingRule` 的 `exact|prefix|contains|glob` 匹配逻辑，有序规则、第一条命中生效），`Config` 增加 `model_mapping` 字段（默认空）。`converter::resolve_model` 在配置为空时回退内置 `map_model`（保持向后兼容），配置非空时完全接管：未命中任何规则返回 `None` → 上层直接「模型不存在」，不做故障转移/退避、也不回退内置默认映射。`handlers` 从共享的 `AppState.global_config` 读取（admin 保存即时热更新），Admin 的 `get/update_global_config` 读写并持久化；设置页新增「模型映射」卡片，可增删改规则（标签 / 匹配串 / 匹配方式 / 目标 Kiro 模型 ID），镜像模型定价卡片的编辑模式 (`src/model/config.rs`, `src/anthropic/converter.rs`, `src/anthropic/handlers.rs`, `src/admin/service.rs`, `src/admin/types.rs`, `admin-ui/src/pages/settings-page.tsx`, `admin-ui/src/types/api.ts`)
+
+### 修复
+
+- **persist 串行化防丢改动** — `persist_credentials` 新增专用 `persist_lock`，串行化整段「取凭据快照 → 全量写库」。此前快照在锁外收集、写库也在锁外，两个并发 persist（如 admin 编辑与后台 token 刷新重叠）会让后提交者用过期快照覆盖先提交者的改动（last-writer-wins 静默丢改动）；现改为持锁期间才取快照，保证写入的是当下最新全量状态（锁序 `persist_lock → entries` 单向，无死锁）(`src/kiro/token_manager.rs`, `src/admin/service.rs`)
+- **「最佳 RPM」后端分析剔除已删除/已禁用凭据** — `rpm_analysis` 按 token_manager 快照中「启用中且仍存在」的凭据集过滤（`rpm_history` 无外键约束，凭据删除/禁用后采样仍会残留至多 7 天）。v1.1.60 只改了前端调参卡片，后端分析端点存在同类遗漏，此次补齐；`rpm_history_aggregate` 历史总量趋势保持不动 (`src/admin/service.rs`, `src/kiro/token_manager.rs`)
+- **审查 Medium 批次修复** — `build_client` 增加 `connect_timeout=30s`（仅覆盖 TCP/TLS 建连阶段，避免死代理/死上游挂起到整体 720s 超时才失败）；`set_cooldown_with_duration` 取 `max(现有到期, now+新时长)`，不再让迟到的短 429 缩短已有的长冷却（如容量压力 300s 被 60s 覆盖）；`import-token-json` 日志用 `mask_url_userinfo` 脱敏内嵌代理 URL 的账号密码；`Store::open` 后将 SQLite 库及 WAL/SHM 文件权限收紧为 0600（unix，best-effort）(`src/http_client.rs`, `src/kiro/cooldown.rs`, `src/admin/service.rs`, `src/storage/mod.rs`)
+- **审查发现的 4 处 correctness 问题** — `extract_session_id`/`mask_user_id`/`mask_key` 改用字符边界安全切片（`get(..36)` / `floor_char_boundary`），避免客户端可控的多字节 `user_id` 或自定义 API Key 触发 str 字节切片 panic；`add_credential_inner` 将「分配 ID → 构建 entry → push」合入同一把锁，避免并发添加算出重复 ID 导致后续持久化主键冲突；`UsageLimitsResponse` 新增 `has_usage_data()`，无 `usageBreakdownList` 时保持启用并跳过判定，避免把「数据缺失」误判为「余额为零」而禁用全部凭据；provider `client_cache` 改存 `(effective_proxy, client)`，代理池轮换/换绑/解绑后自动重建，避免复用旧（可能已过期）代理的 HTTP Client (`src/anthropic/converter.rs`, `src/kiro/token_manager.rs`, `src/kiro/model/usage_limits.rs`, `src/kiro/provider.rs`, `src/admin/service.rs`)
+
 ## [v1.1.60] - 2026-06-02
 
 ### 修复
