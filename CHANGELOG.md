@@ -1,5 +1,15 @@
 # Changelog
 
+## [v1.1.63] - 2026-07-08
+
+### 新增
+
+- **`/v1/models` 模型列表支持在设置页配置** — 原先 `GET /v1/models` 返回硬编码列表，增删模型需改代码重编译。现 `config.json` 新增 `models` 数组（`id` / `displayName` / `contextLength` / `maxCompletionTokens`），为空时回退内置列表、非空时完全接管；设置页新增「模型列表（/v1/models）」卡片，表格式增删改行，保存即时生效（共享 `Arc<RwLock<Config>>`，无需重启）；Admin API 全局配置 GET/PUT 支持 `models` 字段，保存时 trim 并丢弃 id 为空的行，显示名留空回退 id、上下文/最大输出为 0 时响应中省略对应字段。该列表只影响客户端可见的模型枚举，实际路由仍由「模型映射」规则决定 (`src/model/config.rs`, `src/anthropic/handlers.rs`, `src/admin/service.rs`, `src/admin/types.rs`, `admin-ui/src/pages/settings-page.tsx`, `admin-ui/src/types/api.ts`)
+
+### 其他
+
+- **管理界面 favicon 更换为橘色像素小狗** — 配色统一映射为橙色系（主体 `#FDB750`/`#DB711E` 不变，花朵粉/黄/绿改为蜜桃橙/金橙/浅金，眼鼻保留深褐 `#3D1F06` 保证小尺寸可辨识），清理原 SVG 的 p-id/class/DOCTYPE 冗余属性 (`admin-ui/public/favicon.svg`)
+
 ## [v1.1.62] - 2026-07-07
 
 ### 新增
