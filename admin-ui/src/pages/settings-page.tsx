@@ -13,6 +13,7 @@ import {
 import { extractErrorMessage } from '@/lib/utils'
 import { storage } from '@/lib/storage'
 import type {
+  ModelEntry,
   ModelMappingConfig,
   PricingConfig,
   UpdateCompressionConfigRequest,
@@ -117,6 +118,35 @@ const draftToModelMapping = (d: ModelMappingDraft): ModelMappingConfig => ({
   })),
 })
 
+// /v1/models 模型列表编辑态（数字字段用字符串保存，保存时再转数字）
+type ModelEntryDraft = {
+  id: string
+  displayName: string
+  contextLength: string
+  maxCompletionTokens: string
+}
+const modelsToDraft = (list: ModelEntry[]): ModelEntryDraft[] =>
+  (list ?? []).map((m) => ({
+    id: m.id,
+    displayName: m.displayName,
+    contextLength: m.contextLength ? String(m.contextLength) : '',
+    maxCompletionTokens: m.maxCompletionTokens
+      ? String(m.maxCompletionTokens)
+      : '',
+  }))
+const draftToModels = (list: ModelEntryDraft[]): ModelEntry[] =>
+  list
+    .map((m) => ({
+      id: m.id.trim(),
+      displayName: m.displayName.trim(),
+      contextLength: Math.max(0, parseInt(m.contextLength, 10) || 0),
+      maxCompletionTokens: Math.max(
+        0,
+        parseInt(m.maxCompletionTokens, 10) || 0
+      ),
+    }))
+    .filter((m) => m.id.length > 0)
+
 export function SettingsPage() {
   const { data: globalConfig, isLoading: globalLoading } = useGlobalConfig()
   const { data: proxyConfig, isLoading: proxyLoading } = useProxyConfig()
@@ -208,6 +238,9 @@ export function SettingsPage() {
     rules: [],
   })
 
+  // /v1/models 自定义模型列表（空 = 内置列表）
+  const [modelsList, setModelsList] = useState<ModelEntryDraft[]>([])
+
   const isLoading = globalLoading || proxyLoading
   const isPending = globalPending || proxyPending
 
@@ -277,6 +310,7 @@ export function SettingsPage() {
       if (globalConfig.modelMapping) {
         setModelMapping(modelMappingToDraft(globalConfig.modelMapping))
       }
+      setModelsList(modelsToDraft(globalConfig.models ?? []))
     }
     if (proxyConfig) {
       setProxyUrl(proxyConfig.proxyUrl || '')
@@ -559,6 +593,16 @@ export function SettingsPage() {
       hasGlobalChanges = true
     }
 
+    // /v1/models 模型列表（整体替换；空数组恢复内置列表）
+    if (
+      globalConfig &&
+      JSON.stringify(draftToModels(modelsList)) !==
+        JSON.stringify(globalConfig.models ?? [])
+    ) {
+      globalPayload.models = draftToModels(modelsList)
+      hasGlobalChanges = true
+    }
+
     const proxyPayload: Record<string, string | null> = {
       proxyUrl: proxyUrl.trim() || null,
     }
@@ -635,6 +679,23 @@ export function SettingsPage() {
     }))
   const removeMappingRule = (idx: number) =>
     setModelMapping((m) => ({ rules: m.rules.filter((_, i) => i !== idx) }))
+
+  // /v1/models 模型列表增删改
+  const updateModelEntry = (
+    idx: number,
+    key: keyof ModelEntryDraft,
+    value: string
+  ) =>
+    setModelsList((list) =>
+      list.map((m, i) => (i === idx ? { ...m, [key]: value } : m))
+    )
+  const addModelEntry = () =>
+    setModelsList((list) => [
+      ...list,
+      { id: '', displayName: '', contextLength: '', maxCompletionTokens: '' },
+    ])
+  const removeModelEntry = (idx: number) =>
+    setModelsList((list) => list.filter((_, i) => i !== idx))
 
   const updateDefault = (key: keyof PricingRateDraft, value: string) =>
     setPricing((p) => ({
@@ -1019,6 +1080,101 @@ export function SettingsPage() {
                 {modelMapping.rules.length === 0 && (
                   <p className="text-[11px] text-muted-foreground">
                     当前未配置任何规则，使用内置默认映射（sonnet / opus / haiku 各版本）。
+                  </p>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* 模型列表（/v1/models 返回内容） */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">模型列表（/v1/models）</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <p className="text-xs text-muted-foreground">
+                自定义 <code>GET /v1/models</code> 返回的模型列表（客户端的"可选模型"就来自这里）。
+                <b>只影响列表展示</b>，实际请求哪个模型走上面的「模型映射」。
+                模型 ID 必填；显示名留空时用 ID；上下文/最大输出留空或 0 时响应中省略对应字段。
+                清空全部行则恢复内置列表。
+              </p>
+              <div className="space-y-2">
+                <div className="hidden md:grid grid-cols-[1.6fr_1.4fr_1fr_1fr_auto] gap-2 text-xs text-muted-foreground px-1">
+                  <span>模型 ID</span>
+                  <span>显示名</span>
+                  <span>上下文长度</span>
+                  <span>最大输出</span>
+                  <span></span>
+                </div>
+                {modelsList.map((entry, idx) => (
+                  <div
+                    key={idx}
+                    className="grid grid-cols-2 md:grid-cols-[1.6fr_1.4fr_1fr_1fr_auto] gap-2 items-center"
+                  >
+                    <Input
+                      value={entry.id}
+                      placeholder="如 claude-opus-4-8"
+                      onChange={(e) =>
+                        updateModelEntry(idx, 'id', e.target.value)
+                      }
+                      disabled={isPending}
+                    />
+                    <Input
+                      value={entry.displayName}
+                      placeholder="如 Claude Opus 4.8"
+                      onChange={(e) =>
+                        updateModelEntry(idx, 'displayName', e.target.value)
+                      }
+                      disabled={isPending}
+                    />
+                    <Input
+                      type="number"
+                      min={0}
+                      value={entry.contextLength}
+                      placeholder="如 200000"
+                      onChange={(e) =>
+                        updateModelEntry(idx, 'contextLength', e.target.value)
+                      }
+                      disabled={isPending}
+                    />
+                    <Input
+                      type="number"
+                      min={0}
+                      value={entry.maxCompletionTokens}
+                      placeholder="如 64000"
+                      onChange={(e) =>
+                        updateModelEntry(
+                          idx,
+                          'maxCompletionTokens',
+                          e.target.value
+                        )
+                      }
+                      disabled={isPending}
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => removeModelEntry(idx)}
+                      disabled={isPending}
+                    >
+                      删除
+                    </Button>
+                  </div>
+                ))}
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={addModelEntry}
+                  disabled={isPending}
+                >
+                  + 添加模型
+                </Button>
+                {modelsList.length === 0 && (
+                  <p className="text-[11px] text-muted-foreground">
+                    当前未配置，使用内置列表（Sonnet 4.5/4.6、Opus 4.5~4.8、Haiku 4.5
+                    及各自 thinking / agentic 变体）。
                   </p>
                 )}
               </div>

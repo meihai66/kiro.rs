@@ -2131,6 +2131,7 @@ impl AdminService {
             error_log_excluded_status_codes: config.error_log_excluded_status_codes.clone(),
             pricing: config.pricing.clone(),
             model_mapping: config.model_mapping.clone(),
+            models: config.models.clone(),
         }
     }
 
@@ -2350,6 +2351,19 @@ impl AdminService {
             }
             if let Some(model_mapping) = &req.model_mapping {
                 config.model_mapping = model_mapping.clone();
+            }
+            if let Some(models) = &req.models {
+                // 整体替换：trim 各字段，丢弃 id 为空的行；空列表 = 恢复内置列表
+                config.models = models
+                    .iter()
+                    .map(|m| crate::model::config::ModelEntry {
+                        id: m.id.trim().to_string(),
+                        display_name: m.display_name.trim().to_string(),
+                        context_length: m.context_length.max(0),
+                        max_completion_tokens: m.max_completion_tokens.max(0),
+                    })
+                    .filter(|m| !m.id.is_empty())
+                    .collect();
             }
 
             config
@@ -3240,6 +3254,7 @@ mod tests {
             error_log_excluded_status_codes: None,
             pricing: None,
             model_mapping: None,
+            models: None,
         };
 
         let result = service.update_global_config(req).await;
@@ -3287,6 +3302,7 @@ mod tests {
             error_log_excluded_status_codes: None,
             pricing: None,
             model_mapping: None,
+            models: None,
         };
 
         let result = service.update_global_config(req).await;
@@ -3333,6 +3349,7 @@ mod tests {
             error_log_excluded_status_codes: None,
             pricing: None,
             model_mapping: None,
+            models: None,
         };
 
         let result = service.update_global_config(req).await;
@@ -3379,6 +3396,7 @@ mod tests {
             error_log_excluded_status_codes: None,
             pricing: None,
             model_mapping: None,
+            models: None,
         };
 
         let result = service.update_global_config(req).await;
@@ -3422,6 +3440,7 @@ mod tests {
             error_log_excluded_status_codes: None,
             pricing: None,
             model_mapping: None,
+            models: None,
         };
 
         let result = service.update_global_config(req).await;

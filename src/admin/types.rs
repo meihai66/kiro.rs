@@ -1041,6 +1041,8 @@ pub struct GlobalConfigResponse {
     pub pricing: crate::model::config::PricingConfig,
     /// 模型映射（请求模型名 → 上游 Kiro 模型 ID；为空则用内置映射）
     pub model_mapping: crate::model::config::ModelMappingConfig,
+    /// `/v1/models` 自定义模型列表（为空则用内置列表）
+    pub models: Vec<crate::model::config::ModelEntry>,
 }
 
 /// 压缩配置响应
@@ -1124,6 +1126,8 @@ pub struct UpdateGlobalConfigRequest {
     pub pricing: Option<crate::model::config::PricingConfig>,
     /// 模型映射（可选；提供则整体替换规则列表）
     pub model_mapping: Option<crate::model::config::ModelMappingConfig>,
+    /// `/v1/models` 自定义模型列表（可选；提供则整体替换，空数组恢复内置列表）
+    pub models: Option<Vec<crate::model::config::ModelEntry>>,
 }
 
 /// 更新压缩配置请求

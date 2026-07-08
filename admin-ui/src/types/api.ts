@@ -705,6 +705,18 @@ export interface ModelMappingConfig {
   rules: ModelMappingRule[]
 }
 
+// /v1/models 自定义模型条目（为空列表时服务端返回内置列表）
+export interface ModelEntry {
+  /** 模型 ID（如 claude-opus-4-8） */
+  id: string
+  /** 展示名；留空时用 id */
+  displayName: string
+  /** 上下文长度；0 = 响应中省略 */
+  contextLength: number
+  /** 最大输出 tokens；0 = 响应中省略 */
+  maxCompletionTokens: number
+}
+
 export interface GlobalConfigResponse {
   region: string
   credentialRpm: number | null
@@ -736,6 +748,7 @@ export interface GlobalConfigResponse {
   errorLogExcludedStatusCodes: number[]
   pricing: PricingConfig
   modelMapping: ModelMappingConfig
+  models: ModelEntry[]
 }
 
 export interface UpdateCompressionConfigRequest {
@@ -782,6 +795,7 @@ export interface UpdateGlobalConfigRequest {
   errorLogExcludedStatusCodes?: number[]
   pricing?: PricingConfig
   modelMapping?: ModelMappingConfig
+  models?: ModelEntry[]
 }
 
 // ===== 错误日志 =====

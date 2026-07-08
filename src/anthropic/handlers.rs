@@ -799,14 +799,60 @@ fn strip_empty_text_content_blocks(messages: &mut [super::types::Message]) -> us
 
 /// GET /v1/models
 ///
-/// 返回可用的模型列表。
-pub async fn get_models(OriginalUri(uri): OriginalUri) -> impl IntoResponse {
+/// 返回可用的模型列表。设置页配置了自定义列表时完全接管；否则返回内置列表。
+pub async fn get_models(
+    OriginalUri(uri): OriginalUri,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
     tracing::info!(
         path = %uri.path(),
         "Received request"
     );
 
-    let models = vec![
+    let custom = state
+        .global_config
+        .as_ref()
+        .map(|c| c.read().models.clone())
+        .unwrap_or_default();
+
+    let models = if custom.is_empty() {
+        builtin_models()
+    } else {
+        custom
+            .into_iter()
+            .map(|e| {
+                let id = e.id.trim().to_string();
+                let display_name = if e.display_name.trim().is_empty() {
+                    id.clone()
+                } else {
+                    e.display_name.trim().to_string()
+                };
+                Model {
+                    id,
+                    object: "model".to_string(),
+                    created: 1735689600, // 自定义条目统一用固定时间戳（2025-01-01）
+                    owned_by: "anthropic".to_string(),
+                    display_name,
+                    model_type: "chat".to_string(),
+                    max_tokens: 32000,
+                    context_length: (e.context_length > 0).then_some(e.context_length),
+                    max_completion_tokens: (e.max_completion_tokens > 0)
+                        .then_some(e.max_completion_tokens),
+                    thinking: Some(true),
+                }
+            })
+            .collect()
+    };
+
+    Json(ModelsResponse {
+        object: "list".to_string(),
+        data: models,
+    })
+}
+
+/// 内置模型列表（未配置自定义列表时的默认值）
+fn builtin_models() -> Vec<Model> {
+    vec![
         Model {
             id: "claude-sonnet-4-6".to_string(),
             object: "model".to_string(),
@@ -1059,12 +1105,7 @@ pub async fn get_models(OriginalUri(uri): OriginalUri) -> impl IntoResponse {
             max_completion_tokens: Some(64_000),
             thinking: Some(true),
         },
-    ];
-
-    Json(ModelsResponse {
-        object: "list".to_string(),
-        data: models,
-    })
+    ]
 }
 
 /// POST /v1/messages

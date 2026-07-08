@@ -244,6 +244,11 @@ pub struct Config {
     #[serde(default)]
     pub model_mapping: ModelMappingConfig,
 
+    /// `/v1/models` 返回的自定义模型列表（设置页可编辑）。
+    /// 为空（默认）时返回内置模型列表；非空时完全接管。
+    #[serde(default)]
+    pub models: Vec<ModelEntry>,
+
     /// 配置文件路径（运行时元数据，不写入 JSON）
     #[serde(skip)]
     config_path: Option<PathBuf>,
@@ -446,6 +451,25 @@ impl ModelMappingConfig {
             .map(|r| r.model.trim().to_string())
             .filter(|m| !m.is_empty())
     }
+}
+
+/// `/v1/models` 的一条自定义模型条目。
+///
+/// 只暴露常用字段；其余响应字段（object / owned_by / type 等）由 handler 填固定值。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelEntry {
+    /// 模型 ID（如 "claude-opus-4-8"）
+    pub id: String,
+    /// 展示名；留空时直接用 id
+    #[serde(default)]
+    pub display_name: String,
+    /// 上下文长度；0 = 响应中省略该字段
+    #[serde(default)]
+    pub context_length: i32,
+    /// 最大输出 tokens；0 = 响应中省略该字段
+    #[serde(default)]
+    pub max_completion_tokens: i32,
 }
 
 /// 极简 glob 匹配：仅支持 `*`（任意串）与 `?`（任意单字符），其余字面匹配。
@@ -753,6 +777,7 @@ impl Default for Config {
             error_log_excluded_status_codes: Vec::new(),
             pricing: PricingConfig::default(),
             model_mapping: ModelMappingConfig::default(),
+            models: Vec::new(),
             config_path: None,
         }
     }
@@ -880,7 +905,11 @@ mod tests {
 
         // 空配置：无规则 → None（回退语义由 converter 决定）
         assert!(ModelMappingConfig::default().is_empty());
-        assert!(ModelMappingConfig::default().resolve("claude-opus-4-8").is_none());
+        assert!(
+            ModelMappingConfig::default()
+                .resolve("claude-opus-4-8")
+                .is_none()
+        );
 
         let cfg = ModelMappingConfig {
             rules: vec![
