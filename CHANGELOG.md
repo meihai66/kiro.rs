@@ -1,5 +1,11 @@
 # Changelog
 
+## [v1.1.65] - 2026-07-09
+
+### 优化
+
+- **凭据分布条改为占比混色（一行 10 格）** — 快照字段 `recentBuckets` 改为 `recentOutcomes` 原始序列（`s`/`e`/`r`，旧→新，最多 1000 字符），分块/统计逻辑下移到前端；分布条固定一行 10 格（每格 100 次，左旧右新），格色按成功(绿)/失败(红)/429(黄)占比加权混色，最新一格未满 100 次按次数部分填充；每凭据仅 10 个节点 + 组件级 memo，消除逐格渲染开销 (`src/kiro/token_manager.rs`, `src/admin/service.rs`, `src/admin/types.rs`, `admin-ui/src/pages/credentials-page.tsx`, `admin-ui/src/types/api.ts`)
+
 ## [v1.1.64] - 2026-07-09
 
 ### 新增
