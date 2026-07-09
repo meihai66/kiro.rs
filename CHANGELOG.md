@@ -1,5 +1,14 @@
 # Changelog
 
+## [v1.1.64] - 2026-07-09
+
+### 新增
+
+- **统计只计真实上游调用** — 成功/失败统计仅记录实际走到上游的请求（响应打 `UpstreamOutcome` 标记；本地错误、`count_tokens`/`models` 等本地处理不计入），未标记请求仍会刷新 API Key `last_used_at`；`UpstreamAttemptError` 错误包装 Display 透传，不影响既有字符串错误分类，`wrap_err` 闭包与 `reached_upstream` 单一判定入口收敛样板 (`src/anthropic/handlers.rs`, `src/anthropic/middleware.rs`, `src/anthropic/stream.rs`, `src/kiro/provider.rs`, `src/api_key_manager.rs`)
+- **错误日志按类保留 + 累计计数** — 错误日志携带凭据 ID 与上游状态码，流中断也落日志（`stream_interrupted`）；每类仅保留最新 100 条明细，新增 `error_log_counters` 累计计数（升级自动回填历史计数），insert 包事务；凭据级累计错误覆盖所有上游错误响应（400/402/5xx/自动禁用/bearer 失效首个 401），429 计数随统计缓存持久化、重启不清零 (`src/storage/mod.rs`, `src/storage/migration.rs`, `src/kiro/token_manager.rs`, `admin-ui/src/pages/error-logs-page.tsx`)
+- **凭据表最近请求分布条** — 凭据表统计列下方新增最近 1000 次请求分布条，每格聚合 100 次，绿（成功）/红（失败）/黄（429）堆叠显示；环形缓冲持久化，快照按桶聚合输出 `recentBuckets` (`src/kiro/token_manager.rs`, `src/storage/mod.rs`, `admin-ui/src/pages/credentials-page.tsx`)
+- **统计页「清空 429」按钮** — 新增 `POST /stats/reset-rate-limits` Admin 端点，可一键清零全部凭据的 429 计数 (`src/admin/router.rs`, `src/admin/handlers.rs`, `src/admin/service.rs`, `admin-ui/src/pages/stats-page.tsx`)
+
 ## [v1.1.63] - 2026-07-08
 
 ### 新增
