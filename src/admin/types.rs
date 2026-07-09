@@ -104,8 +104,8 @@ pub struct CredentialStatusItem {
     pub total_value_usd: f64,
     /// 按模型细分的累计用量与价值（按价值降序）
     pub model_stats: Vec<ModelUsageStat>,
-    /// 最近请求结果分桶（旧 → 新，每桶 [成功, 失败, 429]，每桶 100 次，最多 10 桶）
-    pub recent_buckets: Vec<[u32; 3]>,
+    /// 最近请求结果序列（s=成功 e=失败 r=429，旧 → 新，最多 1000 个字符）
+    pub recent_outcomes: String,
 }
 
 /// 单个模型的累计用量与价值（展示用）

@@ -794,9 +794,7 @@ struct CredentialEntry {
 
 /// 最近请求结果环形缓冲容量
 const RECENT_OUTCOMES_CAP: usize = 1000;
-/// 分布条每桶请求数
-const RECENT_OUTCOMES_BUCKET: usize = 100;
-/// 请求结果类型（recent_outcomes 元素值 / 分桶数组下标）
+/// 请求结果类型（recent_outcomes 元素值）
 const OUTCOME_SUCCESS: u8 = 0;
 const OUTCOME_ERROR: u8 = 1;
 const OUTCOME_RATE_LIMIT: u8 = 2;
@@ -807,27 +805,6 @@ fn push_recent_outcome(dq: &mut VecDeque<u8>, outcome: u8) {
         dq.pop_front();
     }
     dq.push_back(outcome);
-}
-
-/// 把环形缓冲按 RECENT_OUTCOMES_BUCKET 分桶（旧 → 新），
-/// 每桶为 [成功, 失败, 429] 计数；最后一桶可能不满（仍在累积）。
-fn bucket_recent_outcomes(dq: &VecDeque<u8>) -> Vec<[u32; 3]> {
-    let mut out = Vec::with_capacity(dq.len().div_ceil(RECENT_OUTCOMES_BUCKET));
-    let mut cur = [0u32; 3];
-    let mut n = 0usize;
-    for &o in dq.iter() {
-        cur[o.min(2) as usize] += 1;
-        n += 1;
-        if n == RECENT_OUTCOMES_BUCKET {
-            out.push(cur);
-            cur = [0; 3];
-            n = 0;
-        }
-    }
-    if n > 0 {
-        out.push(cur);
-    }
-    out
 }
 
 /// recent_outcomes ↔ 持久化字符串（s=成功 e=失败 r=429）
@@ -975,8 +952,8 @@ pub struct CredentialEntrySnapshot {
     pub credential_rpm: Option<u32>,
     /// 按模型累计用量（原始计数；价值由上层按定价换算）
     pub model_usage: HashMap<String, ModelUsage>,
-    /// 最近请求结果分桶（旧 → 新，每桶 [成功, 失败, 429]，每桶 100 次，最多 10 桶）
-    pub recent_buckets: Vec<[u32; 3]>,
+    /// 最近请求结果序列（s=成功 e=失败 r=429，旧 → 新，最多 1000 个字符）
+    pub recent_outcomes: String,
 }
 
 /// 凭据管理器状态快照
@@ -3438,7 +3415,7 @@ impl MultiTokenManager {
                         cooldown_remaining_secs,
                         credential_rpm: e.credentials.rpm,
                         model_usage: e.model_usage.clone(),
-                        recent_buckets: bucket_recent_outcomes(&e.recent_outcomes),
+                        recent_outcomes: encode_recent_outcomes(&e.recent_outcomes),
                     }
                 })
                 .collect(),
@@ -4841,7 +4818,7 @@ mod tests {
     }
 
     #[test]
-    fn test_recent_outcomes_ring_bucket_and_roundtrip() {
+    fn test_recent_outcomes_ring_and_roundtrip() {
         // 环形缓冲：超容量淘汰最旧的
         let mut dq = VecDeque::new();
         for _ in 0..RECENT_OUTCOMES_CAP {
@@ -4851,7 +4828,14 @@ mod tests {
         assert_eq!(dq.len(), RECENT_OUTCOMES_CAP);
         assert_eq!(*dq.back().unwrap(), OUTCOME_RATE_LIMIT);
 
-        // 分桶：250 条 → [100, 100, 50]，计数按类型归位
+        // 编码保持顺序（旧 → 新），三种结果字符正确
+        let mut dq = VecDeque::new();
+        push_recent_outcome(&mut dq, OUTCOME_ERROR);
+        push_recent_outcome(&mut dq, OUTCOME_SUCCESS);
+        push_recent_outcome(&mut dq, OUTCOME_RATE_LIMIT);
+        assert_eq!(encode_recent_outcomes(&dq), "esr");
+
+        // 编解码 roundtrip
         let mut dq = VecDeque::new();
         for i in 0..250 {
             let o = match i % 10 {
@@ -4861,13 +4845,6 @@ mod tests {
             };
             push_recent_outcome(&mut dq, o);
         }
-        let buckets = bucket_recent_outcomes(&dq);
-        assert_eq!(buckets.len(), 3);
-        assert_eq!(buckets[0], [80, 10, 10]);
-        assert_eq!(buckets[1], [80, 10, 10]);
-        assert_eq!(buckets[2], [40, 5, 5]);
-
-        // 编解码 roundtrip（保持顺序）
         let decoded = decode_recent_outcomes(&encode_recent_outcomes(&dq));
         assert_eq!(decoded, dq);
 

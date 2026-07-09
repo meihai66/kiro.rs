@@ -827,7 +827,7 @@ impl AdminService {
                     credit_usage_total,
                     total_value_usd,
                     model_stats,
-                    recent_buckets: entry.recent_buckets,
+                    recent_outcomes: entry.recent_outcomes,
                 }
             })
             .collect();

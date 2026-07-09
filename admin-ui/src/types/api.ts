@@ -55,8 +55,8 @@ export interface CredentialStatusItem {
   rpm: number
   /** 累计 429 触发次数（随统计缓存持久化，重启不清零；「清空统计」时归零） */
   rateLimitCount: number
-  /** 最近请求结果分桶（旧 → 新，每桶 [成功, 失败, 429]，每桶 100 次，最多 10 桶） */
-  recentBuckets?: [number, number, number][]
+  /** 最近请求结果序列（s=成功 e=失败 r=429，旧 → 新，最多 1000 个字符） */
+  recentOutcomes?: string
   /** 允许超额使用：开启后即使额度用尽也不主动禁用（凭据级开关，与上游账号 overageStatus 不同） */
   allowOveruse: boolean
   /** 当前冷却原因（None/缺省 表示不在冷却中） */
