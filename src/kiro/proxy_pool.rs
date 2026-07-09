@@ -333,11 +333,7 @@ impl ProxyPool {
     /// 仅返回剩余有效期 > `min_validity_hours` 的代理
     ///
     /// 成功返回代理 id，并把 credential_id 写入 bound_credential_ids（持久化）
-    pub fn auto_bind(
-        &self,
-        credential_id: u64,
-        min_validity_hours: i64,
-    ) -> anyhow::Result<String> {
+    pub fn auto_bind(&self, credential_id: u64, min_validity_hours: i64) -> anyhow::Result<String> {
         let chosen_id = {
             let now = Utc::now();
             let mut entries = self.entries.write();
@@ -732,8 +728,7 @@ pub async fn test_proxy(
         match client.get(url).send().await {
             Ok(resp) if resp.status().is_success() => {
                 let elapsed = start.elapsed().as_millis() as u64;
-                let body: serde_json::Value =
-                    resp.json().await.unwrap_or(serde_json::Value::Null);
+                let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
                 let ip = body
                     .get("ip")
                     .and_then(|v| v.as_str())
@@ -784,7 +779,11 @@ pub fn parse_host_port_user_pass_line(line: &str) -> anyhow::Result<(String, Str
         anyhow::bail!("host 或 port 为空: {}", line);
     }
     let _: u16 = port.parse().context("port 必须是有效端口号")?;
-    Ok((format!("{}:{}", host, port), user.to_string(), pass.to_string()))
+    Ok((
+        format!("{}:{}", host, port),
+        user.to_string(),
+        pass.to_string(),
+    ))
 }
 
 /// 从 `scheme://host:port[/path?query]` 形式的代理 URL 中抠出 `host:port`。
@@ -800,7 +799,10 @@ pub fn host_port_of(url: &str) -> &str {
         .unwrap_or(after_scheme);
     let no_query = no_path.split('?').next().unwrap_or(no_path);
     // URL 习惯上不会带 user:pass（add_many 入口已 split），保险起见再削一下
-    no_query.rsplit_once('@').map(|(_, hp)| hp).unwrap_or(no_query)
+    no_query
+        .rsplit_once('@')
+        .map(|(_, hp)| hp)
+        .unwrap_or(no_query)
 }
 
 /// 拼接代理 URL：scheme://host:port
@@ -859,9 +861,11 @@ mod tests {
     fn test_auto_bind_picks_widest_then_longest() {
         let pool = ProxyPool::empty();
         // p1: 1 slot 100h；p2: 2 slot 50h；p3: 2 slot 200h
-        pool.entries
-            .write()
-            .extend([fresh_entry("p1", 1, 100), fresh_entry("p2", 2, 50), fresh_entry("p3", 2, 200)]);
+        pool.entries.write().extend([
+            fresh_entry("p1", 1, 100),
+            fresh_entry("p2", 2, 50),
+            fresh_entry("p3", 2, 200),
+        ]);
 
         // 自动绑定凭据 1：剩余槽位 2 优先（p2、p3），其中到期更远的 p3 胜出
         let chosen = pool.auto_bind(1, 24).unwrap();
@@ -1043,7 +1047,10 @@ mod tests {
     fn test_host_port_of_basic() {
         assert_eq!(host_port_of("http://1.2.3.4:8080"), "1.2.3.4:8080");
         assert_eq!(host_port_of("socks5://1.2.3.4:1080"), "1.2.3.4:1080");
-        assert_eq!(host_port_of("https://example.com:443/path?x=1"), "example.com:443");
+        assert_eq!(
+            host_port_of("https://example.com:443/path?x=1"),
+            "example.com:443"
+        );
         // 没有 scheme 时退化为整串
         assert_eq!(host_port_of("1.2.3.4:8080"), "1.2.3.4:8080");
     }

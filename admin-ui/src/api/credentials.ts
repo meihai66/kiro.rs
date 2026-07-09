@@ -209,6 +209,12 @@ export async function resetAllStats(): Promise<SuccessResponse> {
   return data
 }
 
+// 仅清空所有凭据的累计 429 计数（成功/错误/用量统计不动）
+export async function resetRateLimitStats(): Promise<SuccessResponse> {
+  const { data } = await api.post<SuccessResponse>('/stats/reset-rate-limits')
+  return data
+}
+
 // 批量导入 token.json
 export async function importTokenJson(
   req: ImportTokenJsonRequest

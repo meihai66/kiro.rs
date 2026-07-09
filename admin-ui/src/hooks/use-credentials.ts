@@ -19,6 +19,7 @@ import {
   getCredentialStats,
   resetCredentialStats,
   resetAllStats,
+  resetRateLimitStats,
   importTokenJson,
   getProxyConfig,
   updateProxyConfig,
@@ -232,6 +233,17 @@ export function useResetAllStats() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['credentials'] })
       queryClient.invalidateQueries({ queryKey: ['credential-stats'] })
+    },
+  })
+}
+
+// 仅清空所有凭据的累计 429 计数
+export function useResetRateLimitStats() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () => resetRateLimitStats(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
     },
   })
 }

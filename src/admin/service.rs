@@ -685,6 +685,34 @@ impl AdminService {
         Ok(())
     }
 
+    /// 各错误类型的累计次数与当前留存条数
+    pub fn error_log_kind_stats(&self) -> Result<serde_json::Value, AdminServiceError> {
+        let store = self.store.as_ref().ok_or_else(|| {
+            AdminServiceError::InvalidRequest("错误日志功能需要 SQLite store".into())
+        })?;
+        let stats = store
+            .error_log_kind_stats()
+            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        let total_cumulative: u64 = stats.iter().map(|s| s.total).sum();
+        Ok(serde_json::json!({
+            "kinds": stats
+                .iter()
+                .map(|s| serde_json::json!({
+                    "errorKind": s.error_kind,
+                    "total": s.total,
+                    "retained": s.retained,
+                }))
+                .collect::<Vec<_>>(),
+            "totalCumulative": total_cumulative,
+            "maxPerKind": crate::storage::ERROR_LOG_MAX_PER_KIND,
+        }))
+    }
+
+    /// 仅清空所有凭据的累计 429 计数（success/error/用量统计不动）。返回处理的凭据数。
+    pub fn reset_rate_limit_stats(&self) -> usize {
+        self.token_manager.reset_all_rate_limit_counts()
+    }
+
     pub fn clear_error_logs(
         &self,
         req: &super::types::ClearErrorLogsRequest,
@@ -799,6 +827,7 @@ impl AdminService {
                     credit_usage_total,
                     total_value_usd,
                     model_stats,
+                    recent_buckets: entry.recent_buckets,
                 }
             })
             .collect();

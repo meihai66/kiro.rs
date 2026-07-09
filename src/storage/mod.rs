@@ -141,8 +141,7 @@ impl Store {
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
         // 加载 bindings
-        let mut bind_stmt =
-            conn.prepare("SELECT proxy_id, credential_id FROM proxy_bindings")?;
+        let mut bind_stmt = conn.prepare("SELECT proxy_id, credential_id FROM proxy_bindings")?;
         let binds: Vec<(String, u64)> = bind_stmt
             .query_map([], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
@@ -246,7 +245,13 @@ impl Store {
     // ============ RPM history ============
 
     /// 写一个分钟的 RPM 数据点（count = 该分钟末 60s 窗口 RPM，rl_count = 该分钟新增 429 数）
-    pub fn record_rpm(&self, cred_id: u64, minute_ts: i64, count: u32, rl_count: u32) -> Result<()> {
+    pub fn record_rpm(
+        &self,
+        cred_id: u64,
+        minute_ts: i64,
+        count: u32,
+        rl_count: u32,
+    ) -> Result<()> {
         let conn = self.conn()?;
         conn.execute(
             "INSERT INTO rpm_history(credential_id, minute_ts, count, rl_count) VALUES (?1, ?2, ?3, ?4) \
@@ -459,10 +464,7 @@ impl Store {
             return Ok(());
         }
         p.push(id.into());
-        let sql = format!(
-            "UPDATE api_keys SET {} WHERE id = ?",
-            sets.join(", ")
-        );
+        let sql = format!("UPDATE api_keys SET {} WHERE id = ?", sets.join(", "));
         conn.execute(&sql, rusqlite::params_from_iter(p.iter()))?;
         Ok(())
     }
@@ -488,11 +490,19 @@ impl Store {
     /// 用于"清空统计"按钮——不动 RPM 历史和错误日志。
     pub fn reset_all_request_counts(&self) -> Result<u64> {
         let conn = self.conn()?;
-        let n = conn.execute(
-            "UPDATE api_keys SET success_count = 0, fail_count = 0",
-            [],
-        )?;
+        let n = conn.execute("UPDATE api_keys SET success_count = 0, fail_count = 0", [])?;
         Ok(n as u64)
+    }
+
+    /// 仅刷新 last_used_at（不计成功/失败）。
+    /// 用于未走上游的请求（count_tokens / models / 本地错误），保证「最后使用时间」仍然准确。
+    pub fn touch_api_key(&self, id: i64) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE api_keys SET last_used_at = ?2 WHERE id = ?1",
+            params![id, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
     }
 
     /// 原子计数：调用成功 / 失败 + last_used_at
@@ -511,9 +521,14 @@ impl Store {
     // ============ Error logs ============
 
     /// 写入一条错误日志。返回新行 id。
+    ///
+    /// 同时维护每类累计计数（error_log_counters，修剪不影响），
+    /// 并把该类日志修剪到最新 [`ERROR_LOG_MAX_PER_KIND`] 条。
+    /// 三条语句包在同一事务：保证计数与日志原子一致，并合并为一次提交。
     pub fn insert_error_log(&self, log: &ErrorLogInsert) -> Result<i64> {
         let conn = self.conn()?;
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO error_logs(at, credential_id, endpoint, status_code, upstream_status, \
              error_kind, model, summary, request_method, request_path, request_headers, \
              response_headers, request_body, response_body, user_id, request_id, disable_reason) \
@@ -538,7 +553,43 @@ impl Store {
                 log.disable_reason.as_deref(),
             ],
         )?;
-        Ok(conn.last_insert_rowid())
+        let id = tx.last_insert_rowid();
+
+        // 累计计数（清空全部日志时才重置）
+        tx.execute(
+            "INSERT INTO error_log_counters(error_kind, total) VALUES (?1, 1) \
+             ON CONFLICT(error_kind) DO UPDATE SET total = total + 1",
+            params![log.error_kind.as_str()],
+        )?;
+
+        // 按类保留最新 N 条
+        tx.execute(
+            "DELETE FROM error_logs WHERE error_kind = ?1 AND id NOT IN (\
+                SELECT id FROM error_logs WHERE error_kind = ?1 ORDER BY id DESC LIMIT ?2\
+             )",
+            params![log.error_kind.as_str(), ERROR_LOG_MAX_PER_KIND as i64],
+        )?;
+
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// 各错误类型的累计次数（total，修剪/单条删除不影响）与当前留存条数（retained）。
+    pub fn error_log_kind_stats(&self) -> Result<Vec<ErrorLogKindStat>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT c.error_kind, c.total, \
+             (SELECT COUNT(*) FROM error_logs l WHERE l.error_kind = c.error_kind) \
+             FROM error_log_counters c ORDER BY c.total DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(ErrorLogKindStat {
+                error_kind: r.get(0)?,
+                total: r.get::<_, i64>(1)? as u64,
+                retained: r.get::<_, i64>(2)? as u64,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
     }
 
     /// 列表查询：仅返回轻量摘要字段，request_body / response_body 不取，
@@ -613,8 +664,7 @@ impl Store {
             args.len() + 2,
         );
         let mut stmt = conn.prepare(&list_sql)?;
-        let mut params_iter: Vec<&dyn rusqlite::ToSql> =
-            args.iter().map(|a| a.as_ref()).collect();
+        let mut params_iter: Vec<&dyn rusqlite::ToSql> = args.iter().map(|a| a.as_ref()).collect();
         let limit_box: i64 = limit.min(500) as i64;
         let offset_box: i64 = offset as i64;
         params_iter.push(&limit_box);
@@ -692,13 +742,23 @@ impl Store {
                 "DELETE FROM error_logs WHERE at < ?1",
                 params![t.to_rfc3339()],
             )?,
-            None => conn.execute("DELETE FROM error_logs", [])?,
+            None => {
+                // 清空全部时同步重置各类累计计数
+                let n = conn.execute("DELETE FROM error_logs", [])?;
+                conn.execute("DELETE FROM error_log_counters", [])?;
+                n
+            }
         };
         Ok(n as u64)
     }
 
     /// 按数量上限 + 按天数清理旧日志。返回删除条数。
     /// max_count=0 表示不按数量限；max_age_days=0 表示不按天数限。
+    ///
+    /// 与 insert 时的按类保留（[`ERROR_LOG_MAX_PER_KIND`]）叠加生效：
+    /// 按类保留把表大小封顶在「类型数 × 100」；本方法是全局兜底，
+    /// 用户把 max_count / max_age_days 配得更小时可把留存进一步压低
+    ///（此时前端的 retained 可能低于 100，属预期）。累计计数不受影响。
     pub fn prune_error_logs(&self, max_count: u64, max_age_days: u32) -> Result<u64> {
         let conn = self.conn()?;
         let mut deleted: u64 = 0;
@@ -737,6 +797,19 @@ pub struct BalanceCacheRow {
 }
 
 // ============ Error logs ============
+
+/// 每种错误类型（error_kind）最多保留的最新日志条数
+pub const ERROR_LOG_MAX_PER_KIND: u64 = 100;
+
+/// 每类错误的累计次数与当前留存条数
+#[derive(Debug, Clone)]
+pub struct ErrorLogKindStat {
+    pub error_kind: String,
+    /// 累计发生次数（修剪/单条删除不影响；「清空全部」时归零）
+    pub total: u64,
+    /// 当前留存条数（≤ ERROR_LOG_MAX_PER_KIND）
+    pub retained: u64,
+}
 
 /// 写入错误日志的输入结构
 #[derive(Debug, Clone)]
@@ -969,8 +1042,8 @@ mod tests {
     fn temp_store() -> (Arc<Store>, PathBuf) {
         static SEQ: AtomicU32 = AtomicU32::new(0);
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir()
-            .join(format!("kiro_rpm_test_{}_{}.db", std::process::id(), n));
+        let path =
+            std::env::temp_dir().join(format!("kiro_rpm_test_{}_{}.db", std::process::id(), n));
         let _ = std::fs::remove_file(&path);
         let store = Store::open(&path).expect("open store");
         (store, path)
@@ -1005,6 +1078,123 @@ mod tests {
         let rows2 = store.rpm_analysis_all(1).unwrap();
         assert!(rows2.contains(&(1, 95, 12)));
         assert!(!rows2.contains(&(1, 90, 9)));
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn error_log(kind: &str, summary: &str) -> ErrorLogInsert {
+        ErrorLogInsert {
+            at: Utc::now(),
+            credential_id: Some(1),
+            endpoint: None,
+            status_code: 502,
+            upstream_status: Some(500),
+            error_kind: kind.to_string(),
+            model: None,
+            summary: summary.to_string(),
+            request_method: None,
+            request_path: None,
+            request_headers: None,
+            response_headers: None,
+            request_body: None,
+            response_body: None,
+            user_id: None,
+            request_id: None,
+            disable_reason: None,
+        }
+    }
+
+    #[test]
+    fn test_error_log_per_kind_retention_and_counters() {
+        let (store, path) = temp_store();
+
+        // 写入超过上限的同类日志：只留存最新 ERROR_LOG_MAX_PER_KIND 条，累计计数不受修剪影响
+        let overflow = ERROR_LOG_MAX_PER_KIND + 20;
+        for i in 0..overflow {
+            store
+                .insert_error_log(&error_log("rate_limit", &format!("rl-{}", i)))
+                .unwrap();
+        }
+        // 另一类少量写入，验证互不影响
+        for i in 0..3 {
+            store
+                .insert_error_log(&error_log("auth", &format!("auth-{}", i)))
+                .unwrap();
+        }
+
+        let stats = store.error_log_kind_stats().unwrap();
+        let rl = stats.iter().find(|s| s.error_kind == "rate_limit").unwrap();
+        assert_eq!(rl.total, overflow);
+        assert_eq!(rl.retained, ERROR_LOG_MAX_PER_KIND);
+        let auth = stats.iter().find(|s| s.error_kind == "auth").unwrap();
+        assert_eq!(auth.total, 3);
+        assert_eq!(auth.retained, 3);
+
+        // 留存的是最新的：最旧的 20 条已被修剪
+        let (items, total) = store
+            .list_error_logs(
+                &ErrorLogFilter {
+                    error_kinds: vec!["rate_limit".to_string()],
+                    ..Default::default()
+                },
+                500,
+                0,
+            )
+            .unwrap();
+        assert_eq!(total, ERROR_LOG_MAX_PER_KIND);
+        assert!(items.iter().all(|it| {
+            let n: u64 = it.summary.trim_start_matches("rl-").parse().unwrap();
+            n >= 20
+        }));
+
+        // 单条删除：留存 -1，累计不变
+        let first_id = items[0].id;
+        assert!(store.delete_error_log(first_id).unwrap());
+        let stats = store.error_log_kind_stats().unwrap();
+        let rl = stats.iter().find(|s| s.error_kind == "rate_limit").unwrap();
+        assert_eq!(rl.total, overflow);
+        assert_eq!(rl.retained, ERROR_LOG_MAX_PER_KIND - 1);
+
+        // 清空全部：累计计数一并归零
+        store.clear_error_logs(None).unwrap();
+        assert!(store.error_log_kind_stats().unwrap().is_empty());
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_error_log_counters_backfill_on_upgrade() {
+        let (store, path) = temp_store();
+        // 模拟旧版本库：只有日志行、无累计计数
+        store.insert_error_log(&error_log("auth", "a")).unwrap();
+        store
+            .insert_error_log(&error_log("rate_limit", "b"))
+            .unwrap();
+        store
+            .insert_error_log(&error_log("rate_limit", "c"))
+            .unwrap();
+        {
+            let conn = store.conn().unwrap();
+            conn.execute("DELETE FROM error_log_counters", []).unwrap();
+        }
+        drop(store);
+
+        // 升级路径：重新打开时 ensure_schema 用存量日志回填计数
+        let store = Store::open(&path).expect("reopen store");
+        let stats = store.error_log_kind_stats().unwrap();
+        let rl = stats.iter().find(|s| s.error_kind == "rate_limit").unwrap();
+        assert_eq!((rl.total, rl.retained), (2, 2));
+        let auth = stats.iter().find(|s| s.error_kind == "auth").unwrap();
+        assert_eq!((auth.total, auth.retained), (1, 1));
+
+        // 计数已存在时再次打开不得重复回填
+        drop(store);
+        let store = Store::open(&path).expect("reopen store again");
+        let stats = store.error_log_kind_stats().unwrap();
+        let rl = stats.iter().find(|s| s.error_kind == "rate_limit").unwrap();
+        assert_eq!(rl.total, 2);
 
         drop(store);
         let _ = std::fs::remove_file(&path);

@@ -53,8 +53,10 @@ export interface CredentialStatusItem {
   inFlight: number
   /** 最近 60 秒 RPM（实时） */
   rpm: number
-  /** 累计 429 触发次数（运行时统计；重启清零） */
+  /** 累计 429 触发次数（随统计缓存持久化，重启不清零；「清空统计」时归零） */
   rateLimitCount: number
+  /** 最近请求结果分桶（旧 → 新，每桶 [成功, 失败, 429]，每桶 100 次，最多 10 桶） */
+  recentBuckets?: [number, number, number][]
   /** 允许超额使用：开启后即使额度用尽也不主动禁用（凭据级开关，与上游账号 overageStatus 不同） */
   allowOveruse: boolean
   /** 当前冷却原因（None/缺省 表示不在冷却中） */
@@ -846,6 +848,21 @@ export interface ClearErrorLogsRequest {
 
 export interface ClearErrorLogsResponse {
   deleted: number
+}
+
+/** 单个错误类型的累计/留存统计 */
+export interface ErrorLogKindStat {
+  errorKind: string
+  /** 累计发生次数（修剪/单条删除不影响；「清空全部」时归零） */
+  total: number
+  /** 当前留存条数（每类最多保留 maxPerKind 条） */
+  retained: number
+}
+
+export interface ErrorLogKindStatsResponse {
+  kinds: ErrorLogKindStat[]
+  totalCumulative: number
+  maxPerKind: number
 }
 
 // ===== 对话测试 =====

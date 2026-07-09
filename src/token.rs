@@ -272,9 +272,7 @@ fn count_content_with_ctx(
             .iter()
             .map(|v| count_content_with_ctx(v, config, image_count))
             .sum(),
-        serde_json::Value::Object(obj) => {
-            estimate_content_block_with_ctx(obj, config, image_count)
-        }
+        serde_json::Value::Object(obj) => estimate_content_block_with_ctx(obj, config, image_count),
         _ => 0,
     }
 }

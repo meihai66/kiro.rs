@@ -13,13 +13,13 @@ pub mod token;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use api_key_manager::ApiKeyManager;
 use clap::Parser;
 use kiro::endpoint::{CliEndpoint, IdeEndpoint, KiroEndpoint};
 use kiro::model::credentials::KiroCredentials;
 use kiro::provider::KiroProvider;
 use kiro::proxy_pool::ProxyPool;
 use kiro::proxy_rotation;
-use api_key_manager::ApiKeyManager;
 use kiro::token_manager::MultiTokenManager;
 use std::sync::OnceLock;
 
@@ -289,8 +289,7 @@ async fn main() {
                         None => 0,
                     };
                     last_rl.insert(entry.id, cur);
-                    if let Err(e) =
-                        store_for_rpm.record_rpm(entry.id, minute_ts, entry.rpm, delta)
+                    if let Err(e) = store_for_rpm.record_rpm(entry.id, minute_ts, entry.rpm, delta)
                     {
                         tracing::warn!(credential_id = entry.id, "RPM 历史写入失败: {}", e);
                         break;
@@ -495,12 +494,12 @@ async fn main() {
                             if n_total == 0 {
                                 continue;
                             }
-                            let batch_max = ((n_total as u64 * 30 / target_secs).max(1)
+                            let batch_max = ((n_total as u64 * 30 / target_secs)
+                                .max(1)
                                 .min(n_total as u64))
                                 as usize;
-                            let concurrency = (cfg.read().balance_refresh_concurrency.max(1)
-                                as usize)
-                                .min(256);
+                            let concurrency =
+                                (cfg.read().balance_refresh_concurrency.max(1) as usize).min(256);
                             tracing::debug!(
                                 target_secs,
                                 candidates = n_total,

@@ -670,6 +670,9 @@ pub async fn handle_websearch_request(
     let (tool_use_id, mcp_request) = create_mcp_request(&query);
 
     // 3. 调用 Kiro MCP API
+    // upstream_outcome：Some(true)=上游成功；Some(false)=收到上游错误响应；
+    // None=本地/网络失败（不计入 API Key 统计）
+    let upstream_outcome: Option<bool>;
     let (search_results, final_cache_context) = match call_mcp_api(&provider, &mcp_request).await {
         Ok(api_result) => {
             let resolved_cache_context = match (cache_tracker, cache_profile) {
@@ -689,6 +692,7 @@ pub async fn handle_websearch_request(
                 }
                 _ => None,
             };
+            upstream_outcome = Some(true);
             (
                 parse_search_results(&api_result.response),
                 resolved_cache_context,
@@ -696,6 +700,8 @@ pub async fn handle_websearch_request(
         }
         Err(e) => {
             tracing::warn!("MCP API 调用失败: {}", e);
+            upstream_outcome =
+                crate::kiro::provider::UpstreamAttemptError::reached_upstream(&e).then_some(false);
             let fallback_cache_context = match (cache_tracker, cache_profile) {
                 (Some(_), Some(_)) => Some(WebSearchCacheContext::default()),
                 _ => None,
@@ -716,13 +722,19 @@ pub async fn handle_websearch_request(
             final_cache_context,
         );
 
-        return Response::builder()
+        let mut response = Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "text/event-stream")
             .header(header::CACHE_CONTROL, "no-cache")
             .header(header::CONNECTION, "keep-alive")
             .body(Body::from_stream(stream))
             .unwrap();
+        if let Some(ok) = upstream_outcome {
+            response
+                .extensions_mut()
+                .insert(crate::anthropic::middleware::UpstreamOutcome(ok));
+        }
+        return response;
     }
 
     let summary = generate_search_summary(&query, &search_results);
@@ -792,7 +804,13 @@ pub async fn handle_websearch_request(
         "usage": usage
     });
 
-    (StatusCode::OK, Json(response_body)).into_response()
+    let mut response = (StatusCode::OK, Json(response_body)).into_response();
+    if let Some(ok) = upstream_outcome {
+        response
+            .extensions_mut()
+            .insert(crate::anthropic::middleware::UpstreamOutcome(ok));
+    }
+    response
 }
 
 struct ParsedMcpCallResult {
@@ -811,22 +829,32 @@ async fn call_mcp_api(
 
     let api_result = provider.call_mcp(&request_body).await?;
 
-    let body = api_result.response.text().await?;
+    // 上游已 2xx：之后的失败（读 body / 解析 / MCP error 负载）也算「走到了上游」，
+    // 用 UpstreamAttemptError 包装（upstream_status=200），让调用方计入 API Key 统计
+    use crate::kiro::provider::UpstreamAttemptError;
+    let credential_id = api_result.credential_id;
+    let wrap_post = |e: anyhow::Error| UpstreamAttemptError::wrap(credential_id, Some(200), e);
+
+    let body = api_result
+        .response
+        .text()
+        .await
+        .map_err(|e| wrap_post(e.into()))?;
     tracing::debug!("MCP response: {}", body);
 
-    let mcp_response: McpResponse = serde_json::from_str(&body)?;
+    let mcp_response: McpResponse = serde_json::from_str(&body).map_err(|e| wrap_post(e.into()))?;
 
     if let Some(ref error) = mcp_response.error {
-        anyhow::bail!(
+        return Err(wrap_post(anyhow::anyhow!(
             "MCP error: {} - {}",
             error.code.unwrap_or(-1),
             error.message.as_deref().unwrap_or("Unknown error")
-        );
+        )));
     }
 
     Ok(ParsedMcpCallResult {
         response: mcp_response,
-        credential_id: api_result.credential_id,
+        credential_id,
     })
 }
 

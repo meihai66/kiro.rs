@@ -8,17 +8,17 @@ use axum::{
 use super::{
     handlers::{
         add_credential, batch_delete_proxies, batch_proxy_extend, batch_proxy_slots,
-        batch_unbind_proxies, bind_credential_proxy, delete_credential, delete_proxy,
-        batch_test_proxies, clear_error_logs, create_api_key, delete_api_key, delete_error_log,
+        batch_test_proxies, batch_unbind_proxies, bind_credential_proxy, clear_error_logs,
+        create_api_key, delete_api_key, delete_credential, delete_error_log, delete_proxy,
         export_credentials, force_refresh_token, get_all_credentials, get_cached_balances,
-        get_credential_balance, get_error_log, get_global_config, get_proxy_config,
-        get_rpm_analysis, get_rpm_history, get_rpm_history_aggregate, get_stats_summary,
-        import_proxies,
-        import_token_json, list_api_keys, list_credential_models, list_error_logs, list_proxies,
-        list_proxy_alerts, reset_all_stats, reset_failure_count, rotate_proxies_now, test_chat,
+        get_credential_balance, get_error_log, get_error_log_kind_stats, get_global_config,
+        get_proxy_config, get_rpm_analysis, get_rpm_history, get_rpm_history_aggregate,
+        get_stats_summary, import_proxies, import_token_json, list_api_keys,
+        list_credential_models, list_error_logs, list_proxies, list_proxy_alerts, reset_all_stats,
+        reset_failure_count, reset_rate_limit_stats, rotate_proxies_now,
         set_credential_allow_overuse, set_credential_disabled, set_credential_email,
         set_credential_endpoint, set_credential_priority, set_credential_region,
-        set_credential_rpm, set_overage_preference, test_proxy, unbind_credential_proxy,
+        set_credential_rpm, set_overage_preference, test_chat, test_proxy, unbind_credential_proxy,
         update_api_key, update_global_config, update_proxy_config,
     },
     middleware::{AdminState, admin_auth_middleware},
@@ -69,6 +69,7 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/stats/rpm-analysis", get(get_rpm_analysis))
         .route("/stats/summary", get(get_stats_summary))
         .route("/stats/reset", post(reset_all_stats))
+        .route("/stats/reset-rate-limits", post(reset_rate_limit_stats))
         .route("/test-chat", post(test_chat))
         .route(
             "/credentials/{id}/overage-preference",
@@ -91,10 +92,7 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/proxies/batch/test", post(batch_test_proxies))
         .route("/proxies/{id}", delete(delete_proxy))
         .route("/proxies/{id}/test", post(test_proxy))
-        .route(
-            "/credentials/{id}/bind-proxy",
-            post(bind_credential_proxy),
-        )
+        .route("/credentials/{id}/bind-proxy", post(bind_credential_proxy))
         .route(
             "/credentials/{id}/unbind-proxy",
             post(unbind_credential_proxy),
@@ -105,6 +103,7 @@ pub fn create_admin_router(state: AdminState) -> Router {
         )
         // 错误日志
         .route("/error-logs", get(list_error_logs))
+        .route("/error-logs/stats", get(get_error_log_kind_stats))
         .route("/error-logs/clear", post(clear_error_logs))
         .route(
             "/error-logs/{id}",

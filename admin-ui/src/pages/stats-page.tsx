@@ -5,7 +5,11 @@ import { Loader2, RotateCcw } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { useCredentials, useResetAllStats } from '@/hooks/use-credentials'
+import {
+  useCredentials,
+  useResetAllStats,
+  useResetRateLimitStats,
+} from '@/hooks/use-credentials'
 import { getProxies } from '@/api/proxies'
 import { getRpmHistoryAggregate, getStatsSummary } from '@/api/credentials'
 import { RpmTuningCard } from '@/components/rpm-tuning-card'
@@ -17,6 +21,7 @@ export function StatsPage() {
   const [hours, setHours] = useState<number>(24)
   const { data: creds } = useCredentials()
   const resetMut = useResetAllStats()
+  const resetRateLimitMut = useResetRateLimitStats()
   const { data: pool } = useQuery({
     queryKey: ['proxies'],
     queryFn: getProxies,
@@ -150,6 +155,29 @@ export function StatsPage() {
           </div>
           <Button
             size="sm"
+            variant="outline"
+            className="h-8"
+            disabled={resetRateLimitMut.isPending}
+            title="仅清空每凭据的累计 429 计数；成功/错误/产出价值等其他统计不动"
+            onClick={() => {
+              if (!confirm('确认清空所有凭据的累计 429 计数？\n\n成功/错误/产出价值等其他统计不受影响。'))
+                return
+              resetRateLimitMut.mutate(undefined, {
+                onSuccess: (r) => toast.success(r.message),
+                onError: (e) =>
+                  toast.error('清空失败：' + extractErrorMessage(e)),
+              })
+            }}
+          >
+            {resetRateLimitMut.isPending ? (
+              <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+            ) : (
+              <RotateCcw className="h-3.5 w-3.5 mr-1" />
+            )}
+            清空 429
+          </Button>
+          <Button
+            size="sm"
             variant="destructive"
             className="h-8"
             disabled={resetMut.isPending}
@@ -199,7 +227,10 @@ export function StatsPage() {
         </Card>
         <Card>
           <CardHeader className="pb-1">
-            <CardTitle className="text-xs font-medium text-muted-foreground">
+            <CardTitle
+              className="text-xs font-medium text-muted-foreground"
+              title="仅统计实际走到上游的调用；本地错误（JSON 解析失败、请求过大、无可用凭据、全员冷却等）与 count_tokens / models 请求不计入"
+            >
               总请求次数
             </CardTitle>
           </CardHeader>

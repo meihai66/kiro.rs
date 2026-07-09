@@ -3,6 +3,7 @@ import type {
   ClearErrorLogsRequest,
   ClearErrorLogsResponse,
   ErrorLogDetail,
+  ErrorLogKindStatsResponse,
   ErrorLogListResponse,
   ListErrorLogsParams,
 } from '@/types/api'
@@ -27,5 +28,11 @@ export async function clearErrorLogs(
   req: ClearErrorLogsRequest = {}
 ): Promise<ClearErrorLogsResponse> {
   const { data } = await api.post<ClearErrorLogsResponse>('/error-logs/clear', req)
+  return data
+}
+
+// 各错误类型的累计次数 + 当前留存条数
+export async function getErrorLogKindStats(): Promise<ErrorLogKindStatsResponse> {
+  const { data } = await api.get<ErrorLogKindStatsResponse>('/error-logs/stats')
   return data
 }

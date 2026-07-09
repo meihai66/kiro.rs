@@ -115,11 +115,7 @@ pub async fn run_one_round(
                     "代理池轮换：迁移凭据到剩余时间更长的代理"
                 );
                 if let Err(e) = pool.migrate_binding(cred_id, &slot_id, &new_slot) {
-                    tracing::warn!(
-                        credential_id = cred_id,
-                        "代理池轮换：迁移失败: {}",
-                        e
-                    );
+                    tracing::warn!(credential_id = cred_id, "代理池轮换：迁移失败: {}", e);
                     pool.push_alert(
                         AlertLevel::Error,
                         format!("凭据 #{} 代理迁移失败: {}", cred_id, e),
@@ -138,10 +134,7 @@ pub async fn run_one_round(
                 }
                 pool.push_alert(
                     AlertLevel::Info,
-                    format!(
-                        "凭据 #{} 已从代理 {} 迁移到 {}",
-                        cred_id, slot_id, new_slot
-                    ),
+                    format!("凭据 #{} 已从代理 {} 迁移到 {}", cred_id, slot_id, new_slot),
                 );
             }
             None => {

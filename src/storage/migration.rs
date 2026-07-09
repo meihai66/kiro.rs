@@ -112,17 +112,44 @@ CREATE INDEX IF NOT EXISTS idx_error_logs_at ON error_logs(at DESC);
 CREATE INDEX IF NOT EXISTS idx_error_logs_credential ON error_logs(credential_id);
 CREATE INDEX IF NOT EXISTS idx_error_logs_status ON error_logs(status_code);
 CREATE INDEX IF NOT EXISTS idx_error_logs_kind ON error_logs(error_kind);
+
+CREATE TABLE IF NOT EXISTS error_log_counters (
+    error_kind  TEXT PRIMARY KEY,
+    total       INTEGER NOT NULL DEFAULT 0
+);
 "#;
 
 pub fn ensure_schema(conn: &Connection) -> Result<()> {
-    conn.execute_batch(SCHEMA_SQL).context("初始化 SQLite schema 失败")?;
-    add_column_if_missing(conn, "credentials", "allow_overuse", "INTEGER NOT NULL DEFAULT 0")?;
+    conn.execute_batch(SCHEMA_SQL)
+        .context("初始化 SQLite schema 失败")?;
+    add_column_if_missing(
+        conn,
+        "credentials",
+        "allow_overuse",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     add_column_if_missing(conn, "credentials", "rpm", "INTEGER")?;
     add_column_if_missing(conn, "credentials", "last_overage_status", "TEXT")?;
     // 凭据自动禁用事件落 error_logs 时记录禁用原因（AccountSuspended/AuthenticationFailed 等）
     add_column_if_missing(conn, "error_logs", "disable_reason", "TEXT")?;
     // 每分钟 429 增量（用于「最佳 RPM」分析）；老库默认 0
-    add_column_if_missing(conn, "rpm_history", "rl_count", "INTEGER NOT NULL DEFAULT 0")?;
+    add_column_if_missing(
+        conn,
+        "rpm_history",
+        "rl_count",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    // error_log_counters 首次创建（表为空）时用存量日志回填各类累计计数，
+    // 避免升级后出现「累计 < 留存」的矛盾展示。回填值是下界（升级前被清理的
+    // 历史无从得知）；表非空时 WHERE 子查询保证本语句是 no-op。
+    conn.execute(
+        "INSERT INTO error_log_counters(error_kind, total) \
+         SELECT error_kind, COUNT(*) FROM error_logs \
+         WHERE NOT EXISTS (SELECT 1 FROM error_log_counters) \
+         GROUP BY error_kind",
+        [],
+    )
+    .context("回填 error_log_counters 失败")?;
     Ok(())
 }
 

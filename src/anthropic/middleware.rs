@@ -20,6 +20,17 @@ use crate::model::config::CompressionConfig;
 use super::cache_tracker::CacheTracker;
 use super::types::ErrorResponse;
 
+/// 本次响应对应的「上游调用结果」标记（由 /v1/messages 等 handler 写入响应 extensions）。
+///
+/// - `UpstreamOutcome(true)`：上游调用成功
+/// - `UpstreamOutcome(false)`：收到上游错误响应
+/// - 未插入：请求未走上游或在本地失败（JSON 解析失败、请求过大、无可用凭据、
+///   全员冷却时代理自答 429、count_tokens / models 等纯本地端点）
+///
+/// `auth_middleware` 只依据该标记记 API Key 成功/失败计数，本地错误一律不计入。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct UpstreamOutcome(pub bool);
+
 #[derive(Clone)]
 pub(crate) struct PromptCacheSnapshot {
     pub accounting_enabled: bool,
@@ -124,10 +135,7 @@ impl AppState {
         self
     }
 
-    pub fn with_global_config(
-        mut self,
-        config: Arc<RwLock<crate::model::config::Config>>,
-    ) -> Self {
+    pub fn with_global_config(mut self, config: Arc<RwLock<crate::model::config::Config>>) -> Self {
         self.global_config = Some(config);
         self
     }
@@ -167,7 +175,8 @@ impl AppState {
 ///
 /// - 鉴权失败 → 401
 /// - 并发超限 → 429 + Retry-After
-/// - 成功通过 → AuthGuard 在 drop 时根据响应 status 异步写 success/fail 计数
+/// - 成功通过 → AuthGuard 在 drop 时按响应 extensions 中的 [`UpstreamOutcome`]
+///   异步写 success/fail 计数；未标记（本地错误 / 未走上游）不计数
 pub async fn auth_middleware(
     State(state): State<AppState>,
     mut request: Request<Body>,
@@ -204,10 +213,11 @@ pub async fn auth_middleware(
             request.extensions_mut().insert(guard_slot);
             let response = next.run(request).await;
             if let Some(mut g) = guard_held.lock().take() {
-                if response.status().is_success() {
-                    g.mark_success();
-                } else {
-                    g.mark_fail();
+                // 只统计真实走到上游的调用：本地错误 / 纯本地端点未打标记 → 不计数
+                match response.extensions().get::<UpstreamOutcome>() {
+                    Some(UpstreamOutcome(true)) => g.mark_success(),
+                    Some(UpstreamOutcome(false)) => g.mark_fail(),
+                    None => {}
                 }
                 drop(g);
             }

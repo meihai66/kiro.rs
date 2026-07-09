@@ -14,10 +14,10 @@ use super::{
         AddCredentialRequest, BatchProxyDeleteRequest, BatchProxyExtendRequest,
         BatchProxySlotsRequest, BatchProxyUnbindRequest, BindProxyRequest, ClearErrorLogsRequest,
         CreateApiKeyRequest, ExportCredentialsRequest, ImportProxiesRequest,
-        ImportTokenJsonRequest, ListErrorLogsQuery, SetAllowOveruseRequest, SetCredentialRpmRequest,
-        SetDisabledRequest, SetEmailRequest, SetEndpointRequest, SetOveragePreferenceRequest,
-        SetPriorityRequest, SetRegionRequest, SuccessResponse, UpdateApiKeyRequest,
-        UpdateProxyConfigRequest,
+        ImportTokenJsonRequest, ListErrorLogsQuery, SetAllowOveruseRequest,
+        SetCredentialRpmRequest, SetDisabledRequest, SetEmailRequest, SetEndpointRequest,
+        SetOveragePreferenceRequest, SetPriorityRequest, SetRegionRequest, SuccessResponse,
+        UpdateApiKeyRequest, UpdateProxyConfigRequest,
     },
 };
 
@@ -280,6 +280,26 @@ pub async fn reset_all_stats(State(state): State<AdminState>) -> impl IntoRespon
     }
 }
 
+/// POST /api/admin/stats/reset-rate-limits
+/// 仅清空每凭据的累计 429 计数（success/错误/用量统计不动）
+pub async fn reset_rate_limit_stats(State(state): State<AdminState>) -> impl IntoResponse {
+    let n = state.service.reset_rate_limit_stats();
+    Json(SuccessResponse::new(format!(
+        "已清空 {} 个凭据的 429 计数",
+        n
+    )))
+    .into_response()
+}
+
+/// GET /api/admin/error-logs/stats
+/// 各错误类型的累计次数与当前留存条数
+pub async fn get_error_log_kind_stats(State(state): State<AdminState>) -> impl IntoResponse {
+    match state.service.error_log_kind_stats() {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
 /// POST /api/admin/test-chat
 /// 用 admin 凭据触发一次最小对话测试，返回模型回复文本和耗时。
 pub async fn test_chat(
@@ -428,8 +448,7 @@ pub async fn update_api_key(
     Json(req): Json<UpdateApiKeyRequest>,
 ) -> impl IntoResponse {
     match state.service.update_api_key(id, req) {
-        Ok(_) => Json(SuccessResponse::new(format!("API Key #{} 已更新", id)))
-            .into_response(),
+        Ok(_) => Json(SuccessResponse::new(format!("API Key #{} 已更新", id))).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
 }
@@ -439,8 +458,7 @@ pub async fn delete_api_key(
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
     match state.service.delete_api_key(id) {
-        Ok(_) => Json(SuccessResponse::new(format!("API Key #{} 已删除", id)))
-            .into_response(),
+        Ok(_) => Json(SuccessResponse::new(format!("API Key #{} 已删除", id))).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
 }
@@ -589,11 +607,7 @@ pub async fn bind_credential_proxy(
     Json(req): Json<BindProxyRequest>,
 ) -> impl IntoResponse {
     match state.service.bind_proxy_to_credential(id, req) {
-        Ok(_) => Json(SuccessResponse::new(format!(
-            "凭据 #{} 已绑定代理槽",
-            id
-        )))
-        .into_response(),
+        Ok(_) => Json(SuccessResponse::new(format!("凭据 #{} 已绑定代理槽", id))).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
 }

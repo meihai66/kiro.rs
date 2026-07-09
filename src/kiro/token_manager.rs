@@ -16,7 +16,7 @@ use chrono::{DateTime, Duration, Utc};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -788,6 +788,72 @@ struct CredentialEntry {
     rate_limit_count: Arc<AtomicU32>,
     /// 按模型累计用量（持久化；用于「产出价值」统计）
     model_usage: HashMap<String, ModelUsage>,
+    /// 最近 RECENT_OUTCOMES_CAP 次请求结果环形缓冲（持久化；前端分布条用）
+    recent_outcomes: VecDeque<u8>,
+}
+
+/// 最近请求结果环形缓冲容量
+const RECENT_OUTCOMES_CAP: usize = 1000;
+/// 分布条每桶请求数
+const RECENT_OUTCOMES_BUCKET: usize = 100;
+/// 请求结果类型（recent_outcomes 元素值 / 分桶数组下标）
+const OUTCOME_SUCCESS: u8 = 0;
+const OUTCOME_ERROR: u8 = 1;
+const OUTCOME_RATE_LIMIT: u8 = 2;
+
+/// 往环形缓冲追加一次请求结果，超容量时淘汰最旧的
+fn push_recent_outcome(dq: &mut VecDeque<u8>, outcome: u8) {
+    if dq.len() >= RECENT_OUTCOMES_CAP {
+        dq.pop_front();
+    }
+    dq.push_back(outcome);
+}
+
+/// 把环形缓冲按 RECENT_OUTCOMES_BUCKET 分桶（旧 → 新），
+/// 每桶为 [成功, 失败, 429] 计数；最后一桶可能不满（仍在累积）。
+fn bucket_recent_outcomes(dq: &VecDeque<u8>) -> Vec<[u32; 3]> {
+    let mut out = Vec::with_capacity(dq.len().div_ceil(RECENT_OUTCOMES_BUCKET));
+    let mut cur = [0u32; 3];
+    let mut n = 0usize;
+    for &o in dq.iter() {
+        cur[o.min(2) as usize] += 1;
+        n += 1;
+        if n == RECENT_OUTCOMES_BUCKET {
+            out.push(cur);
+            cur = [0; 3];
+            n = 0;
+        }
+    }
+    if n > 0 {
+        out.push(cur);
+    }
+    out
+}
+
+/// recent_outcomes ↔ 持久化字符串（s=成功 e=失败 r=429）
+fn encode_recent_outcomes(dq: &VecDeque<u8>) -> String {
+    dq.iter()
+        .map(|&o| match o {
+            OUTCOME_RATE_LIMIT => 'r',
+            OUTCOME_ERROR => 'e',
+            _ => 's',
+        })
+        .collect()
+}
+
+fn decode_recent_outcomes(s: &str) -> VecDeque<u8> {
+    s.chars()
+        .rev()
+        .take(RECENT_OUTCOMES_CAP)
+        .map(|c| match c {
+            'r' => OUTCOME_RATE_LIMIT,
+            'e' => OUTCOME_ERROR,
+            _ => OUTCOME_SUCCESS,
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
 }
 
 /// 单个模型的累计用量（原始计数；价值在展示时按当前定价实时换算）
@@ -833,10 +899,16 @@ struct StatsEntry {
     /// 累计失败次数（旧缓存无此字段时默认 0）
     #[serde(default)]
     error_count: u64,
+    /// 累计 429 触发次数（旧缓存无此字段时默认 0）
+    #[serde(default)]
+    rate_limit_count: u32,
     last_used_at: Option<String>,
     /// 按模型累计用量（旧缓存无此字段时默认空）
     #[serde(default)]
     model_usage: HashMap<String, ModelUsage>,
+    /// 最近请求结果序列（s=成功 e=失败 r=429，旧 → 新；旧缓存无此字段时默认空）
+    #[serde(default)]
+    recent_outcomes: String,
 }
 
 // ============================================================================
@@ -903,6 +975,8 @@ pub struct CredentialEntrySnapshot {
     pub credential_rpm: Option<u32>,
     /// 按模型累计用量（原始计数；价值由上层按定价换算）
     pub model_usage: HashMap<String, ModelUsage>,
+    /// 最近请求结果分桶（旧 → 新，每桶 [成功, 失败, 429]，每桶 100 次，最多 10 桶）
+    pub recent_buckets: Vec<[u32; 3]>,
 }
 
 /// 凭据管理器状态快照
@@ -1202,6 +1276,7 @@ impl MultiTokenManager {
                     rpm: RpmTracker::new(),
                     rate_limit_count: Arc::new(AtomicU32::new(0)),
                     model_usage: HashMap::new(),
+                    recent_outcomes: VecDeque::new(),
                 }
             })
             .collect();
@@ -2691,8 +2766,12 @@ impl MultiTokenManager {
             if let Some(s) = stats.get(&entry.id.to_string()) {
                 entry.success_count = s.success_count;
                 entry.error_count = s.error_count;
+                entry
+                    .rate_limit_count
+                    .store(s.rate_limit_count, Ordering::Relaxed);
                 entry.last_used_at = s.last_used_at.clone();
                 entry.model_usage = s.model_usage.clone();
+                entry.recent_outcomes = decode_recent_outcomes(&s.recent_outcomes);
             }
         }
         *self.last_stats_save_at.lock() = Some(Instant::now());
@@ -2717,8 +2796,10 @@ impl MultiTokenManager {
                         StatsEntry {
                             success_count: e.success_count,
                             error_count: e.error_count,
+                            rate_limit_count: e.rate_limit_count.load(Ordering::Relaxed),
                             last_used_at: e.last_used_at.clone(),
                             model_usage: e.model_usage.clone(),
+                            recent_outcomes: encode_recent_outcomes(&e.recent_outcomes),
                         },
                     )
                 })
@@ -2788,6 +2869,7 @@ impl MultiTokenManager {
             if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
                 entry.failure_count = 0;
                 entry.success_count += 1;
+                push_recent_outcome(&mut entry.recent_outcomes, OUTCOME_SUCCESS);
                 entry.last_used_at = Some(Utc::now().to_rfc3339());
                 tracing::debug!(
                     "凭据 #{} API 调用成功（累计 {} 次）",
@@ -2856,6 +2938,7 @@ impl MultiTokenManager {
 
             entry.failure_count += 1;
             entry.error_count += 1;
+            push_recent_outcome(&mut entry.recent_outcomes, OUTCOME_ERROR);
             entry.last_used_at = Some(Utc::now().to_rfc3339());
             let failure_count = entry.failure_count;
 
@@ -3076,14 +3159,36 @@ impl MultiTokenManager {
         recovered > 0
     }
 
-    /// 累计 429 触发次数（在 provider 收到 429 响应时调用）
+    /// 累计 429 触发次数（在 provider 收到 429 响应时调用；随统计缓存持久化）
     pub fn report_rate_limit(&self, id: u64) {
-        let entries = self.entries.lock();
-        if let Some(entry) = entries.iter().find(|e| e.id == id) {
-            entry
-                .rate_limit_count
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        {
+            let mut entries = self.entries.lock();
+            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                entry
+                    .rate_limit_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                push_recent_outcome(&mut entry.recent_outcomes, OUTCOME_RATE_LIMIT);
+            }
         }
+        self.save_stats_debounced();
+    }
+
+    /// 记录一次「收到上游错误响应」：凭据级累计错误 +1（随统计缓存持久化）。
+    ///
+    /// 与 `report_failure` 的区别：不动连续失败计数（failure_count）、不触发禁用，
+    /// 仅用于统计口径（凭据「统计」列的失败数）。调用约定：
+    /// - 只在确实收到上游错误响应时调用（网络错误/本地错误不计入）
+    /// - 429 走 `report_rate_limit`，普通 401/403 走 `report_failure`，均不重复调用本方法；
+    ///   例外：bearer 失效触发自动刷新重试的首个 401/403 用本方法计数（不推进禁用计数）
+    pub fn record_upstream_error(&self, id: u64) {
+        {
+            let mut entries = self.entries.lock();
+            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                entry.error_count += 1;
+                push_recent_outcome(&mut entry.recent_outcomes, OUTCOME_ERROR);
+            }
+        }
+        self.save_stats_debounced();
     }
 
     /// 标记凭据为代理槽资源耗尽（绑定代理过期且无可替换代理）。
@@ -3333,6 +3438,7 @@ impl MultiTokenManager {
                         cooldown_remaining_secs,
                         credential_rpm: e.credentials.rpm,
                         model_usage: e.model_usage.clone(),
+                        recent_buckets: bucket_recent_outcomes(&e.recent_outcomes),
                     }
                 })
                 .collect(),
@@ -3490,6 +3596,21 @@ impl MultiTokenManager {
         Ok(())
     }
 
+    /// 仅清空所有凭据的累计 429 计数（success/error/用量统计不动），立即落盘。
+    /// 返回处理的凭据数。
+    pub fn reset_all_rate_limit_counts(&self) -> usize {
+        let n = {
+            let entries = self.entries.lock();
+            for entry in entries.iter() {
+                entry.rate_limit_count.store(0, Ordering::Relaxed);
+            }
+            entries.len()
+        };
+        // 立即落盘，避免重启又恢复成旧值
+        self.save_stats();
+        n
+    }
+
     /// 重置凭据失败计数并重新启用（Admin API）
     /// 清空所有凭据的累计统计（不影响连续失败计数 / 禁用状态 / 邮箱等真值）：
     /// - success_count → 0
@@ -3503,6 +3624,7 @@ impl MultiTokenManager {
                 entry.error_count = 0;
                 entry.rate_limit_count.store(0, Ordering::Relaxed);
                 entry.model_usage.clear();
+                entry.recent_outcomes.clear();
             }
         }
         // 立即落盘，避免重启又恢复成旧值
@@ -4059,6 +4181,7 @@ impl MultiTokenManager {
                 rpm: RpmTracker::new(),
                 rate_limit_count: Arc::new(AtomicU32::new(0)),
                 model_usage: HashMap::new(),
+                recent_outcomes: VecDeque::new(),
             });
 
             new_id
@@ -4685,6 +4808,74 @@ mod tests {
         // 再失败一次不会禁用（因为计数已重置）
         manager.report_failure(1);
         assert_eq!(manager.available_count(), 1);
+    }
+
+    #[test]
+    fn test_record_upstream_error_increments_error_count_only() {
+        let config = Config::default();
+        let cred = KiroCredentials::default();
+
+        let manager = MultiTokenManager::new(config, vec![cred], None, None, false).unwrap();
+
+        // 连续调用 MAX_FAILURES_PER_CREDENTIAL 次也不应触发禁用（不动 failure_count）
+        for _ in 0..MAX_FAILURES_PER_CREDENTIAL {
+            manager.record_upstream_error(1);
+        }
+        assert_eq!(manager.available_count(), 1);
+
+        let snapshot = manager.snapshot();
+        let entry = snapshot.entries.iter().find(|e| e.id == 1).unwrap();
+        assert_eq!(entry.error_count, MAX_FAILURES_PER_CREDENTIAL as u64);
+        assert_eq!(entry.failure_count, 0);
+    }
+
+    #[test]
+    fn test_stats_entry_deserializes_without_rate_limit_count() {
+        // 旧统计缓存无 rate_limit_count / recent_outcomes 字段时按默认值处理
+        let json = r#"{"success_count": 5, "error_count": 2, "last_used_at": null}"#;
+        let entry: StatsEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.success_count, 5);
+        assert_eq!(entry.error_count, 2);
+        assert_eq!(entry.rate_limit_count, 0);
+        assert!(entry.recent_outcomes.is_empty());
+    }
+
+    #[test]
+    fn test_recent_outcomes_ring_bucket_and_roundtrip() {
+        // 环形缓冲：超容量淘汰最旧的
+        let mut dq = VecDeque::new();
+        for _ in 0..RECENT_OUTCOMES_CAP {
+            push_recent_outcome(&mut dq, OUTCOME_SUCCESS);
+        }
+        push_recent_outcome(&mut dq, OUTCOME_RATE_LIMIT);
+        assert_eq!(dq.len(), RECENT_OUTCOMES_CAP);
+        assert_eq!(*dq.back().unwrap(), OUTCOME_RATE_LIMIT);
+
+        // 分桶：250 条 → [100, 100, 50]，计数按类型归位
+        let mut dq = VecDeque::new();
+        for i in 0..250 {
+            let o = match i % 10 {
+                0 => OUTCOME_ERROR,
+                1 => OUTCOME_RATE_LIMIT,
+                _ => OUTCOME_SUCCESS,
+            };
+            push_recent_outcome(&mut dq, o);
+        }
+        let buckets = bucket_recent_outcomes(&dq);
+        assert_eq!(buckets.len(), 3);
+        assert_eq!(buckets[0], [80, 10, 10]);
+        assert_eq!(buckets[1], [80, 10, 10]);
+        assert_eq!(buckets[2], [40, 5, 5]);
+
+        // 编解码 roundtrip（保持顺序）
+        let decoded = decode_recent_outcomes(&encode_recent_outcomes(&dq));
+        assert_eq!(decoded, dq);
+
+        // 超长字符串只取最新 CAP 条
+        let long = "e".repeat(50) + &"s".repeat(RECENT_OUTCOMES_CAP);
+        let decoded = decode_recent_outcomes(&long);
+        assert_eq!(decoded.len(), RECENT_OUTCOMES_CAP);
+        assert!(decoded.iter().all(|&o| o == OUTCOME_SUCCESS));
     }
 
     #[tokio::test]

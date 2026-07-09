@@ -73,7 +73,7 @@ pub enum AuthError {
 pub struct AuthGuard {
     pub entry: Arc<ApiKeyEntry>,
     /// 调用方在请求处理结束前调 `mark_success()` / `mark_fail()`；
-    /// 默认值：未设置 → drop 时认作失败
+    /// 默认值：未设置 → drop 时不计数（本地错误 / 未走上游的请求）
     outcome: Option<bool>,
     store: Option<Arc<Store>>,
 }
@@ -103,14 +103,16 @@ impl Drop for AuthGuard {
         if prev == 0 {
             self.entry.in_flight.fetch_add(1, Ordering::Relaxed);
         }
-        // 计数：默认 outcome=None 不写（中间件失败/未到 handler 不计数）
+        // 计数：outcome=None（未走上游 / 本地错误）不计成功失败，
+        // 但仍刷新 last_used_at——count_tokens / models 也算「在使用」
         let outcome = self.outcome;
         let store = self.store.clone();
         let id = self.entry.id;
-        if let (Some(ok), Some(store)) = (outcome, store) {
+        if let Some(store) = store {
             tokio::spawn(async move {
-                if let Err(e) = tokio::task::spawn_blocking(move || {
-                    store.record_api_key_outcome(id, ok)
+                if let Err(e) = tokio::task::spawn_blocking(move || match outcome {
+                    Some(ok) => store.record_api_key_outcome(id, ok),
+                    None => store.touch_api_key(id),
                 })
                 .await
                 .unwrap_or_else(|_| Ok(()))

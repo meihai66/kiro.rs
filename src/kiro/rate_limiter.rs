@@ -145,7 +145,12 @@ impl RateLimiter {
 
     /// 取某个凭据当前生效的最小请求间隔（优先凭据级覆盖，其次全局 config）
     fn effective_interval(&self, credential_id: u64, config: &RateLimitConfig) -> Duration {
-        if let Some(ms) = self.credential_intervals.read().get(&credential_id).copied() {
+        if let Some(ms) = self
+            .credential_intervals
+            .read()
+            .get(&credential_id)
+            .copied()
+        {
             return Duration::from_millis(ms);
         }
         Self::calculate_interval_with_config(config)

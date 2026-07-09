@@ -367,6 +367,55 @@ function classifyCredential(
   return 'normal'
 }
 
+/** 最近 1000 次请求分布条：10 格（每格 100 次，旧 → 新），
+ * 格内按 成功(绿)/失败(红)/429(黄) 占比垂直堆叠；无数据的格显示为灰底。
+ * 高度 7px，贴在统计数字下方，不撑高表格行。 */
+function RecentOutcomeStrip({ buckets }: { buckets: [number, number, number][] }) {
+  const SLOTS = 10
+  const slots: ([number, number, number] | null)[] = [
+    ...Array<null>(Math.max(0, SLOTS - buckets.length)).fill(null),
+    ...buckets.slice(-SLOTS),
+  ]
+  return (
+    <div
+      className="mt-0.5 flex h-[7px] items-stretch gap-px"
+      title="最近 1000 次请求（每格 100 次，左旧右新）：绿=成功 红=失败 黄=429"
+    >
+      {slots.map((b, i) => {
+        const total = b ? b[0] + b[1] + b[2] : 0
+        if (!b || total === 0) {
+          return <div key={i} className="w-[5px] rounded-[1px] bg-muted" />
+        }
+        // 占比堆叠；非零段最低 22% 保证肉眼可见，再归一化
+        const raw = [
+          { v: b[2], cls: 'bg-yellow-500' }, // 顶部：429
+          { v: b[1], cls: 'bg-red-500' }, // 中部：失败
+          { v: b[0], cls: 'bg-emerald-500' }, // 底部：成功
+        ].map((p) => ({ ...p, pct: p.v > 0 ? Math.max((p.v / total) * 100, 22) : 0 }))
+        const sum = raw.reduce((s, p) => s + p.pct, 0)
+        return (
+          <div
+            key={i}
+            className="flex w-[5px] flex-col overflow-hidden rounded-[1px]"
+            title={`成功 ${b[0]} / 失败 ${b[1]} / 429 ${b[2]}`}
+          >
+            {raw.map(
+              (p, j) =>
+                p.pct > 0 && (
+                  <div
+                    key={j}
+                    className={p.cls}
+                    style={{ height: `${(p.pct / sum) * 100}%` }}
+                  />
+                )
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 // 从 url 抠出 host:port 用于显示
 function shortProxyAddr(url: string): string {
   if (!url) return ''
@@ -513,24 +562,27 @@ function buildColumns(ctx: CellContext): ColumnDef<CredentialStatusItem, unknown
       cell: ({ row }) => {
         const c = row.original
         return (
-          <span
-            className="font-mono text-xs whitespace-nowrap"
-            title="成功 / 累计错误 / 429 限流（均为累计值）"
-          >
-            <span className="text-emerald-600">{c.successCount}</span>
-            <span className="text-muted-foreground mx-1">/</span>
+          <div className="w-fit">
             <span
-              className={c.errorCount > 0 ? 'text-red-500' : 'text-muted-foreground'}
+              className="font-mono text-xs whitespace-nowrap"
+              title="成功 / 累计错误 / 429 限流（均为累计值）"
             >
-              {c.errorCount}
+              <span className="text-emerald-600">{c.successCount}</span>
+              <span className="text-muted-foreground mx-1">/</span>
+              <span
+                className={c.errorCount > 0 ? 'text-red-500' : 'text-muted-foreground'}
+              >
+                {c.errorCount}
+              </span>
+              <span className="text-muted-foreground mx-1">/</span>
+              <span
+                className={c.rateLimitCount > 0 ? 'text-yellow-600' : 'text-muted-foreground'}
+              >
+                {c.rateLimitCount}
+              </span>
             </span>
-            <span className="text-muted-foreground mx-1">/</span>
-            <span
-              className={c.rateLimitCount > 0 ? 'text-yellow-600' : 'text-muted-foreground'}
-            >
-              {c.rateLimitCount}
-            </span>
-          </span>
+            <RecentOutcomeStrip buckets={c.recentBuckets ?? []} />
+          </div>
         )
       },
     },

@@ -24,6 +24,7 @@ import {
   clearErrorLogs,
   deleteErrorLog,
   getErrorLog,
+  getErrorLogKindStats,
   listErrorLogs,
 } from '@/api/error-logs'
 import { extractErrorMessage } from '@/lib/utils'
@@ -39,6 +40,7 @@ const KIND_LABEL: Record<string, string> = {
   rate_limit: '限流',
   auth: '认证失败',
   upstream_error: '上游错误',
+  stream_interrupted: '流中断',
 }
 
 function fmtTime(t: string): string {
@@ -92,6 +94,13 @@ export function ErrorLogsPage() {
     queryKey: ['error-logs', params],
     queryFn: () => listErrorLogs(params),
     placeholderData: keepPreviousData,
+  })
+
+  // 各类型累计次数（修剪不影响）
+  const { data: kindStats } = useQuery({
+    queryKey: ['error-log-kind-stats'],
+    queryFn: getErrorLogKindStats,
+    refetchInterval: 30_000,
   })
 
   const total = data?.total ?? 0
@@ -149,6 +158,7 @@ export function ErrorLogsPage() {
     onSuccess: () => {
       toast.success('已删除')
       queryClient.invalidateQueries({ queryKey: ['error-logs'] })
+      queryClient.invalidateQueries({ queryKey: ['error-log-kind-stats'] })
     },
     onError: (e) => toast.error('删除失败：' + extractErrorMessage(e)),
   })
@@ -158,6 +168,7 @@ export function ErrorLogsPage() {
     onSuccess: (r) => {
       toast.success(`已清空 ${r.deleted} 条`)
       queryClient.invalidateQueries({ queryKey: ['error-logs'] })
+      queryClient.invalidateQueries({ queryKey: ['error-log-kind-stats'] })
     },
     onError: (e) => toast.error('清空失败：' + extractErrorMessage(e)),
   })
@@ -167,7 +178,17 @@ export function ErrorLogsPage() {
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-3">
           <h1 className="text-2xl font-semibold">错误日志</h1>
-          <Badge variant="secondary">总数 {total}</Badge>
+          <Badge variant="secondary" title="当前留存条数（符合过滤条件）">
+            留存 {total}
+          </Badge>
+          {kindStats && (
+            <Badge
+              variant="secondary"
+              title={`累计发生次数（每类仅保留最新 ${kindStats.maxPerKind} 条日志，设置页的全局数量/天数清理会进一步压低留存；累计计数不受任何清理影响）`}
+            >
+              累计 {kindStats.totalCumulative}
+            </Badge>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <Button
@@ -185,7 +206,7 @@ export function ErrorLogsPage() {
             onClick={() => {
               if (
                 !confirm(
-                  '清空全部错误日志？此操作不可恢复。\n（如需按时间清理，请在过滤里设 until 后再清空对应区间——但当前按钮直接清全部）'
+                  '清空全部错误日志？此操作不可恢复，各类型的累计计数也会一并归零。\n（如需按时间清理，请在过滤里设 until 后再清空对应区间——但当前按钮直接清全部）'
                 )
               )
                 return
@@ -249,6 +270,31 @@ export function ErrorLogsPage() {
             />
           </div>
         </div>
+        {kindStats && kindStats.kinds.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-muted-foreground">
+              各类累计（每类留存最新 {kindStats.maxPerKind} 条）
+            </span>
+            {kindStats.kinds.map((k) => (
+              <button
+                key={k.errorKind}
+                type="button"
+                title={`点击按该类型过滤 · 留存 ${k.retained} 条`}
+                onClick={() => {
+                  setKindsInput(k.errorKind)
+                  setKinds(k.errorKind)
+                  setPage(0)
+                }}
+                className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 hover:bg-muted transition-colors ${
+                  kinds === k.errorKind ? 'bg-muted border-foreground/30' : ''
+                }`}
+              >
+                <span>{KIND_LABEL[k.errorKind] ?? k.errorKind}</span>
+                <span className="font-mono text-muted-foreground">{k.total}</span>
+              </button>
+            ))}
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-muted-foreground">快捷</span>
           <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={() => setPreset('1h')}>1h</Button>

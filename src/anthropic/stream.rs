@@ -157,9 +157,7 @@ fn find_real_thinking_start_tag(buffer: &str) -> Option<usize> {
 ///
 /// 返回 `(Some(thinking), remaining_text)` 表示成功提取；
 /// `(None, original_text)` 表示未检测到 thinking 块（原样返回）。
-pub(crate) fn extract_thinking_from_complete_text(
-    text: &str,
-) -> (Option<String>, String) {
+pub(crate) fn extract_thinking_from_complete_text(text: &str) -> (Option<String>, String) {
     let start_pos = match find_real_thinking_start_tag(text) {
         Some(pos) => pos,
         None => return (None, text.to_string()),
@@ -168,18 +166,17 @@ pub(crate) fn extract_thinking_from_complete_text(
     let before = &text[..start_pos];
     let after_open = &text[start_pos + "<thinking>".len()..];
 
-    let (thinking_raw, text_after) =
-        if let Some(end_pos) = find_real_thinking_end_tag(after_open) {
-            (
-                &after_open[..end_pos],
-                &after_open[end_pos + "</thinking>\n\n".len()..],
-            )
-        } else if let Some(end_pos) = find_real_thinking_end_tag_at_buffer_end(after_open) {
-            let after_tag = end_pos + "</thinking>".len();
-            (&after_open[..end_pos], after_open[after_tag..].trim_start())
-        } else {
-            return (None, text.to_string());
-        };
+    let (thinking_raw, text_after) = if let Some(end_pos) = find_real_thinking_end_tag(after_open) {
+        (
+            &after_open[..end_pos],
+            &after_open[end_pos + "</thinking>\n\n".len()..],
+        )
+    } else if let Some(end_pos) = find_real_thinking_end_tag_at_buffer_end(after_open) {
+        let after_tag = end_pos + "</thinking>".len();
+        (&after_open[..end_pos], after_open[after_tag..].trim_start())
+    } else {
+        return (None, text.to_string());
+    };
 
     // 剥离开头换行（流式处理保持一致）
     let thinking_content = thinking_raw.strip_prefix('\n').unwrap_or(thinking_raw);

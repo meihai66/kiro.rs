@@ -549,26 +549,21 @@ fn record_error_log(ctx: &ErrorLogContext, err: &Error, status_code: u16, respon
         return;
     }
 
-    // summary：取 err.to_string() 的第一行，截到 200 字符
-    let raw = err.to_string();
-    let line = raw.lines().next().unwrap_or(&raw);
-    let summary = if line.chars().count() > 200 {
-        let truncated: String = line.chars().take(200).collect();
-        format!("{}…", truncated)
-    } else {
-        line.to_string()
-    };
+    let summary = summarize_error_line(&err.to_string());
 
     let kind = classify_error_kind(err, status_code).to_string();
 
     let request_body = ctx.request_body.map(|s| s.to_string());
 
+    // provider 错误携带最后一次上游尝试的凭据 ID / 上游状态码（本地错误则均为 None）
+    let attempt = err.downcast_ref::<crate::kiro::provider::UpstreamAttemptError>();
+
     let insert = crate::storage::ErrorLogInsert {
         at: chrono::Utc::now(),
-        credential_id: None, // provider 错误目前不带 credential_id；后续可扩展
+        credential_id: attempt.and_then(|a| a.credential_id),
         endpoint: None,
         status_code,
-        upstream_status: None,
+        upstream_status: attempt.and_then(|a| a.upstream_status),
         error_kind: kind,
         model: ctx.model.map(|s| s.to_string()),
         summary,
@@ -588,6 +583,18 @@ fn record_error_log(ctx: &ErrorLogContext, err: &Error, status_code: u16, respon
             tracing::warn!(error = %e, "写入错误日志失败");
         }
     });
+}
+
+/// 错误日志 summary 统一口径：取第一行，截到 200 字符（超长加省略号）。
+/// record_error_log 与 StreamInterruptLog 共用，避免截断逻辑漂移。
+fn summarize_error_line(raw: &str) -> String {
+    let line = raw.lines().next().unwrap_or(raw);
+    if line.chars().count() > 200 {
+        let truncated: String = line.chars().take(200).collect();
+        format!("{}…", truncated)
+    } else {
+        line.to_string()
+    }
 }
 
 /// 把 ErrorResponse 序列化为字符串，写入错误日志的 response_body 字段
@@ -717,8 +724,11 @@ fn map_kiro_provider_error_to_response_with_log(
         record_error_log(ctx, &err, mapped.status.as_u16(), body_str);
     }
 
+    // 是否收到了上游错误响应：决定 API Key 级失败计数（本地错误不计入）
+    let from_upstream = crate::kiro::provider::UpstreamAttemptError::reached_upstream(&err);
+
     // 构造响应
-    if let Some(secs) = mapped.retry_after_secs {
+    let mut response = if let Some(secs) = mapped.retry_after_secs {
         (
             mapped.status,
             [(header::RETRY_AFTER, secs.to_string())],
@@ -731,7 +741,13 @@ fn map_kiro_provider_error_to_response_with_log(
             Json(ErrorResponse::new(mapped.error_type, mapped.message)),
         )
             .into_response()
+    };
+    if from_upstream {
+        response
+            .extensions_mut()
+            .insert(super::middleware::UpstreamOutcome(false));
     }
+    response
 }
 
 /// 对 user_id 进行掩码处理，保护隐私
@@ -1547,6 +1563,14 @@ async fn handle_stream_request(
     // 生成初始事件
     let initial_events = ctx.generate_initial_events();
 
+    // 流中断日志上下文（SSE 已以 200 开始，中途断流只能落错误日志）
+    let interrupt_log = StreamInterruptLog {
+        store: context.state.store.clone(),
+        config: context.state.global_config.clone(),
+        model: context.model.to_string(),
+        user_id: context.user_id.map(|s| s.to_string()),
+    };
+
     // 创建 SSE 流
     let stream = create_sse_stream(
         api_result.response,
@@ -1554,16 +1578,80 @@ async fn handle_stream_request(
         initial_events,
         provider,
         api_result.credential_id,
+        interrupt_log,
     );
 
-    // 返回 SSE 响应
-    Response::builder()
+    // 返回 SSE 响应（标记上游成功，供 API Key 统计计数）
+    let mut response = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/event-stream")
         .header(header::CACHE_CONTROL, "no-cache")
         .header(header::CONNECTION, "keep-alive")
         .body(Body::from_stream(stream))
-        .unwrap()
+        .unwrap();
+    response
+        .extensions_mut()
+        .insert(super::middleware::UpstreamOutcome(true));
+    response
+}
+
+/// 流中断错误日志上下文。
+///
+/// SSE 响应已经以 200 开头，中途上游断流无法再改状态码/计入失败统计，
+/// 只能落一条错误日志（error_kind = `stream_interrupted`）便于在管理界面排查。
+struct StreamInterruptLog {
+    store: Option<std::sync::Arc<crate::storage::Store>>,
+    config: Option<std::sync::Arc<parking_lot::RwLock<crate::model::config::Config>>>,
+    model: String,
+    user_id: Option<String>,
+}
+
+impl StreamInterruptLog {
+    fn record(&self, credential_id: u64, err: &reqwest::Error) {
+        let Some(store) = self.store.clone() else {
+            return;
+        };
+        // 与 record_error_log 相同的开关/黑名单口径（此类日志的 status_code 固定 200）
+        let (enabled, excluded) = match self.config.as_ref() {
+            Some(c) => {
+                let cfg = c.read();
+                (
+                    cfg.error_log_enabled,
+                    cfg.error_log_excluded_status_codes.clone(),
+                )
+            }
+            None => (false, Vec::new()),
+        };
+        if !enabled || excluded.contains(&200) {
+            return;
+        }
+        let summary = summarize_error_line(&format!("流式响应中断: {}", err));
+        let insert = crate::storage::ErrorLogInsert {
+            at: chrono::Utc::now(),
+            credential_id: Some(credential_id),
+            endpoint: None,
+            // 客户端实际收到的是已开始的 200 SSE 响应
+            status_code: 200,
+            upstream_status: None,
+            error_kind: "stream_interrupted".to_string(),
+            model: Some(self.model.clone()),
+            summary,
+            request_method: Some("POST".to_string()),
+            request_path: Some("/v1/messages".to_string()),
+            request_headers: None,
+            response_headers: None,
+            request_body: None,
+            response_body: None,
+            user_id: self.user_id.clone(),
+            request_id: None,
+            disable_reason: None,
+        };
+        tokio::spawn(async move {
+            if let Err(e) = store.insert_error_log(&insert) {
+                tracing::warn!(error = %e, "写入流中断错误日志失败");
+            }
+        });
+    }
 }
 
 /// Ping 事件间隔（25秒）
@@ -1599,6 +1687,7 @@ fn create_sse_stream(
     initial_events: Vec<SseEvent>,
     provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
     credential_id: u64,
+    interrupt_log: StreamInterruptLog,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> {
     // 先发送初始事件
     let initial_stream = stream::iter(
@@ -1621,8 +1710,9 @@ fn create_sse_stream(
             ping_interval,
             provider,
             credential_id,
+            interrupt_log,
         ),
-        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval, provider, credential_id)| async move {
+        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval, provider, credential_id, interrupt_log)| async move {
             if finished {
                 return None;
             }
@@ -1659,10 +1749,11 @@ fn create_sse_stream(
                                 .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                 .collect();
 
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, provider, credential_id)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, provider, credential_id, interrupt_log)))
                         }
                         Some(Err(e)) => {
                             tracing::error!("读取响应流失败: {}", e);
+                            interrupt_log.record(credential_id, &e);
                             // 发送最终事件并结束
                             let final_events = ctx.generate_final_events();
                             report_stream_usage(&provider, credential_id, &ctx);
@@ -1670,7 +1761,7 @@ fn create_sse_stream(
                                 .into_iter()
                                 .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                 .collect();
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, provider, credential_id)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, provider, credential_id, interrupt_log)))
                         }
                         None => {
                             // 流结束，发送最终事件
@@ -1680,7 +1771,7 @@ fn create_sse_stream(
                                 .into_iter()
                                 .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                 .collect();
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, provider, credential_id)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, provider, credential_id, interrupt_log)))
                         }
                     }
                 }
@@ -1688,7 +1779,7 @@ fn create_sse_stream(
                 _ = ping_interval.tick() => {
                     tracing::trace!("发送 ping 保活事件");
                     let bytes: Vec<Result<Bytes, Infallible>> = vec![Ok(create_ping_sse())];
-                    Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, provider, credential_id)))
+                    Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, provider, credential_id, interrupt_log)))
                 }
             }
         },
@@ -1746,14 +1837,37 @@ async fn handle_non_stream_request(
         Ok(bytes) => bytes,
         Err(e) => {
             tracing::error!("读取响应体失败: {}", e);
-            return (
+            // 上游已 2xx 但读 body 失败：请求确实走到了上游，客户端收到 502，
+            // 计入 API Key 失败并落错误日志（带凭据 ID / 上游状态）
+            let message = format!("读取响应失败: {}", e);
+            let err = crate::kiro::provider::UpstreamAttemptError::wrap(
+                api_result.credential_id,
+                Some(200),
+                anyhow::anyhow!("上游响应体读取失败: {}", e),
+            );
+            let log_ctx = ErrorLogContext {
+                state: context.state,
+                request_path: Some("/v1/messages"),
+                request_method: Some("POST"),
+                model: Some(context.model),
+                request_body: None,
+                user_id: context.user_id,
+            };
+            record_error_log(
+                &log_ctx,
+                &err,
+                StatusCode::BAD_GATEWAY.as_u16(),
+                err_response_to_body_string("api_error", &message),
+            );
+            let mut response = (
                 StatusCode::BAD_GATEWAY,
-                Json(ErrorResponse::new(
-                    "api_error",
-                    format!("读取响应失败: {}", e),
-                )),
+                Json(ErrorResponse::new("api_error", message)),
             )
                 .into_response();
+            response
+                .extensions_mut()
+                .insert(super::middleware::UpstreamOutcome(false));
+            return response;
         }
     };
 
@@ -2020,7 +2134,12 @@ async fn handle_non_stream_request(
         })
     };
 
-    (StatusCode::OK, Json(response_body)).into_response()
+    // 标记上游成功，供 API Key 统计计数
+    let mut response = (StatusCode::OK, Json(response_body)).into_response();
+    response
+        .extensions_mut()
+        .insert(super::middleware::UpstreamOutcome(true));
+    response
 }
 
 /// 检测模型名是否包含 "thinking" 后缀，若包含则覆写 thinking 配置
