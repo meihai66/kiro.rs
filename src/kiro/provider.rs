@@ -501,11 +501,11 @@ impl KiroProvider {
                     continue;
                 }
             };
+            // 同 API 路径：不强制关连接，复用连接池减少握手开销
             let base_request = client
                 .post(&url)
                 .body(body)
-                .header("content-type", "application/json")
-                .header("Connection", "close");
+                .header("content-type", "application/json");
             let request = endpoint.decorate_mcp(base_request, &request_ctx);
             #[cfg(feature = "sensitive-logs")]
             let _request_for_log = request.try_clone();
@@ -886,11 +886,12 @@ impl KiroProvider {
                     continue;
                 }
             };
+            // 不再强制 Connection: close——保留连接以命中 reqwest 连接池
+            //（pool_idle_timeout=90s），避免每次请求都重做 TCP+TLS 握手拖慢首字。
             let base_request = client
                 .post(&url)
                 .body(final_body)
-                .header("content-type", "application/json")
-                .header("Connection", "close");
+                .header("content-type", "application/json");
             let request = endpoint.decorate_api(base_request, &request_ctx);
             #[cfg(feature = "sensitive-logs")]
             let _request_for_log = request.try_clone();
@@ -1652,8 +1653,7 @@ mod tests {
         let request = endpoint.decorate_api(
             reqwest::Client::new()
                 .post("https://example.com")
-                .header("content-type", "application/json")
-                .header("Connection", "close"),
+                .header("content-type", "application/json"),
             &ctx,
         );
         let built = request.build().unwrap();
@@ -1670,7 +1670,8 @@ mod tests {
             built.headers().get("x-amzn-kiro-agent-mode").unwrap(),
             "cli"
         );
-        assert_eq!(built.headers().get(CONNECTION).unwrap(), "close");
+        // 不再强制 Connection: close（改为复用连接池）；decorate 不应注入该头
+        assert!(built.headers().get(CONNECTION).is_none());
     }
 
     #[test]
@@ -1757,8 +1758,7 @@ mod tests {
         let request = endpoint.decorate_api(
             reqwest::Client::new()
                 .post("https://example.com")
-                .header("content-type", "application/json")
-                .header("Connection", "close"),
+                .header("content-type", "application/json"),
             &ctx,
         );
         let built = request.build().unwrap();
@@ -1784,7 +1784,8 @@ mod tests {
                 .unwrap()
                 .starts_with("Bearer ")
         );
-        assert_eq!(built.headers().get(CONNECTION).unwrap(), "close");
+        // 不再强制 Connection: close（改为复用连接池）；decorate 不应注入该头
+        assert!(built.headers().get(CONNECTION).is_none());
     }
 
     #[test]
