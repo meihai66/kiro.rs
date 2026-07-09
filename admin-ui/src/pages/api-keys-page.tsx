@@ -22,6 +22,7 @@ import {
   listApiKeys,
   updateApiKey,
 } from '@/api/api-keys'
+import { useCredentials } from '@/hooks/use-credentials'
 import { extractErrorMessage } from '@/lib/utils'
 import type { ApiKeyItem, CreateApiKeyRequest } from '@/types/api'
 
@@ -162,6 +163,25 @@ export function ApiKeysPage() {
             <span className="font-mono text-xs">
               {c.cacheReadMinPct}~{c.cacheReadMaxPct}%
             </span>
+          )
+        },
+      },
+      {
+        id: 'scope',
+        header: '凭据范围',
+        cell: ({ row }) => {
+          const ids = row.original.allowedCredentials ?? []
+          if (ids.length === 0) {
+            return <span className="text-xs text-muted-foreground">全部</span>
+          }
+          return (
+            <Badge
+              variant="secondary"
+              className="text-xs"
+              title={'限定凭据 #' + ids.join(' #')}
+            >
+              {ids.length} 个
+            </Badge>
           )
         },
       },
@@ -308,6 +328,7 @@ function CreateKeyDialog({
   const [maxConcurrent, setMaxConcurrent] = useState(0)
   const [cacheMin, setCacheMin] = useState(0)
   const [cacheMax, setCacheMax] = useState(0)
+  const [allowed, setAllowed] = useState<number[]>([])
 
   const mutation = useMutation({
     mutationFn: (req: CreateApiKeyRequest) => createApiKey(req),
@@ -320,6 +341,7 @@ function CreateKeyDialog({
       setMaxConcurrent(0)
       setCacheMin(0)
       setCacheMax(0)
+      setAllowed([])
     },
     onError: (e) => toast.error('创建失败：' + extractErrorMessage(e)),
   })
@@ -396,6 +418,7 @@ function CreateKeyDialog({
             缓存命中率：min/max 都为 0 = 不模拟（输出真实值）。例如 50/55 → 每次请求随机抽取
             50%~55% 作为 cache_read 占总输入的比例。
           </p>
+          <CredentialScopePicker value={allowed} onChange={setAllowed} />
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>
@@ -410,6 +433,7 @@ function CreateKeyDialog({
                 maxConcurrent,
                 cacheReadMinPct: cacheMin,
                 cacheReadMaxPct: cacheMax,
+                allowedCredentials: allowed,
               })
             }
             disabled={!name.trim() || mutation.isPending}
@@ -419,6 +443,120 @@ function CreateKeyDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  )
+}
+
+/** 凭据范围选择器：勾选允许该 Key 使用的凭据；全不选 = 全部可用。
+ * value 为已选凭据 ID 数组（空数组 = 不限制）。 */
+function CredentialScopePicker({
+  value,
+  onChange,
+}: {
+  value: number[]
+  onChange: (ids: number[]) => void
+}) {
+  const { data } = useCredentials()
+  const creds = data?.credentials ?? []
+  const [filter, setFilter] = useState('')
+
+  const selected = useMemo(() => new Set(value), [value])
+  const visible = useMemo(() => {
+    const kw = filter.trim().toLowerCase()
+    if (!kw) return creds
+    return creds.filter(
+      (c) =>
+        String(c.id).includes(kw) ||
+        (c.email ?? '').toLowerCase().includes(kw)
+    )
+  }, [creds, filter])
+
+  const toggle = (id: number) => {
+    const next = new Set(selected)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    onChange([...next])
+  }
+  // 只对当前可见（过滤后）的凭据做全选/全不选，避免误伤被过滤掉的选择
+  const allVisibleSelected =
+    visible.length > 0 && visible.every((c) => selected.has(c.id))
+  const toggleAllVisible = () => {
+    const next = new Set(selected)
+    if (allVisibleSelected) visible.forEach((c) => next.delete(c.id))
+    else visible.forEach((c) => next.add(c.id))
+    onChange([...next])
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1">
+        <label className="text-sm font-medium">
+          允许使用的凭据{' '}
+          <span className="text-xs font-normal text-muted-foreground">
+            {selected.size === 0
+              ? '（未选 = 全部可用）'
+              : `（已选 ${selected.size} 个）`}
+          </span>
+        </label>
+        <div className="flex items-center gap-2">
+          {selected.size > 0 && (
+            <button
+              type="button"
+              className="text-xs text-muted-foreground hover:text-foreground"
+              onClick={() => onChange([])}
+            >
+              清空（=全部）
+            </button>
+          )}
+          <button
+            type="button"
+            className="text-xs text-primary hover:underline"
+            onClick={toggleAllVisible}
+          >
+            {allVisibleSelected ? '取消可见项' : '全选可见项'}
+          </button>
+        </div>
+      </div>
+      <Input
+        placeholder="按 ID / 邮箱过滤…"
+        value={filter}
+        onChange={(e) => setFilter(e.target.value)}
+        className="h-8 text-xs mb-1"
+      />
+      <div className="max-h-48 overflow-y-auto rounded-md border divide-y">
+        {visible.length === 0 ? (
+          <div className="p-3 text-xs text-muted-foreground text-center">
+            无匹配凭据
+          </div>
+        ) : (
+          visible.map((c) => (
+            <label
+              key={c.id}
+              className="flex items-center gap-2 px-2 py-1.5 text-xs cursor-pointer hover:bg-muted/50"
+            >
+              <input
+                type="checkbox"
+                className="h-3.5 w-3.5"
+                checked={selected.has(c.id)}
+                onChange={() => toggle(c.id)}
+              />
+              <span className="font-mono text-muted-foreground">#{c.id}</span>
+              <span className="truncate flex-1">{c.email || '—'}</span>
+              {c.disabled && (
+                <span className="text-[10px] text-red-500 shrink-0">已禁用</span>
+              )}
+              <span className="text-[10px] text-muted-foreground shrink-0">
+                P{c.priority}
+              </span>
+            </label>
+          ))
+        )}
+      </div>
+      {selected.size > 0 && (
+        <p className="mt-1 text-[11px] text-muted-foreground">
+          仅使用勾选的凭据；这些凭据全部禁用/删除后该 Key 将无可用凭据。
+        </p>
+      )}
+    </div>
   )
 }
 
@@ -436,6 +574,7 @@ function EditKeyDialog({
   const [maxConcurrent, setMaxConcurrent] = useState(0)
   const [cacheMin, setCacheMin] = useState(0)
   const [cacheMax, setCacheMax] = useState(0)
+  const [allowed, setAllowed] = useState<number[]>([])
 
   // 同步 target 到表单
   useMemo(() => {
@@ -445,6 +584,7 @@ function EditKeyDialog({
       setMaxConcurrent(target.maxConcurrent)
       setCacheMin(target.cacheReadMinPct)
       setCacheMax(target.cacheReadMaxPct)
+      setAllowed(target.allowedCredentials ?? [])
     }
   }, [target])
 
@@ -457,6 +597,7 @@ function EditKeyDialog({
         maxConcurrent,
         cacheReadMinPct: cacheMin,
         cacheReadMaxPct: cacheMax,
+        allowedCredentials: allowed,
       })
     },
     onSuccess: () => {
@@ -516,6 +657,7 @@ function EditKeyDialog({
               />
             </div>
           </div>
+          <CredentialScopePicker value={allowed} onChange={setAllowed} />
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>

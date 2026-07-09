@@ -343,6 +343,8 @@ pub struct ApiKeyRow {
     pub last_used_at: Option<DateTime<Utc>>,
     pub success_count: u64,
     pub fail_count: u64,
+    /// 允许使用的凭据 ID 列表（空 = 全部可用）
+    pub allowed_credentials: Vec<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -354,6 +356,8 @@ pub struct ApiKeyCreate {
     pub max_concurrent: u32,
     pub cache_read_min_pct: u32,
     pub cache_read_max_pct: u32,
+    /// 允许使用的凭据 ID 列表（空 = 全部可用）
+    pub allowed_credentials: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -364,6 +368,29 @@ pub struct ApiKeyUpdate {
     pub max_concurrent: Option<u32>,
     pub cache_read_min_pct: Option<u32>,
     pub cache_read_max_pct: Option<u32>,
+    /// 允许使用的凭据范围（Some(空) = 恢复为全部可用；None = 不修改）
+    pub allowed_credentials: Option<Vec<u64>>,
+}
+
+/// 把凭据 ID 列表编码为 CSV（去重、升序）；空列表编码为空串（= 全部可用）
+fn encode_credential_ids(ids: &[u64]) -> String {
+    let mut v: Vec<u64> = ids.to_vec();
+    v.sort_unstable();
+    v.dedup();
+    v.iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// 解析 CSV 凭据 ID（忽略空白与非法项）
+fn decode_credential_ids(s: Option<&str>) -> Vec<u64> {
+    let Some(s) = s else {
+        return Vec::new();
+    };
+    s.split(',')
+        .filter_map(|part| part.trim().parse::<u64>().ok())
+        .collect()
 }
 
 impl Store {
@@ -372,11 +399,12 @@ impl Store {
         let mut stmt = conn.prepare(
             "SELECT id, key, name, description, enabled, max_concurrent, \
              cache_read_min_pct, cache_read_max_pct, created_at, last_used_at, \
-             success_count, fail_count FROM api_keys ORDER BY id ASC",
+             success_count, fail_count, allowed_credentials FROM api_keys ORDER BY id ASC",
         )?;
         let rows = stmt.query_map([], |r| {
             let created: String = r.get(8)?;
             let last_used: Option<String> = r.get(9)?;
+            let allowed: Option<String> = r.get(12)?;
             Ok(ApiKeyRow {
                 id: r.get(0)?,
                 key: r.get(1)?,
@@ -390,6 +418,7 @@ impl Store {
                 last_used_at: last_used.as_deref().and_then(parse_dt),
                 success_count: r.get::<_, i64>(10)? as u64,
                 fail_count: r.get::<_, i64>(11)? as u64,
+                allowed_credentials: decode_credential_ids(allowed.as_deref()),
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -401,8 +430,8 @@ impl Store {
         let now = Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO api_keys(key, name, description, enabled, max_concurrent, \
-             cache_read_min_pct, cache_read_max_pct, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             cache_read_min_pct, cache_read_max_pct, created_at, allowed_credentials) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 c.key,
                 c.name,
@@ -412,6 +441,7 @@ impl Store {
                 c.cache_read_min_pct as i64,
                 c.cache_read_max_pct as i64,
                 now,
+                encode_credential_ids(&c.allowed_credentials),
             ],
         )?;
         let id = conn.last_insert_rowid();
@@ -428,6 +458,12 @@ impl Store {
             last_used_at: None,
             success_count: 0,
             fail_count: 0,
+            allowed_credentials: {
+                let mut v = c.allowed_credentials.clone();
+                v.sort_unstable();
+                v.dedup();
+                v
+            },
         })
     }
 
@@ -459,6 +495,10 @@ impl Store {
         if let Some(v) = u.cache_read_max_pct {
             sets.push("cache_read_max_pct = ?");
             p.push((v as i64).into());
+        }
+        if let Some(ids) = &u.allowed_credentials {
+            sets.push("allowed_credentials = ?");
+            p.push(encode_credential_ids(ids).into());
         }
         if sets.is_empty() {
             return Ok(());

@@ -104,6 +104,8 @@ export interface ApiKeyItem {
   successCount: number
   failCount: number
   inFlight: number
+  /** 允许使用的凭据 ID 列表（空 = 全部可用） */
+  allowedCredentials: number[]
 }
 
 export interface ApiKeyListResponse {
@@ -118,6 +120,8 @@ export interface CreateApiKeyRequest {
   maxConcurrent?: number
   cacheReadMinPct?: number
   cacheReadMaxPct?: number
+  /** 允许使用的凭据 ID 列表（省略或空 = 全部可用） */
+  allowedCredentials?: number[]
 }
 
 export interface UpdateApiKeyRequest {
@@ -127,6 +131,8 @@ export interface UpdateApiKeyRequest {
   maxConcurrent?: number
   cacheReadMinPct?: number
   cacheReadMaxPct?: number
+  /** 允许使用的凭据范围（数组=覆盖，空数组=恢复全部可用；省略=不修改） */
+  allowedCredentials?: number[]
 }
 
 // ===== RPM 历史 =====

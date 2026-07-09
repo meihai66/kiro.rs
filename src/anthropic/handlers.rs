@@ -58,6 +58,8 @@ struct StreamRequestContext<'a> {
     thinking_enabled: bool,
     tool_name_map: std::collections::HashMap<String, String>,
     user_id: Option<&'a str>,
+    /// API Key 允许使用的凭据范围（None = 全部可用）
+    allowed_credentials: Option<&'a std::collections::HashSet<u64>>,
     cache_sim_pct: Option<u32>,
     cache_sim_scale_hit: bool,
     state: &'a super::middleware::AppState,
@@ -69,6 +71,8 @@ struct NonStreamRequestContext<'a> {
     input_tokens: i32,
     tool_name_map: std::collections::HashMap<String, String>,
     user_id: Option<&'a str>,
+    /// API Key 允许使用的凭据范围（None = 全部可用）
+    allowed_credentials: Option<&'a std::collections::HashSet<u64>>,
     cache_tracker: Option<&'a std::sync::Arc<crate::anthropic::cache_tracker::CacheTracker>>,
     cache_profile: Option<&'a crate::anthropic::cache_tracker::CacheProfile>,
     cache_sim_pct: Option<u32>,
@@ -1166,6 +1170,14 @@ pub async fn post_messages(
             .as_ref()
             .and_then(|g| g.entry().sample_cache_read_pct())
     });
+    // 从 ApiKey 配置取「允许使用的凭据范围」（None = 全部可用）。
+    // 提前 clone 出 Arc 到本地，避免跨 await 持有 auth_slot 锁；下面用 as_deref() 取引用透传。
+    let allowed_credentials: Option<std::sync::Arc<std::collections::HashSet<u64>>> =
+        auth_slot.as_ref().and_then(|Extension(slot)| {
+            slot.lock()
+                .as_ref()
+                .and_then(|g| g.entry().allowed_credentials())
+        });
     // 读取压缩配置快照（读锁 + clone，避免持锁跨 await）
     let compression_config = state.compression_config.read().clone();
     let prompt_cache = state.prompt_cache_snapshot();
@@ -1230,6 +1242,7 @@ pub async fn post_messages(
             },
             websearch_cache_profile.as_ref(),
             estimated_input_tokens,
+            allowed_credentials.as_deref(),
         )
         .await;
     }
@@ -1471,6 +1484,7 @@ pub async fn post_messages(
             thinking_enabled,
             tool_name_map: tool_name_map.clone(),
             user_id: user_id.as_deref(),
+            allowed_credentials: allowed_credentials.as_deref(),
             cache_sim_pct,
             cache_sim_scale_hit: prompt_cache.sim_scale_hit,
             state: &state,
@@ -1484,6 +1498,7 @@ pub async fn post_messages(
             input_tokens: estimated_input_tokens,
             tool_name_map,
             user_id: user_id.as_deref(),
+            allowed_credentials: allowed_credentials.as_deref(),
             cache_sim_pct,
             cache_sim_scale_hit: prompt_cache.sim_scale_hit,
             cache_tracker: prompt_cache
@@ -1501,7 +1516,11 @@ async fn handle_stream_request(
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
     let api_result = match provider
-        .call_api_stream(context.request_body, context.user_id)
+        .call_api_stream(
+            context.request_body,
+            context.user_id,
+            context.allowed_credentials,
+        )
         .await
     {
         Ok(resp) => resp,
@@ -1796,7 +1815,11 @@ async fn handle_non_stream_request(
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
     let api_result = match provider
-        .call_api(context.request_body, context.user_id)
+        .call_api(
+            context.request_body,
+            context.user_id,
+            context.allowed_credentials,
+        )
         .await
     {
         Ok(resp) => resp,

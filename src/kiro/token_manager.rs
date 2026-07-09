@@ -16,7 +16,7 @@ use chrono::{DateTime, Duration, Utc};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -1763,6 +1763,42 @@ impl MultiTokenManager {
     /// 如果 Token 过期或即将过期，会自动刷新
     /// Token 刷新失败时会尝试下一个可用凭据（不计入失败次数）
     pub async fn acquire_context(&self) -> anyhow::Result<CallContext> {
+        self.acquire_context_scoped(None).await
+    }
+
+    /// 统计作用域内的凭据总数（allowed=None 时等于全部）
+    fn scoped_total(&self, allowed: Option<&HashSet<u64>>) -> usize {
+        match allowed {
+            None => self.total_count(),
+            Some(a) => {
+                let entries = self.entries.lock();
+                entries.iter().filter(|e| a.contains(&e.id)).count()
+            }
+        }
+    }
+
+    /// 统计作用域内「未禁用」的凭据数（allowed=None 时等于 available_count）
+    fn scoped_available(&self, allowed: Option<&HashSet<u64>>) -> usize {
+        match allowed {
+            None => self.available_count(),
+            Some(a) => {
+                let entries = self.entries.lock();
+                entries
+                    .iter()
+                    .filter(|e| !e.disabled && a.contains(&e.id))
+                    .count()
+            }
+        }
+    }
+
+    /// 获取 API 调用上下文，可限定在 `allowed` 凭据集合内（None = 全部可用）。
+    ///
+    /// 用于 API Key 级「允许使用的凭据范围」：候选收集、耗尽判定、自愈后重收集
+    /// 均按作用域过滤；作用域内没有可用凭据时返回错误（由上层映射为 503/429）。
+    pub async fn acquire_context_scoped(
+        &self,
+        allowed: Option<&HashSet<u64>>,
+    ) -> anyhow::Result<CallContext> {
         // 检查是否需要自动恢复
         self.check_and_recover();
 
@@ -1780,7 +1816,7 @@ impl MultiTokenManager {
         };
         let _ = DEFAULT_ALL_CREDENTIALS_COOLDOWN_BAIL_THRESHOLD; // 仅作默认值参考
 
-        let total = self.total_count();
+        let total = self.scoped_total(allowed);
         let mut tried_ids: Vec<u64> = Vec::new();
         // 当所有凭据都因“临时不可用”（冷却/速率限制）被跳过时，等待最短可用时间再重试。
         let mut min_wait: Option<std::time::Duration> = None;
@@ -1798,7 +1834,7 @@ impl MultiTokenManager {
             //
             // 这里用 available_count() 判断“可用集合是否已被尝试完”，避免误报
             // "所有凭据均已禁用（x/y）" 这类与事实不符的错误。
-            let enabled_total = self.available_count();
+            let enabled_total = self.scoped_available(allowed);
             if enabled_total > 0 && tried_ids.len() >= enabled_total {
                 if let Some(wait) = min_wait {
                     // 仅当本轮所有被跳过的凭据都因冷却/限流时，才以 429 + Retry-After 快速返回；
@@ -1891,7 +1927,7 @@ impl MultiTokenManager {
                 );
                 anyhow::bail!(
                     "所有凭据均无法获取有效 Token（可用: {}/{}）",
-                    self.available_count(),
+                    self.scoped_available(allowed),
                     total
                 );
             }
@@ -1906,9 +1942,10 @@ impl MultiTokenManager {
             let (id, credentials) = {
                 let mut entries = self.entries.lock();
 
+                let in_scope = |id: u64| allowed.map(|a| a.contains(&id)).unwrap_or(true);
                 let mut candidates: Vec<(u64, u32, bool, Option<std::time::Instant>)> = entries
                     .iter()
-                    .filter(|e| !e.disabled && !tried_ids.contains(&e.id))
+                    .filter(|e| !e.disabled && !tried_ids.contains(&e.id) && in_scope(e.id))
                     .map(|e| {
                         (
                             e.id,
@@ -1942,7 +1979,7 @@ impl MultiTokenManager {
 
                     candidates = entries
                         .iter()
-                        .filter(|e| !e.disabled && !tried_ids.contains(&e.id))
+                        .filter(|e| !e.disabled && !tried_ids.contains(&e.id) && in_scope(e.id))
                         .map(|e| {
                             (
                                 e.id,
@@ -1955,8 +1992,12 @@ impl MultiTokenManager {
                 }
 
                 if candidates.is_empty() {
-                    let available = entries.iter().filter(|e| !e.disabled).count();
+                    let available = entries
+                        .iter()
+                        .filter(|e| !e.disabled && in_scope(e.id))
+                        .count();
                     if available == 0 {
+                        // 作用域内一个可用凭据都没有（被限定的凭据全被禁用/删除，或范围为空集）
                         anyhow::bail!("所有凭据均已禁用（{}/{}）", available, total);
                     }
                     anyhow::bail!(
@@ -2045,11 +2086,12 @@ impl MultiTokenManager {
     pub async fn acquire_context_for_user(
         &self,
         user_id: Option<&str>,
+        allowed: Option<&HashSet<u64>>,
     ) -> anyhow::Result<CallContext> {
-        // 无 user_id 时走默认逻辑
+        // 无 user_id 时走默认逻辑（仍受作用域限制）
         let user_id = match user_id {
             Some(id) if !id.is_empty() => id,
-            _ => return self.acquire_context().await,
+            _ => return self.acquire_context_scoped(allowed).await,
         };
 
         // 默认保持用户绑定（用于连续对话）。当绑定凭据“临时不可用”（速率限制/短冷却）时，
@@ -2057,7 +2099,9 @@ impl MultiTokenManager {
         let mut keep_affinity_binding = false;
 
         if let Some(bound_id) = self.affinity.get(user_id) {
-            let is_enabled = {
+            // 绑定凭据必须在作用域内，否则本次不复用（走 scoped 调度重选）
+            let in_scope = allowed.map(|a| a.contains(&bound_id)).unwrap_or(true);
+            let is_enabled = in_scope && {
                 let entries = self.entries.lock();
                 entries.iter().any(|e| e.id == bound_id && !e.disabled)
             };
@@ -2134,7 +2178,7 @@ impl MultiTokenManager {
             }
         }
 
-        let ctx = self.acquire_context().await?;
+        let ctx = self.acquire_context_scoped(allowed).await?;
         if !keep_affinity_binding {
             self.affinity.set(user_id, ctx.id);
         }
@@ -5335,7 +5379,7 @@ mod tests {
             MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
 
         let first = manager
-            .acquire_context_for_user(Some("user-a"))
+            .acquire_context_for_user(Some("user-a"), None)
             .await
             .unwrap();
         assert_eq!(first.id, 1);
@@ -5347,24 +5391,110 @@ mod tests {
         );
 
         let diverted = manager
-            .acquire_context_for_user(Some("user-a"))
+            .acquire_context_for_user(Some("user-a"), None)
             .await
             .unwrap();
         assert_eq!(diverted.id, 2);
 
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         let while_cooling = manager
-            .acquire_context_for_user(Some("user-a"))
+            .acquire_context_for_user(Some("user-a"), None)
             .await
             .unwrap();
         assert_eq!(while_cooling.id, 2);
 
         tokio::time::sleep(std::time::Duration::from_millis(220)).await;
         let rebound = manager
-            .acquire_context_for_user(Some("user-a"))
+            .acquire_context_for_user(Some("user-a"), None)
             .await
             .unwrap();
         assert_eq!(rebound.id, 1);
+    }
+
+    #[tokio::test]
+    async fn test_acquire_context_scoped_restricts_to_allowed_set() {
+        let mut config = Config::default();
+        config.credential_rpm = Some(60_000);
+
+        let mk = |tok: &str| {
+            let mut c = KiroCredentials::default();
+            c.access_token = Some(tok.to_string());
+            c.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+            c.priority = 0;
+            c
+        };
+        let manager = MultiTokenManager::new(
+            config,
+            vec![mk("t1"), mk("t2"), mk("t3")],
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+
+        // 限定只允许 #2：多次获取都必须命中 #2
+        let allowed: HashSet<u64> = [2].into_iter().collect();
+        for _ in 0..6 {
+            let ctx = manager
+                .acquire_context_scoped(Some(&allowed))
+                .await
+                .unwrap();
+            assert_eq!(ctx.id, 2);
+        }
+
+        // 允许 {1,3}：只会在 1/3 间轮转，绝不选 2
+        let allowed_13: HashSet<u64> = [1, 3].into_iter().collect();
+        for _ in 0..6 {
+            let ctx = manager
+                .acquire_context_scoped(Some(&allowed_13))
+                .await
+                .unwrap();
+            assert!(ctx.id == 1 || ctx.id == 3, "got {}", ctx.id);
+        }
+
+        // 空作用域（允许集合里全是不存在的 id）：作用域内无可用凭据 → 报错
+        let allowed_none: HashSet<u64> = [999].into_iter().collect();
+        assert!(
+            manager
+                .acquire_context_scoped(Some(&allowed_none))
+                .await
+                .is_err()
+        );
+
+        // allowed=None：不受限，可选任意号
+        let ctx = manager.acquire_context_scoped(None).await.unwrap();
+        assert!((1..=3).contains(&ctx.id));
+    }
+
+    #[tokio::test]
+    async fn test_acquire_context_for_user_affinity_respects_scope() {
+        let mut config = Config::default();
+        config.credential_rpm = Some(60_000);
+        let mk = |tok: &str, p: u32| {
+            let mut c = KiroCredentials::default();
+            c.access_token = Some(tok.to_string());
+            c.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+            c.priority = p;
+            c
+        };
+        // #1 优先级更高，无约束时用户会绑定到 #1
+        let manager =
+            MultiTokenManager::new(config, vec![mk("t1", 0), mk("t2", 1)], None, None, false)
+                .unwrap();
+
+        let first = manager
+            .acquire_context_for_user(Some("u"), None)
+            .await
+            .unwrap();
+        assert_eq!(first.id, 1);
+
+        // 现在把该用户限定到只允许 #2：即便亲和性绑的是 #1，也必须改用 #2
+        let allowed2: HashSet<u64> = [2].into_iter().collect();
+        let scoped = manager
+            .acquire_context_for_user(Some("u"), Some(&allowed2))
+            .await
+            .unwrap();
+        assert_eq!(scoped.id, 2);
     }
 
     // ============ 凭据级 Region 优先级测试 ============

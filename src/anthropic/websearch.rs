@@ -648,6 +648,7 @@ pub async fn handle_websearch_request(
     cache_tracker: Option<&std::sync::Arc<crate::anthropic::cache_tracker::CacheTracker>>,
     cache_profile: Option<&crate::anthropic::cache_tracker::CacheProfile>,
     input_tokens: i32,
+    allowed_credentials: Option<&std::collections::HashSet<u64>>,
 ) -> Response {
     // 1. 提取搜索查询
     let query = match extract_search_query(payload) {
@@ -673,42 +674,47 @@ pub async fn handle_websearch_request(
     // upstream_outcome：Some(true)=上游成功；Some(false)=收到上游错误响应；
     // None=本地/网络失败（不计入 API Key 统计）
     let upstream_outcome: Option<bool>;
-    let (search_results, final_cache_context) = match call_mcp_api(&provider, &mcp_request).await {
-        Ok(api_result) => {
-            let resolved_cache_context = match (cache_tracker, cache_profile) {
-                (Some(cache_tracker), Some(cache_profile)) => {
-                    let resolved_cache_context =
-                        resolve_cache_usage(cache_tracker, api_result.credential_id, cache_profile);
-                    tracing::info!(
-                        credential_id = api_result.credential_id,
-                        final_cache_creation_input_tokens =
-                            resolved_cache_context.cache_creation_input_tokens,
-                        final_cache_read_input_tokens =
-                            resolved_cache_context.cache_read_input_tokens,
-                        "Resolved cache usage for websearch request"
-                    );
-                    cache_tracker.update(api_result.credential_id, cache_profile);
-                    Some(resolved_cache_context)
-                }
-                _ => None,
-            };
-            upstream_outcome = Some(true);
-            (
-                parse_search_results(&api_result.response),
-                resolved_cache_context,
-            )
-        }
-        Err(e) => {
-            tracing::warn!("MCP API 调用失败: {}", e);
-            upstream_outcome =
-                crate::kiro::provider::UpstreamAttemptError::reached_upstream(&e).then_some(false);
-            let fallback_cache_context = match (cache_tracker, cache_profile) {
-                (Some(_), Some(_)) => Some(WebSearchCacheContext::default()),
-                _ => None,
-            };
-            (None, fallback_cache_context)
-        }
-    };
+    let (search_results, final_cache_context) =
+        match call_mcp_api(&provider, &mcp_request, allowed_credentials).await {
+            Ok(api_result) => {
+                let resolved_cache_context = match (cache_tracker, cache_profile) {
+                    (Some(cache_tracker), Some(cache_profile)) => {
+                        let resolved_cache_context = resolve_cache_usage(
+                            cache_tracker,
+                            api_result.credential_id,
+                            cache_profile,
+                        );
+                        tracing::info!(
+                            credential_id = api_result.credential_id,
+                            final_cache_creation_input_tokens =
+                                resolved_cache_context.cache_creation_input_tokens,
+                            final_cache_read_input_tokens =
+                                resolved_cache_context.cache_read_input_tokens,
+                            "Resolved cache usage for websearch request"
+                        );
+                        cache_tracker.update(api_result.credential_id, cache_profile);
+                        Some(resolved_cache_context)
+                    }
+                    _ => None,
+                };
+                upstream_outcome = Some(true);
+                (
+                    parse_search_results(&api_result.response),
+                    resolved_cache_context,
+                )
+            }
+            Err(e) => {
+                tracing::warn!("MCP API 调用失败: {}", e);
+                upstream_outcome =
+                    crate::kiro::provider::UpstreamAttemptError::reached_upstream(&e)
+                        .then_some(false);
+                let fallback_cache_context = match (cache_tracker, cache_profile) {
+                    (Some(_), Some(_)) => Some(WebSearchCacheContext::default()),
+                    _ => None,
+                };
+                (None, fallback_cache_context)
+            }
+        };
 
     // 4. 生成 SSE 响应
     let model = payload.model.clone();
@@ -822,12 +828,15 @@ struct ParsedMcpCallResult {
 async fn call_mcp_api(
     provider: &crate::kiro::provider::KiroProvider,
     request: &McpRequest,
+    allowed_credentials: Option<&std::collections::HashSet<u64>>,
 ) -> anyhow::Result<ParsedMcpCallResult> {
     let request_body = serde_json::to_string(request)?;
 
     tracing::debug!("MCP request: {}", request_body);
 
-    let api_result = provider.call_mcp(&request_body).await?;
+    let api_result = provider
+        .call_mcp(&request_body, allowed_credentials)
+        .await?;
 
     // 上游已 2xx：之后的失败（读 body / 解析 / MCP error 负载）也算「走到了上游」，
     // 用 UpstreamAttemptError 包装（upstream_status=200），让调用方计入 API Key 统计

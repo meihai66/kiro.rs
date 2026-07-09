@@ -175,6 +175,7 @@ impl AdminService {
                     success_count: r.success_count,
                     fail_count: r.fail_count,
                     in_flight,
+                    allowed_credentials: r.allowed_credentials,
                 }
             })
             .collect();
@@ -218,6 +219,7 @@ impl AdminService {
                 max_concurrent: req.max_concurrent,
                 cache_read_min_pct: req.cache_read_min_pct,
                 cache_read_max_pct: req.cache_read_max_pct,
+                allowed_credentials: req.allowed_credentials,
             })
             .map_err(|e| {
                 if e.to_string().contains("UNIQUE") {
@@ -244,6 +246,7 @@ impl AdminService {
             success_count: row.success_count,
             fail_count: row.fail_count,
             in_flight: 0,
+            allowed_credentials: row.allowed_credentials,
         })
     }
 
@@ -273,6 +276,7 @@ impl AdminService {
                     max_concurrent: req.max_concurrent,
                     cache_read_min_pct: req.cache_read_min_pct,
                     cache_read_max_pct: req.cache_read_max_pct,
+                    allowed_credentials: req.allowed_credentials,
                 },
             )
             .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
@@ -384,7 +388,7 @@ impl AdminService {
                 })?
         } else {
             provider
-                .call_api(&body, None)
+                .call_api(&body, None, None)
                 .await
                 .map_err(|e| AdminServiceError::InternalError(format!("上游调用失败: {}", e)))?
         };

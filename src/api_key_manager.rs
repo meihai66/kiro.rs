@@ -6,7 +6,7 @@
 //! - 写盘：`record_outcome` 异步调用 sqlite 更新 `success_count/fail_count/last_used_at`
 //! - 缓存比例：`cache_read_min_pct..=cache_read_max_pct`（0..=100），运行时按 key 取随机值
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -25,10 +25,23 @@ pub struct ApiKeyEntry {
     pub cache_read_min_pct: u32,
     pub cache_read_max_pct: u32,
     pub in_flight: AtomicU32,
+    /// 允许使用的凭据 ID 集合（None = 全部可用；Some 一定非空）
+    pub allowed_credentials: Option<Arc<HashSet<u64>>>,
 }
 
 impl ApiKeyEntry {
     pub fn from_row(row: &ApiKeyRow) -> Arc<Self> {
+        // 空列表 = 全部可用 → None；否则收敛为非空 HashSet
+        let allowed_credentials = if row.allowed_credentials.is_empty() {
+            None
+        } else {
+            Some(Arc::new(
+                row.allowed_credentials
+                    .iter()
+                    .copied()
+                    .collect::<HashSet<u64>>(),
+            ))
+        };
         Arc::new(Self {
             id: row.id,
             key: row.key.clone(),
@@ -38,7 +51,13 @@ impl ApiKeyEntry {
             cache_read_min_pct: row.cache_read_min_pct,
             cache_read_max_pct: row.cache_read_max_pct,
             in_flight: AtomicU32::new(0),
+            allowed_credentials,
         })
+    }
+
+    /// 允许使用的凭据集合（None = 不限制，全部可用）
+    pub fn allowed_credentials(&self) -> Option<Arc<HashSet<u64>>> {
+        self.allowed_credentials.clone()
     }
 
     /// 抽样一个 cache_read 比例（百分比）。两端 0 视为不模拟，返回 None。

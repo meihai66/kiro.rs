@@ -381,6 +381,7 @@ async fn main() {
                         max_concurrent: 0,
                         cache_read_min_pct: 0,
                         cache_read_max_pct: 0,
+                        allowed_credentials: Vec::new(),
                     }) {
                         Ok(row) => {
                             tracing::info!(

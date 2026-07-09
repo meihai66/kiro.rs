@@ -750,6 +750,8 @@ pub struct ApiKeyItem {
     pub success_count: u64,
     pub fail_count: u64,
     pub in_flight: u32,
+    /// 允许使用的凭据 ID 列表（空 = 全部可用）
+    pub allowed_credentials: Vec<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -774,6 +776,9 @@ pub struct CreateApiKeyRequest {
     pub cache_read_min_pct: u32,
     #[serde(default)]
     pub cache_read_max_pct: u32,
+    /// 允许使用的凭据 ID 列表（省略或空 = 全部可用）
+    #[serde(default)]
+    pub allowed_credentials: Vec<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -791,6 +796,9 @@ pub struct UpdateApiKeyRequest {
     pub cache_read_min_pct: Option<u32>,
     #[serde(default)]
     pub cache_read_max_pct: Option<u32>,
+    /// 允许使用的凭据范围（Some(列表)=覆盖，空列表=恢复全部可用；省略=不修改）
+    #[serde(default)]
+    pub allowed_credentials: Option<Vec<u64>>,
 }
 
 /// 错误响应

@@ -334,8 +334,10 @@ impl KiroProvider {
         &self,
         request_body: &str,
         user_id: Option<&str>,
+        allowed: Option<&std::collections::HashSet<u64>>,
     ) -> anyhow::Result<ApiCallResult> {
-        self.call_api_with_retry(request_body, false, user_id).await
+        self.call_api_with_retry(request_body, false, user_id, allowed)
+            .await
     }
 
     /// 强制用指定凭据发一次（无重试 / 无故障转移；用于"对话测试"等场景）。
@@ -403,8 +405,10 @@ impl KiroProvider {
         &self,
         request_body: &str,
         user_id: Option<&str>,
+        allowed: Option<&std::collections::HashSet<u64>>,
     ) -> anyhow::Result<ApiCallResult> {
-        self.call_api_with_retry(request_body, true, user_id).await
+        self.call_api_with_retry(request_body, true, user_id, allowed)
+            .await
     }
 
     /// 发送 MCP API 请求
@@ -416,12 +420,20 @@ impl KiroProvider {
     ///
     /// # Returns
     /// 返回原始的 HTTP Response 以及实际使用的 credential_id
-    pub async fn call_mcp(&self, request_body: &str) -> anyhow::Result<McpCallResult> {
-        self.call_mcp_with_retry(request_body).await
+    pub async fn call_mcp(
+        &self,
+        request_body: &str,
+        allowed: Option<&std::collections::HashSet<u64>>,
+    ) -> anyhow::Result<McpCallResult> {
+        self.call_mcp_with_retry(request_body, allowed).await
     }
 
     /// 内部方法：带重试逻辑的 MCP API 调用
-    async fn call_mcp_with_retry(&self, request_body: &str) -> anyhow::Result<McpCallResult> {
+    async fn call_mcp_with_retry(
+        &self,
+        request_body: &str,
+        allowed: Option<&std::collections::HashSet<u64>>,
+    ) -> anyhow::Result<McpCallResult> {
         let total_credentials = self.token_manager.total_count();
         let available = self.token_manager.available_count();
         if available == 0 {
@@ -433,8 +445,8 @@ impl KiroProvider {
         let mut forced_token_refresh: HashSet<u64> = HashSet::new();
 
         for attempt in 0..max_retries {
-            // 获取调用上下文
-            let ctx = match self.token_manager.acquire_context().await {
+            // 获取调用上下文（受 API Key 允许范围限制）
+            let ctx = match self.token_manager.acquire_context_scoped(allowed).await {
                 Ok(c) => c,
                 Err(e) => {
                     last_error = Some(e);
@@ -796,6 +808,7 @@ impl KiroProvider {
         request_body: &str,
         is_stream: bool,
         user_id: Option<&str>,
+        allowed: Option<&std::collections::HashSet<u64>>,
     ) -> anyhow::Result<ApiCallResult> {
         let total_credentials = self.token_manager.total_count();
         let available = self.token_manager.available_count();
@@ -809,8 +822,12 @@ impl KiroProvider {
         let api_type = if is_stream { "流式" } else { "非流式" };
 
         for attempt in 0..max_retries {
-            // 获取调用上下文（绑定 index、credentials、token），支持用户亲和性
-            let ctx = match self.token_manager.acquire_context_for_user(user_id).await {
+            // 获取调用上下文（绑定 index、credentials、token），支持用户亲和性 + API Key 允许范围
+            let ctx = match self
+                .token_manager
+                .acquire_context_for_user(user_id, allowed)
+                .await
+            {
                 Ok(c) => c,
                 Err(e) => {
                     last_error = Some(e);

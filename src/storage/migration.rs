@@ -132,6 +132,8 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
     add_column_if_missing(conn, "credentials", "last_overage_status", "TEXT")?;
     // 凭据自动禁用事件落 error_logs 时记录禁用原因（AccountSuspended/AuthenticationFailed 等）
     add_column_if_missing(conn, "error_logs", "disable_reason", "TEXT")?;
+    // API Key 允许使用的凭据范围（CSV 凭据 ID，空/NULL = 全部可用）
+    add_column_if_missing(conn, "api_keys", "allowed_credentials", "TEXT")?;
     // 每分钟 429 增量（用于「最佳 RPM」分析）；老库默认 0
     add_column_if_missing(
         conn,
