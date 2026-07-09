@@ -1,5 +1,11 @@
 # Changelog
 
+## [v1.1.67] - 2026-07-09
+
+### 优化
+
+- **去掉 `Connection: close`，复用连接池降低首字延迟** — 上游 API/MCP 请求此前每次都带 `Connection: close`，响应完即关连接、`pool_idle_timeout(90s)` 连接池形同虚设，每发都重做 TCP+TLS 握手。去掉后连接被池子复用（实测连续请求仅保持 1 条 ESTABLISHED 连接），每个非首次请求省一轮握手（直连约 0.5s、走代理约 1.3s）(`src/kiro/provider.rs`)
+
 ## [v1.1.66] - 2026-07-09
 
 ### 新增
