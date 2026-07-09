@@ -1,5 +1,11 @@
 # Changelog
 
+## [v1.1.66] - 2026-07-09
+
+### 新增
+
+- **API Key 可限定允许使用的凭据范围** — 编辑/新建 API Key 弹窗新增凭据多选器（搜索/全选/清空），不勾选=全部可用；列表新增「凭据范围」列（全部 / N 个）。存储层 `api_keys` 增加 `allowed_credentials` 列（CSV，空=全部，旧库自动升级）；调度核心 `acquire_context` 拆出 `acquire_context_scoped(allowed)`，候选收集、耗尽判定、自愈后重收集及亲和性绑定均按范围过滤；允许集合从 `AuthGuard` 一路透传（handler → call_api/stream/mcp → acquire_context_for_user/scoped，覆盖 WebSearch 路径），并新增调度范围过滤与亲和性尊重范围两个单元测试 (`src/admin/service.rs`, `src/admin/types.rs`, `src/anthropic/handlers.rs`, `src/anthropic/websearch.rs`, `src/api_key_manager.rs`, `src/kiro/provider.rs`, `src/kiro/token_manager.rs`, `src/storage/mod.rs`, `src/storage/migration.rs`, `admin-ui/src/pages/api-keys-page.tsx`, `admin-ui/src/types/api.ts`)
+
 ## [v1.1.65] - 2026-07-09
 
 ### 优化
