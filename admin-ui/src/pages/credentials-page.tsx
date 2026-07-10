@@ -367,28 +367,34 @@ function classifyCredential(
   return 'normal'
 }
 
-/** 三种结果的基色（s=成功 e=失败 r=429） */
-const OUTCOME_RGB = {
-  s: [16, 185, 129], // emerald-500
-  e: [239, 68, 68], // red-500
-  r: [234, 179, 8], // yellow-500
-} as const
 const EMPTY_FILL = 'var(--color-muted)'
+/** 全成功时的纯绿（emerald-500 基调），与渐变起点稍有区分，让“出现失败”一眼可见 */
+const PERFECT_GREEN = 'hsl(158, 75%, 40%)'
+/** 失败率→颜色的容忍度指数：>1 时低失败率更偏绿，需接近全失败才转红（数值越大越容忍） */
+const FAIL_TOLERANCE = 1.3
 
-/** 按成功/失败/429 占比对三种基色做加权混色：
- * 全成功=纯绿，失败越多越偏红，429 越多越偏黄。 */
-function blendOutcomeColor(s: number, e: number, r: number): string {
+/** 每格按“失败率”在 绿→黄→红 之间连续取色（失败与 429 合并计入失败）。
+ *
+ * - 全成功 = 纯绿（PERFECT_GREEN）；
+ * - 一旦出现失败/429，从黄绿开始，随失败率升高经黄色过渡到红色（走 hue 而非 RGB 直混，
+ *   避免绿红直接混成脏褐色）；
+ * - 失败率经 `^FAIL_TOLERANCE` 映射：少量失败仍明显偏绿，接近全失败才转纯红。
+ *
+ * 每格 100 次请求 → 失败率天然是 0%~100% 的百分比刻度，不同失败数对应不同颜色。 */
+function outcomeCellColor(s: number, e: number, r: number): string {
   const total = s + e + r
   if (total <= 0) return EMPTY_FILL
-  const mix = (i: number) =>
-    Math.round(
-      (OUTCOME_RGB.s[i] * s + OUTCOME_RGB.e[i] * e + OUTCOME_RGB.r[i] * r) / total
-    )
-  return `rgb(${mix(0)}, ${mix(1)}, ${mix(2)})`
+  const bad = e + r // 失败与 429 合并计入
+  if (bad === 0) return PERFECT_GREEN
+  const failRate = Math.min(bad / total, 1)
+  // hue：约 100°(黄绿) → 0°(红)，经 60°(黄) 过渡；容忍度曲线让低失败率停留在绿端
+  const hue = 100 * (1 - Math.pow(failRate, FAIL_TOLERANCE))
+  return `hsl(${hue.toFixed(0)}, 82%, 46%)`
 }
 
 /** 最近 1000 次请求分布条：一行 10 格（每格 = 100 次请求的一块，左旧右新），
- * 格色 = 该块内 成功/失败/429 按占比混色（全成功纯绿、失败偏红、429 偏黄）；
+ * 格色 = 该块内 失败率（失败与 429 合并）在 绿→黄→红 连续渐变上取色（全成功纯绿，
+ * 失败率越高越偏红，容忍度较大：少量失败仍偏绿）；
  * 最新一格未满 100 次时按次数部分填充，其余灰底。
  * 共 10 个节点 + 组件级 memo，渲染开销可忽略；高度 7px 不撑高表格行。 */
 const RecentOutcomeStrip = memo(function RecentOutcomeStrip({
@@ -409,7 +415,7 @@ const RecentOutcomeStrip = memo(function RecentOutcomeStrip({
   return (
     <div
       className="mt-0.5 flex h-[7px] items-stretch gap-px"
-      title="最近 1000 次请求（每格 100 次，左旧右新）：格色 = 成功(绿)/失败(红)/429(黄) 按占比混色"
+      title="最近 1000 次请求（每格 100 次，左旧右新）：格色 = 失败率(失败+429合并) 在 绿→黄→红 上取色，全成功=绿，越红失败越多"
     >
       {slots.map((chunk, i) => {
         if (chunk === null) {
@@ -419,7 +425,7 @@ const RecentOutcomeStrip = memo(function RecentOutcomeStrip({
         for (const ch of chunk) {
           if (ch === 's' || ch === 'e' || ch === 'r') counts[ch]++
         }
-        const fill = blendOutcomeColor(counts.s, counts.e, counts.r)
+        const fill = outcomeCellColor(counts.s, counts.e, counts.r)
         const pct = (chunk.length / PER_SLOT) * 100
         return (
           <div
