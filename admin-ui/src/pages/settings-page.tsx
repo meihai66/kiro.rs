@@ -13,6 +13,7 @@ import {
 import { extractErrorMessage } from '@/lib/utils'
 import { storage } from '@/lib/storage'
 import type {
+  ModelBodyLimitRule,
   ModelEntry,
   ModelMappingConfig,
   PricingConfig,
@@ -117,6 +118,30 @@ const draftToModelMapping = (d: ModelMappingDraft): ModelMappingConfig => ({
     model: r.model.trim(),
   })),
 })
+
+// 按模型的请求体大小上限编辑态（maxBytes 用字符串保存，保存时再转数字）
+type BodyLimitRuleDraft = {
+  label: string
+  match: string
+  matchType: string
+  maxBytes: string
+}
+const bodyLimitsToDraft = (
+  list: ModelBodyLimitRule[] | undefined
+): BodyLimitRuleDraft[] =>
+  (list ?? []).map((r) => ({
+    label: r.label,
+    match: r.match,
+    matchType: r.matchType,
+    maxBytes: r.maxBytes.toString(),
+  }))
+const draftToBodyLimits = (d: BodyLimitRuleDraft[]): ModelBodyLimitRule[] =>
+  d.map((r) => ({
+    label: r.label.trim(),
+    match: r.match.trim(),
+    matchType: r.matchType,
+    maxBytes: parseInt(r.maxBytes) || 0,
+  }))
 
 // /v1/models 模型列表编辑态（数字字段用字符串保存，保存时再转数字）
 type ModelEntryDraft = {
@@ -227,6 +252,8 @@ export function SettingsPage() {
   const [cMaxHistoryTurns, setCMaxHistoryTurns] = useState('')
   const [cMaxHistoryChars, setCMaxHistoryChars] = useState('')
   const [cMaxRequestBodyBytes, setCMaxRequestBodyBytes] = useState('')
+  // 按模型的请求体大小上限覆盖规则（maxBytes 用字符串态便于输入）
+  const [bodyLimits, setBodyLimits] = useState<BodyLimitRuleDraft[]>([])
 
   // 模型定价
   const [pricing, setPricing] = useState<PricingDraft>(() =>
@@ -304,6 +331,7 @@ export function SettingsPage() {
       setCMaxHistoryTurns(c.maxHistoryTurns.toString())
       setCMaxHistoryChars(c.maxHistoryChars.toString())
       setCMaxRequestBodyBytes(c.maxRequestBodyBytes.toString())
+      setBodyLimits(bodyLimitsToDraft(c.perModelBodyLimits))
       if (globalConfig.pricing) {
         setPricing(pricingToDraft(globalConfig.pricing))
       }
@@ -567,6 +595,15 @@ export function SettingsPage() {
         parseInt(cMaxRequestBodyBytes) || 0,
         oc.maxRequestBodyBytes
       )
+      // 按模型的请求体上限规则：整体替换，JSON 深比较检测变更
+      const newBodyLimits = draftToBodyLimits(bodyLimits)
+      if (
+        JSON.stringify(newBodyLimits) !==
+        JSON.stringify(oc.perModelBodyLimits ?? [])
+      ) {
+        comp.perModelBodyLimits = newBodyLimits
+        hasCompChanges = true
+      }
       if (hasCompChanges) {
         globalPayload.compression = comp
         hasGlobalChanges = true
@@ -679,6 +716,23 @@ export function SettingsPage() {
     }))
   const removeMappingRule = (idx: number) =>
     setModelMapping((m) => ({ rules: m.rules.filter((_, i) => i !== idx) }))
+
+  // 按模型请求体上限规则增删改
+  const updateBodyLimit = (
+    idx: number,
+    key: keyof BodyLimitRuleDraft,
+    value: string
+  ) =>
+    setBodyLimits((list) =>
+      list.map((r, i) => (i === idx ? { ...r, [key]: value } : r))
+    )
+  const addBodyLimit = () =>
+    setBodyLimits((list) => [
+      ...list,
+      { label: '', match: '', matchType: 'contains', maxBytes: '' },
+    ])
+  const removeBodyLimit = (idx: number) =>
+    setBodyLimits((list) => list.filter((_, i) => i !== idx))
 
   // /v1/models 模型列表增删改
   const updateModelEntry = (
@@ -1657,6 +1711,85 @@ export function SettingsPage() {
                 setCMaxRequestBodyBytes,
                 '超过此大小触发自适应压缩，0 = 不限'
               )}
+
+              {/* 按模型覆盖请求体大小上限 */}
+              <div className="space-y-2 border-t pt-3">
+                <div className="text-sm font-medium">按模型覆盖请求体上限</div>
+                <p className="text-xs text-muted-foreground">
+                  按模型名匹配，自上而下<b>第一条命中</b>的规则用其字节数覆盖上面的全局上限；
+                  未命中任何规则的模型仍用全局值。留空则所有模型都用全局值。
+                </p>
+                <div className="hidden md:grid grid-cols-[1fr_1.4fr_0.9fr_1.4fr_auto] gap-2 text-xs text-muted-foreground px-1">
+                  <span>标签</span>
+                  <span>匹配串</span>
+                  <span>方式</span>
+                  <span>上限（字节，0=不限）</span>
+                  <span></span>
+                </div>
+                {bodyLimits.map((rule, idx) => (
+                  <div
+                    key={idx}
+                    className="grid grid-cols-2 md:grid-cols-[1fr_1.4fr_0.9fr_1.4fr_auto] gap-2 items-center"
+                  >
+                    <Input
+                      value={rule.label}
+                      placeholder="标签"
+                      onChange={(e) =>
+                        updateBodyLimit(idx, 'label', e.target.value)
+                      }
+                      disabled={isPending}
+                    />
+                    <Input
+                      value={rule.match}
+                      placeholder="如 opus"
+                      onChange={(e) =>
+                        updateBodyLimit(idx, 'match', e.target.value)
+                      }
+                      disabled={isPending}
+                    />
+                    <select
+                      className="flex h-9 w-full rounded-md border border-input bg-transparent px-2 py-1 text-sm"
+                      value={rule.matchType}
+                      onChange={(e) =>
+                        updateBodyLimit(idx, 'matchType', e.target.value)
+                      }
+                      disabled={isPending}
+                    >
+                      <option value="contains">包含</option>
+                      <option value="prefix">前缀</option>
+                      <option value="exact">精确</option>
+                      <option value="glob">通配</option>
+                    </select>
+                    <Input
+                      type="number"
+                      value={rule.maxBytes}
+                      placeholder="如 6291456"
+                      onChange={(e) =>
+                        updateBodyLimit(idx, 'maxBytes', e.target.value)
+                      }
+                      disabled={isPending}
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => removeBodyLimit(idx)}
+                      disabled={isPending}
+                    >
+                      删除
+                    </Button>
+                  </div>
+                ))}
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={addBodyLimit}
+                  disabled={isPending}
+                >
+                  + 添加规则
+                </Button>
+              </div>
             </CardContent>
           </Card>
 

@@ -453,6 +453,45 @@ impl ModelMappingConfig {
     }
 }
 
+/// 一条「按模型的请求体大小上限」规则（自上而下第一条命中者生效）
+///
+/// 命中后用其 `max_bytes` 覆盖全局 [`CompressionConfig::max_request_body_bytes`]，
+/// 让不同模型可配不同的请求体上限。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelBodyLimitRule {
+    /// 展示用标签（如 "Opus"）
+    #[serde(default)]
+    pub label: String,
+    /// 匹配串（匹配请求里的模型名）
+    #[serde(rename = "match", default)]
+    pub pattern: String,
+    /// 匹配方式：exact | prefix | contains | glob
+    #[serde(default = "default_match_type")]
+    pub match_type: String,
+    /// 命中后该模型的请求体最大字节数（0 = 不限制）
+    #[serde(default)]
+    pub max_bytes: usize,
+}
+
+impl ModelBodyLimitRule {
+    /// 判断模型名是否命中本规则（大小写不敏感，与 [`ModelMappingRule::matches`] 同规则）
+    pub fn matches(&self, model: &str) -> bool {
+        let p = self.pattern.trim();
+        if p.is_empty() {
+            return false;
+        }
+        let model_l = model.to_ascii_lowercase();
+        let pat_l = p.to_ascii_lowercase();
+        match self.match_type.as_str() {
+            "exact" => model_l == pat_l,
+            "prefix" => model_l.starts_with(&pat_l),
+            "glob" => glob_match(&pat_l, &model_l),
+            _ => model_l.contains(&pat_l),
+        }
+    }
+}
+
 /// `/v1/models` 的一条自定义模型条目。
 ///
 /// 只暴露常用字段；其余响应字段（object / owned_by / type 等）由 handler 填固定值。
@@ -699,6 +738,24 @@ pub struct CompressionConfig {
     /// 请求体最大字节数，超过则直接拒绝（0 = 不限制）
     #[serde(default = "default_max_request_body_bytes")]
     pub max_request_body_bytes: usize,
+    /// 按模型的请求体大小上限覆盖规则（自上而下第一条命中生效；
+    /// 未命中任何规则时回退到全局 `max_request_body_bytes`）
+    #[serde(default)]
+    pub per_model_body_limits: Vec<ModelBodyLimitRule>,
+}
+
+impl CompressionConfig {
+    /// 解析指定模型实际生效的请求体大小上限（字节）。
+    ///
+    /// 优先匹配 `per_model_body_limits`（有序，第一条命中生效），
+    /// 未命中则回退全局 `max_request_body_bytes`。
+    pub fn resolve_max_body_bytes(&self, model: &str) -> usize {
+        self.per_model_body_limits
+            .iter()
+            .find(|r| r.matches(model))
+            .map(|r| r.max_bytes)
+            .unwrap_or(self.max_request_body_bytes)
+    }
 }
 
 impl Default for CompressionConfig {
@@ -719,6 +776,7 @@ impl Default for CompressionConfig {
             image_max_pixels_multi: default_image_max_pixels_multi(),
             image_multi_threshold: default_image_multi_threshold(),
             max_request_body_bytes: default_max_request_body_bytes(),
+            per_model_body_limits: Vec::new(),
         }
     }
 }
@@ -941,6 +999,40 @@ mod tests {
             rules: vec![rule("haiku", "contains", "")],
         };
         assert!(cfg_empty_target.resolve("claude-haiku-4-5").is_none());
+    }
+
+    #[test]
+    fn test_resolve_max_body_bytes_per_model() {
+        let limit = |pat: &str, mt: &str, max_bytes: usize| ModelBodyLimitRule {
+            label: String::new(),
+            pattern: pat.to_string(),
+            match_type: mt.to_string(),
+            max_bytes,
+        };
+
+        let mut cfg = CompressionConfig::default();
+        cfg.max_request_body_bytes = 4_718_592; // 全局默认
+
+        // 未配置任何规则 → 一律回退全局值
+        assert_eq!(cfg.resolve_max_body_bytes("claude-opus-4-8"), 4_718_592);
+
+        cfg.per_model_body_limits = vec![
+            limit("opus", "contains", 6_291_456),
+            limit("haiku", "contains", 3_145_728),
+        ];
+        // 命中 opus / haiku 用各自上限（大小写不敏感）
+        assert_eq!(
+            cfg.resolve_max_body_bytes("claude-OPUS-4-8-thinking"),
+            6_291_456
+        );
+        assert_eq!(cfg.resolve_max_body_bytes("claude-haiku-4-5"), 3_145_728);
+        // 未命中（sonnet）→ 回退全局
+        assert_eq!(cfg.resolve_max_body_bytes("claude-sonnet-4-6"), 4_718_592);
+
+        // 自上而下第一条命中生效
+        cfg.per_model_body_limits =
+            vec![limit("opus", "contains", 1000), limit("opus-4-8", "contains", 2000)];
+        assert_eq!(cfg.resolve_max_body_bytes("claude-opus-4-8"), 1000);
     }
 
     #[test]

@@ -1070,6 +1070,8 @@ pub struct CompressionConfigResponse {
     pub max_history_turns: usize,
     pub max_history_chars: usize,
     pub max_request_body_bytes: usize,
+    /// 按模型的请求体大小上限覆盖规则
+    pub per_model_body_limits: Vec<crate::model::config::ModelBodyLimitRule>,
 }
 
 /// 更新全局配置请求
@@ -1155,4 +1157,6 @@ pub struct UpdateCompressionConfigRequest {
     pub max_history_turns: Option<usize>,
     pub max_history_chars: Option<usize>,
     pub max_request_body_bytes: Option<usize>,
+    /// 按模型的请求体大小上限覆盖规则（提供则整体替换）
+    pub per_model_body_limits: Option<Vec<crate::model::config::ModelBodyLimitRule>>,
 }

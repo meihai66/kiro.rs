@@ -1388,7 +1388,8 @@ pub async fn post_messages(
     };
 
     // 请求体大小预检（上游存在硬性请求体大小限制；按实际序列化后的总字节数判断）
-    let max_body = compression_config.max_request_body_bytes;
+    // 支持按模型覆盖：命中 per_model_body_limits 规则用其上限，否则用全局值
+    let max_body = compression_config.resolve_max_body_bytes(&payload.model);
     if max_body > 0 && request_body.len() > max_body && compression_config.enabled {
         // 自适应二次压缩：按 request_body_bytes 迭代截断，尽量把请求缩到阈值内
         match adaptive_shrink_request_body(

@@ -2141,6 +2141,7 @@ impl AdminService {
                 max_history_turns: c.max_history_turns,
                 max_history_chars: c.max_history_chars,
                 max_request_body_bytes: c.max_request_body_bytes,
+                per_model_body_limits: c.per_model_body_limits.clone(),
             },
             auto_disable_patterns: config.auto_disable_patterns.clone(),
             error_replace_rules: config.error_replace_rules.clone(),
@@ -3008,6 +3009,9 @@ impl AdminService {
         }
         if let Some(v) = src.max_request_body_bytes {
             target.max_request_body_bytes = v;
+        }
+        if let Some(ref v) = src.per_model_body_limits {
+            target.per_model_body_limits = v.clone();
         }
     }
 }

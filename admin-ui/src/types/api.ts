@@ -652,6 +652,17 @@ export interface UpdateProxyConfigRequest {
 
 // ============ 全局配置 ============
 
+// 按模型的请求体大小上限覆盖规则
+export interface ModelBodyLimitRule {
+  label: string
+  /** 匹配串（匹配请求里的模型名） */
+  match: string
+  /** 匹配方式：exact | prefix | contains | glob */
+  matchType: string
+  /** 命中后该模型的请求体最大字节数（0 = 不限制） */
+  maxBytes: number
+}
+
 export interface CompressionConfigResponse {
   enabled: boolean
   whitespaceCompression: boolean
@@ -664,6 +675,7 @@ export interface CompressionConfigResponse {
   maxHistoryTurns: number
   maxHistoryChars: number
   maxRequestBodyBytes: number
+  perModelBodyLimits: ModelBodyLimitRule[]
 }
 
 // 模型定价
@@ -771,6 +783,7 @@ export interface UpdateCompressionConfigRequest {
   maxHistoryTurns?: number
   maxHistoryChars?: number
   maxRequestBodyBytes?: number
+  perModelBodyLimits?: ModelBodyLimitRule[]
 }
 
 export interface UpdateGlobalConfigRequest {
