@@ -31,6 +31,37 @@ const ADAPTIVE_MIN_TOOL_USE_INPUT_MAX_CHARS: usize = 256;
 const ADAPTIVE_HISTORY_PRESERVE_MESSAGES: usize = 2;
 /// 消息内容二次压缩的最低阈值（字符数）
 const ADAPTIVE_MIN_MESSAGE_CONTENT_MAX_CHARS: usize = 8192;
+/// 请求体超过该字节数时，把反序列化 / token 估算 / 序列化等 CPU 密集操作放到阻塞线程池，
+/// 避免占用 async worker；小于该阈值则内联执行，省去线程池往返、保护小请求首字延迟。
+const BLOCKING_OFFLOAD_MIN_BYTES: usize = 256 * 1024; // 256KB
+
+/// 按 `offload` 决定 CPU 密集闭包是放到阻塞线程池还是内联执行：
+/// - `true`：`spawn_blocking`，不占用 async worker（大请求）；
+/// - `false`：直接内联执行，省去线程池往返（小请求）。
+async fn run_maybe_blocking<F, T>(offload: bool, f: F) -> Result<T, tokio::task::JoinError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    if offload {
+        tokio::task::spawn_blocking(f).await
+    } else {
+        Ok(f())
+    }
+}
+
+/// 阻塞任务 panic（JoinError）时的统一 500 响应，避免各调用点复制粘贴同一段。
+fn blocking_join_error_response(
+    user_msg: &str,
+    e: tokio::task::JoinError,
+) -> axum::response::Response {
+    tracing::error!("阻塞任务异常（{}）: {}", user_msg, e);
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse::new("internal_error", user_msg.to_string())),
+    )
+        .into_response()
+}
 
 use super::converter::{ConversionError, convert_request};
 use super::middleware::AppState;
@@ -1142,12 +1173,21 @@ pub async fn post_messages(
     // 手动反序列化：失败时记录 warn 日志，便于排查客户端请求参数问题
     // （Axum 的 Json 提取器在反序列化失败时会在进入 handler 之前返回 400，
     //  没有任何业务日志，导致难以定位是哪条请求、缺哪个字段。）
-    let mut payload: MessagesRequest = match serde_json::from_slice(&body) {
-        Ok(p) => p,
-        Err(err) => {
+    // 反序列化整包请求体（含 base64 图片，O(body 大小) 的 CPU 操作）。仅当请求体较大时
+    // 才放到阻塞线程池，避免占用 async worker 线程；小请求内联解析、省去线程池往返。
+    // body.len() 提前取出用于失败日志，并作为后续 token 估算/序列化是否 offload 的依据。
+    let body_bytes = body.len();
+    let offload_heavy = body_bytes > BLOCKING_OFFLOAD_MIN_BYTES;
+    let parse_result = run_maybe_blocking(offload_heavy, move || {
+        serde_json::from_slice::<MessagesRequest>(&body)
+    })
+    .await;
+    let mut payload: MessagesRequest = match parse_result {
+        Ok(Ok(p)) => p,
+        Ok(Err(err)) => {
             tracing::warn!(
                 path = %uri.path(),
-                body_bytes = body.len(),
+                body_bytes,
                 line = err.line(),
                 column = err.column(),
                 error = %err,
@@ -1162,6 +1202,7 @@ pub async fn post_messages(
             )
                 .into_response();
         }
+        Err(e) => return blocking_join_error_response("请求解析内部错误", e),
     };
 
     // 从 ApiKey 配置取 cache 比例模拟（命中 0..0 时 None=不模拟）
@@ -1188,13 +1229,24 @@ pub async fn post_messages(
     // 提取 user_id 用于凭据亲和性
     let user_id = payload.metadata.as_ref().and_then(|m| m.user_id.clone());
 
-    // 估算压缩前 input tokens（需在 convert_request 之前，因为后者会消费压缩）
-    let estimated_input_tokens = token::count_all_tokens(
-        payload.model.clone(),
-        payload.system.clone(),
-        payload.messages.clone(),
-        payload.tools.clone(),
-    ) as i32;
+    // 估算压缩前 input tokens（需在 convert_request 之前，因为后者会消费压缩）。
+    // count_all_tokens 会 clone 整个 payload 并对图片做 base64 解码，属 CPU 密集操作，
+    // 放到阻塞线程池执行以免占用 async worker 线程；payload move 进闭包后原样取回，
+    // 连 clone 也随之落在阻塞线程上（本地估算，count_tokens 远程未启用时无嵌套运行时问题）。
+    let (mut payload, estimated_input_tokens) = match run_maybe_blocking(offload_heavy, move || {
+        let tokens = token::count_all_tokens(
+            payload.model.clone(),
+            payload.system.clone(),
+            payload.messages.clone(),
+            payload.tools.clone(),
+        ) as i32;
+        (payload, tokens)
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => return blocking_join_error_response("token 估算内部错误", e),
+    };
 
     tracing::info!(
         path = %uri.path(),
@@ -1289,7 +1341,7 @@ pub async fn post_messages(
         .as_ref()
         .map(|c| c.read().model_mapping.clone())
         .unwrap_or_default();
-    let (payload, convert_outcome) = match tokio::task::spawn_blocking(move || {
+    let (payload, convert_outcome) = match run_maybe_blocking(offload_heavy, move || {
         let result = convert_request(
             &payload,
             &compression_config_for_convert,
@@ -1300,17 +1352,7 @@ pub async fn post_messages(
     .await
     {
         Ok(v) => v,
-        Err(e) => {
-            tracing::error!("convert_request 阻塞任务异常: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new(
-                    "internal_error",
-                    "请求转换内部错误".to_string(),
-                )),
-            )
-                .into_response();
-        }
+        Err(e) => return blocking_join_error_response("请求转换内部错误", e),
     };
     let conversion_result = match convert_outcome {
         Ok(result) => result,
@@ -1366,13 +1408,25 @@ pub async fn post_messages(
             top_p: payload.top_p.map(|p| p.clamp(0.0, 1.0)),
         }
     });
-    let mut kiro_request = KiroRequest {
+    let kiro_request = KiroRequest {
         conversation_state: conversion_result.conversation_state,
         profile_arn: None,
         inference_config,
     };
 
-    let mut request_body = match serde_json::to_string(&kiro_request) {
+    // 序列化整包请求体（含全部图片/历史，O(请求体大小) 的 CPU 操作），放到阻塞线程池，
+    // 避免大请求下占用 async worker 线程；kiro_request move 进闭包后取回（后续大小预检/
+    // 自适应压缩/日志仍需用它）。
+    let (mut kiro_request, serialized) = match run_maybe_blocking(offload_heavy, move || {
+        let r = serde_json::to_string(&kiro_request);
+        (kiro_request, r)
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => return blocking_join_error_response("请求序列化内部错误", e),
+    };
+    let mut request_body = match serialized {
         Ok(body) => body,
         Err(e) => {
             tracing::error!("序列化请求失败: {}", e);
