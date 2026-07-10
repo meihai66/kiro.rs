@@ -1,5 +1,11 @@
 # Changelog
 
+## [v1.1.69] - 2026-07-10
+
+### 优化
+
+- **请求解析/转换/序列化按体积门控放到阻塞线程池** — `from_slice` 反序列化、`count_all_tokens`、`convert_request`、`to_string` 序列化等 CPU 密集操作按请求体大小（>256KB）决定是否 `spawn_blocking`：大请求 offload 避免占用 async worker 线程、高并发下饿死轻量请求；小请求内联执行省去线程池往返，不影响首字延迟。`count_all_tokens` 的整包 clone 与图片 base64 解码一并移出 async 线程，并抽出 `run_maybe_blocking` / `blocking_join_error_response` 两个 helper 收敛重复的 offload 与 500 处理逻辑 (`src/anthropic/handlers.rs`)
+
 ## [v1.1.68] - 2026-07-10
 
 ### 新增
