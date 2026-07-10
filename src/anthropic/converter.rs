@@ -778,7 +778,7 @@ fn process_message_content(
                                                     ) {
                                                         Ok(result) => {
                                                             images.push(KiroImage::from_base64(
-                                                                format,
+                                                                result.output_format,
                                                                 result.data,
                                                             ));
                                                             *remaining_image_budget -= 1;
@@ -820,8 +820,10 @@ fn process_message_content(
                                                     result.tokens
                                                 );
                                             }
-                                            images
-                                                .push(KiroImage::from_base64(format, result.data));
+                                            images.push(KiroImage::from_base64(
+                                                result.output_format,
+                                                result.data,
+                                            ));
                                             *remaining_image_budget -= 1;
                                         }
                                         Err(e) => {

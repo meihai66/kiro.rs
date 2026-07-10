@@ -57,6 +57,12 @@ pub struct ImageProcessResult {
     pub original_bytes_len: usize,
     /// 处理后图片字节数（编码后、base64 前）
     pub final_bytes_len: usize,
+    /// 处理后数据的实际图片格式（"jpeg"/"png"/"gif"/"webp"）
+    ///
+    /// 以**字节内容嗅探**为准，而非客户端声明的 `media_type`。
+    /// 调用方应使用该字段作为上游图片的 `format` 标签，避免声明格式与
+    /// 实际字节不一致导致上游 `IMAGE_MIME_MISMATCH` 错误。
+    pub output_format: String,
 }
 
 /// 将 GIF 抽帧并重编码为多张静态图（用于降低请求体、提升"动图内容"识别效果）
@@ -167,6 +173,7 @@ pub fn process_gif_frames(
                 was_reencoded: true,
                 original_bytes_len,
                 final_bytes_len,
+                output_format: GIF_FRAME_OUTPUT_FORMAT.to_string(),
             });
 
             next_sample_ms = frame_start_ms.saturating_add(sampling_interval_ms);
@@ -242,6 +249,7 @@ pub fn process_image_to_format(
         was_reencoded: true,
         original_bytes_len,
         final_bytes_len,
+        output_format: output_format.to_string(),
     })
 }
 
@@ -297,9 +305,28 @@ pub fn process_image(
     let reader = ImageReader::new(Cursor::new(&bytes))
         .with_guessed_format()
         .map_err(|e| format!("图片格式识别失败: {}", e))?;
+    // 以字节内容嗅探出的真实格式为准（into_dimensions 会消费 reader，需提前取出）
+    let sniffed = reader.format().and_then(sniffed_format_str);
     let original_size = reader
         .into_dimensions()
         .map_err(|e| format!("读取图片尺寸失败: {}", e))?;
+
+    // 确定权威输出格式与标签：
+    // - 嗅探到受支持格式：以实际字节为准（修正声明格式与内容不一致的情况）
+    // - 嗅探失败/不受支持：回退到声明格式，并强制重编码以保证字节与标签一致
+    let (output_format, sniff_failed) = match sniffed {
+        Some(actual) => {
+            if !actual.eq_ignore_ascii_case(format) {
+                tracing::warn!(
+                    declared = format,
+                    detected = actual,
+                    "图片实际格式与声明的 media_type 不一致，已按实际字节修正格式标签"
+                );
+            }
+            (actual.to_string(), false)
+        }
+        None => (format.to_string(), true),
+    };
 
     // 根据图片数量选择像素限制
     let max_pixels = if image_count >= config.image_multi_threshold {
@@ -326,6 +353,8 @@ pub fn process_image(
     const MAX_IMAGE_BYTES: usize = 200_000; // 200KB
     let force_reencode_gif = format.eq_ignore_ascii_case("gif");
     let force_reencode_large = original_bytes_len > MAX_IMAGE_BYTES;
+    // 嗅探失败（格式未知/不受支持）时强制重编码为声明格式，避免透传字节与标签不符
+    let force_reencode_mismatch = sniff_failed;
 
     if force_reencode_large {
         tracing::info!(
@@ -338,7 +367,8 @@ pub fn process_image(
         );
     }
 
-    let should_decode_and_encode = needs_resize || force_reencode_gif || force_reencode_large;
+    let should_decode_and_encode =
+        needs_resize || force_reencode_gif || force_reencode_large || force_reencode_mismatch;
 
     // 仅在需要缩放或强制重编码时才全量解码图片
     let (output_data, final_size, final_bytes_len, was_reencoded) = if should_decode_and_encode {
@@ -349,8 +379,10 @@ pub fn process_image(
             img
         };
         let size = (processed.width(), processed.height());
-        let (data, bytes_len) = encode_image(&processed, format)?;
-        let was_reencoded = (force_reencode_gif || force_reencode_large) && !needs_resize;
+        // 以权威格式（嗅探修正后）编码，保证字节内容与 output_format 标签一致
+        let (data, bytes_len) = encode_image(&processed, &output_format)?;
+        let was_reencoded =
+            (force_reencode_gif || force_reencode_large || force_reencode_mismatch) && !needs_resize;
 
         if force_reencode_large && !needs_resize {
             tracing::info!(
@@ -385,6 +417,7 @@ pub fn process_image(
         was_reencoded,
         original_bytes_len,
         final_bytes_len,
+        output_format,
     })
 }
 
@@ -413,6 +446,20 @@ fn apply_scaling_rules(width: u32, height: u32, max_long_edge: u32, max_pixels: 
     }
 
     (w.floor().max(1.0) as u32, h.floor().max(1.0) as u32)
+}
+
+/// 将 `image` crate 嗅探到的格式映射为受支持的格式字符串
+///
+/// 仅返回上游确定支持的四种格式；其它（bmp/tiff/...）返回 None，
+/// 由调用方回退到声明格式并强制重编码。
+fn sniffed_format_str(fmt: ImageFormat) -> Option<&'static str> {
+    match fmt {
+        ImageFormat::Jpeg => Some("jpeg"),
+        ImageFormat::Png => Some("png"),
+        ImageFormat::Gif => Some("gif"),
+        ImageFormat::WebP => Some("webp"),
+        _ => None,
+    }
 }
 
 /// 计算 token 数
@@ -504,6 +551,45 @@ mod tests {
         assert!(result.was_reencoded);
         assert_eq!(result.original_size, result.final_size);
         assert!(result.final_bytes_len < result.original_bytes_len);
+    }
+
+    #[test]
+    fn test_declared_jpeg_but_actually_png_is_corrected() {
+        use image::{Rgba, RgbaImage};
+
+        // 构造一张真实的 PNG 小图（<200KB、无需缩放），但声明为 jpeg。
+        let mut img = RgbaImage::new(16, 16);
+        for p in img.pixels_mut() {
+            *p = Rgba([10, 20, 30, 255]);
+        }
+        let (png_b64, _) = encode_image(&DynamicImage::ImageRgba8(img), "png").unwrap();
+
+        let config = CompressionConfig::default();
+        let result = process_image(&png_b64, "jpeg", &config, 1).unwrap();
+
+        // 应按实际字节修正为 png，且因无需缩放而直通（不重编码）
+        assert_eq!(result.output_format, "png");
+        assert!(!result.was_resized);
+        assert!(!result.was_reencoded);
+        assert_eq!(result.data, png_b64);
+    }
+
+    #[test]
+    fn test_correctly_declared_format_is_preserved() {
+        use image::{Rgba, RgbaImage};
+
+        let mut img = RgbaImage::new(16, 16);
+        for p in img.pixels_mut() {
+            *p = Rgba([1, 2, 3, 255]);
+        }
+        let (png_b64, _) = encode_image(&DynamicImage::ImageRgba8(img), "png").unwrap();
+
+        let config = CompressionConfig::default();
+        let result = process_image(&png_b64, "png", &config, 1).unwrap();
+
+        assert_eq!(result.output_format, "png");
+        assert!(!result.was_reencoded);
+        assert_eq!(result.data, png_b64);
     }
 
     #[test]
