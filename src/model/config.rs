@@ -1030,8 +1030,10 @@ mod tests {
         assert_eq!(cfg.resolve_max_body_bytes("claude-sonnet-4-6"), 4_718_592);
 
         // 自上而下第一条命中生效
-        cfg.per_model_body_limits =
-            vec![limit("opus", "contains", 1000), limit("opus-4-8", "contains", 2000)];
+        cfg.per_model_body_limits = vec![
+            limit("opus", "contains", 1000),
+            limit("opus-4-8", "contains", 2000),
+        ];
         assert_eq!(cfg.resolve_max_body_bytes("claude-opus-4-8"), 1000);
     }
 

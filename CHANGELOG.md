@@ -1,5 +1,11 @@
 # Changelog
 
+## [v1.1.70] - 2026-07-12
+
+### 新增
+
+- **转发上游前校验图片有效性，拦截损坏/截断图片** — 新增 `validate_image()`：base64 解码、格式嗅探、尺寸读取与容器完整性检查（PNG `IEND` / JPEG `EOI` 全流反向搜索（兼容 Motion Photo 等 EOI 后带尾随数据的合法图片）/ GIF Trailer / WebP RIFF 体积声明）。本地解码失败不再透传原始字节（几乎必触发上游 400），改为返回 `InvalidImage` 以 400 `invalid_request_error` 直接拦截，避免污染凭据健康状态 (`src/anthropic/converter.rs`, `src/anthropic/handlers.rs`, `src/image.rs`)
+
 ## [v1.1.69] - 2026-07-10
 
 ### 优化
