@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::image::{process_gif_frames, process_image, process_image_to_format};
+use crate::image::{process_gif_frames, process_image, process_image_to_format, validate_image};
 use crate::kiro::model::requests::conversation::{
     AssistantMessage, ConversationState, CurrentMessage, HistoryAssistantMessage,
     HistoryUserMessage, KiroImage, Message, UserInputMessage, UserInputMessageContext, UserMessage,
@@ -274,6 +274,12 @@ pub enum ConversionError {
     UnsupportedModel(String),
     EmptyMessages,
     EmptyMessageContent,
+    /// 图片无法处理（损坏 / 被截断 / 格式不受支持）。
+    /// 在转发上游前于本地拦截，避免触发上游 `Could not process image` (400)。
+    InvalidImage {
+        media_type: String,
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for ConversionError {
@@ -282,6 +288,9 @@ impl std::fmt::Display for ConversionError {
             ConversionError::UnsupportedModel(model) => write!(f, "模型不支持: {}", model),
             ConversionError::EmptyMessages => write!(f, "消息列表为空"),
             ConversionError::EmptyMessageContent => write!(f, "消息内容为空"),
+            ConversionError::InvalidImage { media_type, reason } => {
+                write!(f, "图片无法处理({}): {}", media_type, reason)
+            }
         }
     }
 }
@@ -706,6 +715,21 @@ fn process_message_content(
                             if let Some(source) = block.source
                                 && let Some(format) = get_image_format(&source.media_type)
                             {
+                                // 转发上游前先做有效性校验：拦截损坏 / 被截断 / 非图片的数据，
+                                // 避免把坏图发给上游触发 `Could not process image` (400)
+                                // ——该上游 400 还可能被误判为凭据故障进而触发故障转移。
+                                if let Err(reason) = validate_image(&source.data) {
+                                    tracing::warn!(
+                                        media_type = %source.media_type,
+                                        data_len = source.data.len(),
+                                        reason = %reason,
+                                        "拦截无法处理的图片（不转发上游）"
+                                    );
+                                    return Err(ConversionError::InvalidImage {
+                                        media_type: source.media_type.clone(),
+                                        reason,
+                                    });
+                                }
                                 // GIF：抽帧为多张静态图，避免动图 base64 体积巨大导致上游 400
                                 if format.eq_ignore_ascii_case("gif") {
                                     if *remaining_image_budget == 0 {
@@ -784,15 +808,25 @@ fn process_message_content(
                                                             *remaining_image_budget -= 1;
                                                         }
                                                         Err(e3) => {
+                                                            // 通过入口校验仍全部解码失败，说明帧数据
+                                                            // 损坏；透传原始字节几乎必触发上游 400，
+                                                            // 与入口拦截目标相悖，改为直接拦截。
                                                             tracing::warn!(
-                                                                "图片处理失败，使用原始数据: {}",
-                                                                e3
+                                                                media_type = %source.media_type,
+                                                                reason = %e3,
+                                                                "拦截无法处理的 GIF（本地解码失败，不透传上游）"
                                                             );
-                                                            images.push(KiroImage::from_base64(
-                                                                format,
-                                                                source.data,
-                                                            ));
-                                                            *remaining_image_budget -= 1;
+                                                            return Err(
+                                                                ConversionError::InvalidImage {
+                                                                    media_type: source
+                                                                        .media_type
+                                                                        .clone(),
+                                                                    reason: format!(
+                                                                        "GIF 本地解码失败(数据可能损坏): {}",
+                                                                        e3
+                                                                    ),
+                                                                },
+                                                            );
                                                         }
                                                     }
                                                 }
@@ -827,10 +861,21 @@ fn process_message_content(
                                             *remaining_image_budget -= 1;
                                         }
                                         Err(e) => {
-                                            tracing::warn!("图片处理失败，使用原始数据: {}", e);
-                                            images
-                                                .push(KiroImage::from_base64(format, source.data));
-                                            *remaining_image_budget -= 1;
+                                            // 通过入口校验（头/尾完好）仍解码失败，说明像素数据
+                                            // 损坏；透传原始字节几乎必触发上游 400，与入口拦截
+                                            // 目标相悖，改为直接拦截。
+                                            tracing::warn!(
+                                                media_type = %source.media_type,
+                                                reason = %e,
+                                                "拦截无法处理的图片（本地解码失败，不透传上游）"
+                                            );
+                                            return Err(ConversionError::InvalidImage {
+                                                media_type: source.media_type.clone(),
+                                                reason: format!(
+                                                    "本地解码失败(数据可能损坏): {}",
+                                                    e
+                                                ),
+                                            });
                                         }
                                     }
                                 }
@@ -1568,6 +1613,68 @@ fn merge_assistant_messages(
 mod tests {
     use super::*;
     use crate::model::config::{CompressionConfig, ModelMappingConfig, ModelMappingRule};
+
+    /// 无法通过入口校验的图片（非法 base64）应返回 InvalidImage，而非发往上游
+    #[test]
+    fn test_process_message_content_rejects_invalid_base64_image() {
+        let content = serde_json::json!([{
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": "iVBORw0KG-goAAAANSUhEUg-AAABAAAA"
+            }
+        }]);
+        let mut budget = 10;
+        let result =
+            process_message_content(&content, &CompressionConfig::default(), 1, &mut budget);
+        assert!(
+            matches!(result, Err(ConversionError::InvalidImage { .. })),
+            "实际结果: {:?}",
+            result.map(|_| ())
+        );
+    }
+
+    /// 头/尾完好但像素数据损坏的图片：通过入口校验、随后本地解码失败，
+    /// 应返回 InvalidImage 拦截，而不是回退透传原始字节（那会触发上游 400）
+    #[test]
+    fn test_process_message_content_rejects_corrupted_image_instead_of_raw_fallback() {
+        use base64::{Engine, engine::general_purpose::STANDARD as B64};
+        use std::io::Cursor;
+
+        // 4100x8：长边超过默认 image_max_long_edge(4000)，强制走缩放→全量解码路径
+        let img =
+            image::RgbaImage::from_fn(4100, 8, |x, _| image::Rgba([(x % 256) as u8, 128, 64, 255]));
+        let mut buf = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .unwrap();
+        let mut raw = buf.into_inner();
+
+        // 破坏中段 IDAT 数据（保留头部 IHDR 与末尾 IEND），使入口校验通过但解码失败
+        let mid = raw.len() / 2;
+        for b in &mut raw[mid..mid + 64] {
+            *b ^= 0xFF;
+        }
+        assert!(crate::image::validate_image(&B64.encode(&raw)).is_ok());
+
+        let content = serde_json::json!([{
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": B64.encode(&raw)
+            }
+        }]);
+        let mut budget = 10;
+        let result =
+            process_message_content(&content, &CompressionConfig::default(), 1, &mut budget);
+        assert!(
+            matches!(result, Err(ConversionError::InvalidImage { .. })),
+            "实际结果: {:?}",
+            result.map(|_| ())
+        );
+    }
 
     #[test]
     fn test_map_model_sonnet() {

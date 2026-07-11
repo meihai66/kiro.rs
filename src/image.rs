@@ -282,6 +282,108 @@ pub fn estimate_image_tokens(
     Some((tokens, width, height))
 }
 
+/// 发送给上游前的图片有效性校验（最后一道闸门）
+///
+/// 目的：在**转发上游之前**拦截"客户端发来的损坏 / 不受支持图片"，避免把坏数据
+/// 转发给上游触发 `Could not process image` (400)。该上游 400 不仅浪费一次调用，
+/// 还可能被误判为凭据故障从而触发故障转移、污染凭据健康状态。
+///
+/// 校验项均为**轻量操作**（只读图片头，不做全量像素解码），对本机内存友好：
+/// 1. base64 可解码 —— 拦截混入非法字符 / 被截断成非法长度的数据
+/// 2. 字节内容可嗅探为受支持格式（jpeg/png/gif/webp）之一
+/// 3. 可读出有效尺寸（width/height > 0）—— 拦截图片头损坏
+/// 4. 容器完整性检查（四种格式各自的结束标记 / 体积声明）
+///    —— 拦截 base64 中途被截断的"半张图"
+///
+/// 成功返回 `(width, height)`，失败返回可读的中文原因（用于回传客户端 400）。
+pub fn validate_image(base64_data: &str) -> Result<(u32, u32), String> {
+    let bytes = BASE64
+        .decode(base64_data)
+        .map_err(|e| format!("base64 解码失败: {}", e))?;
+
+    if bytes.is_empty() {
+        return Err("图片数据为空".to_string());
+    }
+
+    let reader = ImageReader::new(Cursor::new(&bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("图片格式识别失败: {}", e))?;
+
+    let fmt = reader
+        .format()
+        .ok_or_else(|| "无法识别为受支持的图片格式(jpeg/png/gif/webp)".to_string())?;
+    let fmt_str =
+        sniffed_format_str(fmt).ok_or_else(|| format!("不受支持的图片格式: {:?}", fmt))?;
+
+    let (w, h) = reader
+        .into_dimensions()
+        .map_err(|e| format!("读取图片尺寸失败(数据可能损坏): {}", e))?;
+    if w == 0 || h == 0 {
+        return Err(format!("图片尺寸非法: {}x{}", w, h));
+    }
+
+    check_trailer_intact(&bytes, fmt_str)?;
+
+    Ok((w, h))
+}
+
+/// 校验图片容器的完整性（四种受支持格式各自的低成本结构检查）
+///
+/// 目标是拦截 base64 中途被截断的"半张图"，同时容忍合法图片在结束标记之后
+/// 附带的尾随字节（如 EXIF 尾注、三星 Motion Photo 在 JPEG EOI 后嵌入的整段
+/// 视频），避免误伤能正常显示的图片。
+fn check_trailer_intact(bytes: &[u8], fmt: &str) -> Result<(), String> {
+    // PNG 的 IEND chunk = "IEND" + CRC(固定为 0xAE426082)，是规范强制的最后一块
+    const PNG_IEND: &[u8] = &[0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82];
+    // JPEG 的 EOI 结束标记
+    const JPEG_EOI: &[u8] = &[0xFF, 0xD9];
+    // GIF 的 Trailer 结束字节
+    const GIF_TRAILER: u8 = 0x3B;
+    // 末尾搜索窗口：足够覆盖常见尾随字节，又不至于扫描整张图
+    const WINDOW: usize = 32;
+
+    let tail = &bytes[bytes.len().saturating_sub(WINDOW)..];
+    match fmt {
+        // PNG 规范强制 IEND 为最后一个 chunk，窗口式搜索即可
+        "png" if !contains_subslice(tail, PNG_IEND) => {
+            Err("PNG 数据不完整：缺少 IEND 结束块（base64 可能被截断）".to_string())
+        }
+        // JPEG 允许 EOI 之后跟任意长度的尾随数据（Motion Photo 可达数 MB），
+        // 因此在全字节流范围内反向搜索：正常图片 EOI 在末尾附近、几步即命中；
+        // 被截断的图片整体无 EOI（熵编码段内 0xFF 均被填充为 0xFF00，不会误判）
+        "jpeg" if !bytes.windows(2).rev().any(|w| w == JPEG_EOI) => {
+            Err("JPEG 数据不完整：缺少 EOI 结束标记（base64 可能被截断）".to_string())
+        }
+        "gif" if !tail.contains(&GIF_TRAILER) => {
+            Err("GIF 数据不完整：缺少 Trailer 结束字节（base64 可能被截断）".to_string())
+        }
+        // WebP(RIFF) 头部第 4..8 字节声明容器体积（不含前 8 字节）：
+        // 实际字节数小于声明值说明被截断；大于则视为尾随字节，予以容忍
+        "webp" => {
+            if bytes.len() >= 8 {
+                let declared = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as u64;
+                if declared + 8 > bytes.len() as u64 {
+                    return Err(format!(
+                        "WebP 数据不完整：RIFF 头声明 {} 字节，实际仅 {} 字节（base64 可能被截断）",
+                        declared + 8,
+                        bytes.len()
+                    ));
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// 判断 `haystack` 中是否包含子序列 `needle`
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return false;
+    }
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
 /// 处理图片：根据配置缩放并返回处理结果
 ///
 /// # 参数
@@ -381,8 +483,8 @@ pub fn process_image(
         let size = (processed.width(), processed.height());
         // 以权威格式（嗅探修正后）编码，保证字节内容与 output_format 标签一致
         let (data, bytes_len) = encode_image(&processed, &output_format)?;
-        let was_reencoded =
-            (force_reencode_gif || force_reencode_large || force_reencode_mismatch) && !needs_resize;
+        let was_reencoded = (force_reencode_gif || force_reencode_large || force_reencode_mismatch)
+            && !needs_resize;
 
         if force_reencode_large && !needs_resize {
             tracing::info!(
@@ -491,6 +593,114 @@ fn encode_image(img: &DynamicImage, format: &str) -> Result<(String, usize), Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_validate_image_accepts_valid_png() {
+        use image::{Rgba, RgbaImage};
+        let mut img = RgbaImage::new(20, 12);
+        for p in img.pixels_mut() {
+            *p = Rgba([5, 6, 7, 255]);
+        }
+        let (png_b64, _) = encode_image(&DynamicImage::ImageRgba8(img), "png").unwrap();
+        assert_eq!(validate_image(&png_b64).unwrap(), (20, 12));
+    }
+
+    #[test]
+    fn test_validate_image_accepts_valid_jpeg() {
+        use image::{Rgb, RgbImage};
+        let mut img = RgbImage::new(24, 16);
+        for p in img.pixels_mut() {
+            *p = Rgb([9, 9, 9]);
+        }
+        let (jpeg_b64, _) = encode_image(&DynamicImage::ImageRgb8(img), "jpeg").unwrap();
+        assert_eq!(validate_image(&jpeg_b64).unwrap(), (24, 16));
+    }
+
+    #[test]
+    fn test_validate_image_rejects_illegal_base64() {
+        // 模拟 error.txt：base64 中混入非法字符（STANDARD 字母表不含 '-'）
+        let bad = "iVBORw0KG-goAAAANSUhEUg-AAABAAAA";
+        let err = validate_image(bad).unwrap_err();
+        assert!(err.contains("base64"), "实际错误: {}", err);
+    }
+
+    #[test]
+    fn test_validate_image_rejects_truncated_png() {
+        // 模拟 error.txt：合法 PNG 头部完整，但字节流被截断（丢失 IEND 结束块）
+        use image::{Rgba, RgbaImage};
+        let mut img = RgbaImage::new(64, 64);
+        for (i, p) in img.pixels_mut().enumerate() {
+            *p = Rgba([(i % 256) as u8, 0, 0, 255]);
+        }
+        let (png_b64, _) = encode_image(&DynamicImage::ImageRgba8(img), "png").unwrap();
+        let mut raw = BASE64.decode(&png_b64).unwrap();
+        // 砍掉尾部 40 字节，确保 IEND 及其所在窗口被破坏
+        raw.truncate(raw.len().saturating_sub(40));
+        let truncated_b64 = BASE64.encode(&raw);
+        let err = validate_image(&truncated_b64).unwrap_err();
+        assert!(
+            err.contains("IEND") || err.contains("不完整") || err.contains("损坏"),
+            "实际错误: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_image_rejects_non_image_bytes() {
+        // 合法 base64，但内容不是图片
+        let not_image = BASE64.encode(b"this is definitely not an image payload at all");
+        assert!(validate_image(&not_image).is_err());
+    }
+
+    #[test]
+    fn test_validate_image_accepts_jpeg_with_trailing_data() {
+        // 模拟三星 Motion Photo：合法 JPEG 的 EOI 之后附带大段尾随数据（嵌入视频），
+        // 尾随长度远超末尾搜索窗口，不应被误判为截断
+        use image::{Rgb, RgbImage};
+        let mut img = RgbImage::new(24, 16);
+        for p in img.pixels_mut() {
+            *p = Rgb([9, 9, 9]);
+        }
+        let (jpeg_b64, _) = encode_image(&DynamicImage::ImageRgb8(img), "jpeg").unwrap();
+        let mut raw = BASE64.decode(&jpeg_b64).unwrap();
+        raw.extend_from_slice(&[0u8; 4096]);
+        raw.extend_from_slice(b"ftypmp42 fake embedded video payload");
+        assert_eq!(validate_image(&BASE64.encode(&raw)).unwrap(), (24, 16));
+    }
+
+    #[test]
+    fn test_validate_image_rejects_truncated_gif() {
+        use image::{Rgba, RgbaImage};
+        let mut img = RgbaImage::new(32, 32);
+        for (i, p) in img.pixels_mut().enumerate() {
+            *p = Rgba([(i % 256) as u8, (i % 200) as u8, 0, 255]);
+        }
+        let (gif_b64, _) = encode_image(&DynamicImage::ImageRgba8(img), "gif").unwrap();
+        // 完整 GIF 应通过校验
+        assert!(validate_image(&gif_b64).is_ok());
+        // 截断一半后应被拦截（丢失 Trailer 结束字节）
+        let mut raw = BASE64.decode(&gif_b64).unwrap();
+        raw.truncate(raw.len() / 2);
+        let err = validate_image(&BASE64.encode(&raw)).unwrap_err();
+        assert!(err.contains("GIF"), "实际错误: {}", err);
+    }
+
+    #[test]
+    fn test_validate_image_rejects_truncated_webp() {
+        use image::{Rgba, RgbaImage};
+        let mut img = RgbaImage::new(32, 32);
+        for p in img.pixels_mut() {
+            *p = Rgba([1, 2, 3, 255]);
+        }
+        let (webp_b64, _) = encode_image(&DynamicImage::ImageRgba8(img), "webp").unwrap();
+        // 完整 WebP 应通过校验
+        assert!(validate_image(&webp_b64).is_ok());
+        // 截断尾部后应被拦截（实际体积小于 RIFF 头声明值）
+        let mut raw = BASE64.decode(&webp_b64).unwrap();
+        raw.truncate(raw.len().saturating_sub(20));
+        let err = validate_image(&BASE64.encode(&raw)).unwrap_err();
+        assert!(err.contains("WebP"), "实际错误: {}", err);
+    }
 
     #[test]
     fn test_scaling_rules() {

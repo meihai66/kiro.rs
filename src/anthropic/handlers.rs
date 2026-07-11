@@ -1367,6 +1367,10 @@ pub async fn post_messages(
                 ConversionError::EmptyMessageContent => {
                     ("invalid_request_error", "消息内容为空".to_string())
                 }
+                ConversionError::InvalidImage { media_type, reason } => (
+                    "invalid_request_error",
+                    format!("图片无法处理({}): {}", media_type, reason),
+                ),
             };
             tracing::warn!("请求转换失败: {}", e);
             return (
