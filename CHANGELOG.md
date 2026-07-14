@@ -1,5 +1,11 @@
 # Changelog
 
+## [v1.1.71] - 2026-07-14
+
+### 修复
+
+- **cache 模拟下嵌套 cache_creation 拆分与顶层字段不一致** — cache 模拟（`cacheReadMinPct/MaxPct`）改写顶层 `cache_creation_input_tokens`（旧模式清零）时，嵌套 `cache_creation.ephemeral_5m/1h_input_tokens` 仍输出 tracker 原始值，导致按嵌套字段计费的客户端在命中缓存时每轮计满额 write。新增 `scale_cache_creation_breakdown()` 将 5m/1h 拆分对齐到最终顶层值（未改写保留原拆分、清零同步归零、其余按比例缩放，和恒等于顶层值）；流式 `message_delta` 与非流式响应的嵌套对象改用对齐后的值，`message_start` 补上嵌套 `cache_creation` 对象（与官方 API 一致）(`src/anthropic/handlers.rs`, `src/anthropic/stream.rs`)
+
 ## [v1.1.70] - 2026-07-12
 
 ### 新增
