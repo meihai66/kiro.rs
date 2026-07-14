@@ -178,9 +178,17 @@ fn inject_cache_usage_fields_with_sim(
     }
     usage["cache_creation_input_tokens"] = json!(creation);
     usage["cache_read_input_tokens"] = json!(read);
+    // 嵌套拆分必须与（可能被模拟改写的）顶层 creation 保持一致，
+    // 否则按嵌套字段计费的客户端会在命中缓存时仍每轮计满额 write。
+    let (final_5m, final_1h) = super::stream::scale_cache_creation_breakdown(
+        cache_context.cache_creation_5m_input_tokens,
+        cache_context.cache_creation_1h_input_tokens,
+        cache_context.cache_creation_input_tokens,
+        creation,
+    );
     usage["cache_creation"] = json!({
-        "ephemeral_5m_input_tokens": cache_context.cache_creation_5m_input_tokens,
-        "ephemeral_1h_input_tokens": cache_context.cache_creation_1h_input_tokens
+        "ephemeral_5m_input_tokens": final_5m,
+        "ephemeral_1h_input_tokens": final_1h
     });
 }
 

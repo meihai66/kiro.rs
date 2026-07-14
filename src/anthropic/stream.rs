@@ -524,11 +524,17 @@ impl SseStateManager {
                 "output_tokens": usage.output_tokens,
             });
             if let Some(cache_usage) = cache_usage_opt {
+                let (final_5m, final_1h) = scale_cache_creation_breakdown(
+                    cache_usage.cache_creation_5m_input_tokens,
+                    cache_usage.cache_creation_1h_input_tokens,
+                    cache_usage.cache_creation_input_tokens,
+                    final_creation,
+                );
                 usage_json["cache_creation_input_tokens"] = json!(final_creation);
                 usage_json["cache_read_input_tokens"] = json!(final_read);
                 usage_json["cache_creation"] = json!({
-                    "ephemeral_5m_input_tokens": cache_usage.cache_creation_5m_input_tokens,
-                    "ephemeral_1h_input_tokens": cache_usage.cache_creation_1h_input_tokens
+                    "ephemeral_5m_input_tokens": final_5m,
+                    "ephemeral_1h_input_tokens": final_1h
                 });
             } else if sim_pct.is_some() {
                 usage_json["cache_creation_input_tokens"] = json!(final_creation);
@@ -698,6 +704,19 @@ impl StreamContext {
         if self.cache_usage.is_some() || self.cache_sim_pct.is_some() {
             usage["cache_creation_input_tokens"] = json!(sim_creation);
             usage["cache_read_input_tokens"] = json!(sim_read);
+        }
+        if let Some(cu) = self.cache_usage {
+            // 嵌套拆分与（可能被模拟改写的）顶层 creation 保持一致
+            let (final_5m, final_1h) = scale_cache_creation_breakdown(
+                cu.cache_creation_5m_input_tokens,
+                cu.cache_creation_1h_input_tokens,
+                cu.cache_creation_input_tokens,
+                sim_creation,
+            );
+            usage["cache_creation"] = json!({
+                "ephemeral_5m_input_tokens": final_5m,
+                "ephemeral_1h_input_tokens": final_1h
+            });
         }
         json!({
             "type": "message_start",
@@ -1297,6 +1316,31 @@ fn billed_input_tokens(
         .max(0)
 }
 
+/// 把嵌套 `cache_creation`（5m/1h 拆分）对齐到最终的顶层 `cache_creation_input_tokens`。
+///
+/// cache 模拟（per-API-Key cacheReadMinPct/MaxPct）可能改写顶层值（旧模式会清零），
+/// 官方语义要求 `ephemeral_5m + ephemeral_1h == cache_creation_input_tokens`，
+/// 若嵌套拆分仍用原始值，按嵌套字段计费的客户端会与顶层不一致（命中缓存却每轮计满额 write）。
+pub(crate) fn scale_cache_creation_breakdown(
+    raw_5m: i32,
+    raw_1h: i32,
+    raw_total: i32,
+    final_total: i32,
+) -> (i32, i32) {
+    if final_total == raw_total {
+        return (raw_5m.max(0), raw_1h.max(0));
+    }
+    if final_total <= 0 {
+        return (0, 0);
+    }
+    if raw_total <= 0 {
+        return (final_total, 0);
+    }
+    // 按原始比例缩放 1h 部分，5m 取余数，保证两者之和恒等于顶层值
+    let scaled_1h = ((raw_1h.max(0) as i64 * final_total as i64) / raw_total.max(1) as i64) as i32;
+    (final_total.saturating_sub(scaled_1h), scaled_1h)
+}
+
 /// 简单的 token 估算
 fn estimate_tokens(text: &str) -> i32 {
     let chars: Vec<char> = text.chars().collect();
@@ -1551,6 +1595,135 @@ mod tests {
             json!(20)
         );
         assert_eq!(message_delta_usage["input_tokens"], json!(150));
+    }
+
+    /// 提取事件中的 usage：message_start 取 message.usage，message_delta 取 usage
+    fn extract_usages(events: &[SseEvent]) -> (serde_json::Value, serde_json::Value) {
+        let start = events
+            .iter()
+            .find(|e| e.event == "message_start")
+            .map(|e| e.data["message"]["usage"].clone())
+            .expect("message_start should exist");
+        let delta = events
+            .iter()
+            .find(|e| e.event == "message_delta")
+            .map(|e| e.data["usage"].clone())
+            .expect("message_delta should exist");
+        (start, delta)
+    }
+
+    fn assert_nested_matches_top_level(usage: &serde_json::Value) {
+        let top = usage["cache_creation_input_tokens"]
+            .as_i64()
+            .expect("top-level cache_creation_input_tokens");
+        let n5m = usage["cache_creation"]["ephemeral_5m_input_tokens"]
+            .as_i64()
+            .expect("nested ephemeral_5m_input_tokens");
+        let n1h = usage["cache_creation"]["ephemeral_1h_input_tokens"]
+            .as_i64()
+            .expect("nested ephemeral_1h_input_tokens");
+        assert_eq!(
+            n5m + n1h,
+            top,
+            "nested cache_creation breakdown must sum to top-level value: {usage}"
+        );
+    }
+
+    #[test]
+    fn test_cache_sim_legacy_mode_zeroes_nested_breakdown_too() {
+        // 旧模式（scale_hit=false）：顶层 creation 被清零，嵌套 5m/1h 必须同步清零，
+        // 否则客户端按嵌套字段计费会每轮计满额 cache write。
+        let mut ctx = StreamContext::new_with_thinking(
+            "test-model",
+            10000,
+            cache_usage(4049, 5000, 4049, 0),
+            false,
+            HashMap::new(),
+        );
+        ctx.cache_sim_pct = Some(80);
+        ctx.cache_sim_scale_hit = false;
+
+        let mut all_events = ctx.generate_initial_events();
+        all_events.extend(ctx.generate_final_events());
+        let (start_usage, delta_usage) = extract_usages(&all_events);
+
+        for usage in [&start_usage, &delta_usage] {
+            assert_eq!(usage["cache_creation_input_tokens"], json!(0));
+            assert_nested_matches_top_level(usage);
+        }
+    }
+
+    #[test]
+    fn test_cache_sim_scale_hit_keeps_nested_breakdown_consistent() {
+        // 新模式（scale_hit=true）：真实 creation 原样保留，嵌套拆分也保留原始值
+        let mut ctx = StreamContext::new_with_thinking(
+            "test-model",
+            10000,
+            cache_usage(4049, 5000, 4000, 49),
+            false,
+            HashMap::new(),
+        );
+        ctx.cache_sim_pct = Some(50);
+        ctx.cache_sim_scale_hit = true;
+
+        let mut all_events = ctx.generate_initial_events();
+        all_events.extend(ctx.generate_final_events());
+        let (start_usage, delta_usage) = extract_usages(&all_events);
+
+        for usage in [&start_usage, &delta_usage] {
+            assert_eq!(usage["cache_creation_input_tokens"], json!(4049));
+            assert_eq!(
+                usage["cache_creation"]["ephemeral_5m_input_tokens"],
+                json!(4000)
+            );
+            assert_eq!(
+                usage["cache_creation"]["ephemeral_1h_input_tokens"],
+                json!(49)
+            );
+            assert_nested_matches_top_level(usage);
+        }
+    }
+
+    #[test]
+    fn test_message_start_includes_nested_cache_creation_without_sim() {
+        // 无模拟时 message_start 也应带嵌套 cache_creation，且与顶层一致
+        let mut ctx = StreamContext::new_with_thinking(
+            "test-model",
+            1000,
+            cache_usage(50, 800, 30, 20),
+            false,
+            HashMap::new(),
+        );
+        let events = ctx.generate_initial_events();
+        let start_usage = events
+            .iter()
+            .find(|e| e.event == "message_start")
+            .map(|e| e.data["message"]["usage"].clone())
+            .expect("message_start should exist");
+
+        assert_eq!(start_usage["cache_creation_input_tokens"], json!(50));
+        assert_eq!(
+            start_usage["cache_creation"]["ephemeral_5m_input_tokens"],
+            json!(30)
+        );
+        assert_eq!(
+            start_usage["cache_creation"]["ephemeral_1h_input_tokens"],
+            json!(20)
+        );
+    }
+
+    #[test]
+    fn test_scale_cache_creation_breakdown() {
+        // final == raw：保留原始拆分
+        assert_eq!(scale_cache_creation_breakdown(30, 20, 50, 50), (30, 20));
+        // final == 0（旧模式清零）：全部归零
+        assert_eq!(scale_cache_creation_breakdown(4049, 0, 4049, 0), (0, 0));
+        // 按比例缩放：总和恒等于 final
+        let (f5m, f1h) = scale_cache_creation_breakdown(60, 40, 100, 50);
+        assert_eq!(f5m + f1h, 50);
+        assert_eq!(f1h, 20);
+        // raw 为 0 但 final > 0：兜底全归 5m
+        assert_eq!(scale_cache_creation_breakdown(0, 0, 0, 10), (10, 0));
     }
 
     #[test]
