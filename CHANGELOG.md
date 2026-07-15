@@ -1,5 +1,11 @@
 # Changelog
 
+## [v1.1.72] - 2026-07-15
+
+### 回滚
+
+- **回滚「cache 模拟下嵌套 cache_creation 拆分与顶层字段不一致」** — 撤销 v1.1.71 引入的 `scale_cache_creation_breakdown()` 嵌套拆分对齐逻辑，`message_start` / `message_delta` 与非流式响应的嵌套 `cache_creation` 输出恢复至 v1.1.70 行为 (`src/anthropic/handlers.rs`, `src/anthropic/stream.rs`)
+
 ## [v1.1.71] - 2026-07-14
 
 ### 修复
