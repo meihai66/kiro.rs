@@ -1,5 +1,13 @@
 # Changelog
 
+## [v1.1.73] - 2026-07-16
+
+### 新增
+
+- **积分透传开关 `exposeCreditUsage`（默认开）** — 关闭后对下游响应剥离 `credit_usage` / `credit_unit` / `credit_unit_plural` 字段，内部记账不受影响；支持 config.json 与管理后台设置页热更新 (`src/anthropic/handlers.rs`, `src/anthropic/stream.rs`, `src/model/config.rs`)
+- **缓存池开关 `promptCacheApiKeyPool`（默认关）** — 开启后 prompt cache 命名空间按 API Key 划分（缓存池），多凭据轮换不再造成缓存 miss；关闭维持按凭据隔离；覆盖流式/非流式/WebSearch 三条路径，支持热更新 (`src/anthropic/handlers.rs`, `src/anthropic/websearch.rs`, `src/kiro/token_manager.rs`)
+- **主页面预计可用剩余时长显示** — RPM 后新增预计可用剩余时间（HH:MM:SS），基于最近 N 分钟点数消耗速率与启用凭据缓存余额估算，点击可切换 5/15/30/60 分钟统计窗口；同时移除主页顶栏「查询余额」按钮 (`admin-ui/src/pages/credentials-page.tsx`)
+
 ## [v1.1.72] - 2026-07-15
 
 ### 回滚
