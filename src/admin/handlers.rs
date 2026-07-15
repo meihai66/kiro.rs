@@ -258,10 +258,18 @@ pub async fn get_rpm_history(
     }
 }
 
-/// GET /api/admin/stats/summary
-/// 全局摘要：启动时间、运行时长、总请求 / 成功 / 失败
-pub async fn get_stats_summary(State(state): State<AdminState>) -> impl IntoResponse {
-    match state.service.stats_summary() {
+/// GET /api/admin/stats/summary?creditWindowMinutes=5
+/// 全局摘要：启动时间、运行时长、总请求 / 成功 / 失败，
+/// 以及基于最近 N 分钟点数消耗速率的「预计可撑时长」估算
+pub async fn get_stats_summary(
+    State(state): State<AdminState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let window_minutes = params
+        .get("creditWindowMinutes")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(5);
+    match state.service.stats_summary(window_minutes) {
         Ok(v) => Json(v).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }

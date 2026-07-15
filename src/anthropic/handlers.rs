@@ -93,6 +93,8 @@ struct StreamRequestContext<'a> {
     allowed_credentials: Option<&'a std::collections::HashSet<u64>>,
     cache_sim_pct: Option<u32>,
     cache_sim_scale_hit: bool,
+    /// API Key 级缓存池命名空间（None = 按凭据隔离，维持现状）
+    cache_pool_id: Option<u64>,
     state: &'a super::middleware::AppState,
 }
 
@@ -108,6 +110,8 @@ struct NonStreamRequestContext<'a> {
     cache_profile: Option<&'a crate::anthropic::cache_tracker::CacheProfile>,
     cache_sim_pct: Option<u32>,
     cache_sim_scale_hit: bool,
+    /// API Key 级缓存池命名空间（None = 按凭据隔离，维持现状）
+    cache_pool_id: Option<u64>,
     state: &'a super::middleware::AppState,
 }
 
@@ -146,6 +150,11 @@ fn resolved_cache_usage(
     profile: &crate::anthropic::cache_tracker::CacheProfile,
 ) -> CacheUsageContext {
     compute_cache_usage(cache_tracker, credential_id, profile)
+}
+
+/// API Key 级缓存池命名空间：最高位置 1，与凭据 id 空间隔离，避免冲突
+fn api_key_pool_namespace(api_key_id: i64) -> u64 {
+    (api_key_id as u64) | (1u64 << 63)
 }
 
 #[allow(dead_code)]
@@ -1211,6 +1220,22 @@ pub async fn post_messages(
             .as_ref()
             .and_then(|g| g.entry().sample_cache_read_pct())
     });
+    // API Key 级缓存池：开启后 prompt cache 命名空间按 API Key 划分
+    // （多凭据轮换不再造成缓存 miss）；关闭则维持按凭据隔离
+    let cache_pool_id: Option<u64> = if state
+        .global_config
+        .as_ref()
+        .map(|c| c.read().prompt_cache_api_key_pool)
+        .unwrap_or(false)
+    {
+        auth_slot.as_ref().and_then(|Extension(slot)| {
+            slot.lock()
+                .as_ref()
+                .map(|g| api_key_pool_namespace(g.entry().id))
+        })
+    } else {
+        None
+    };
     // 从 ApiKey 配置取「允许使用的凭据范围」（None = 全部可用）。
     // 提前 clone 出 Arc 到本地，避免跨 await 持有 auth_slot 锁；下面用 as_deref() 取引用透传。
     let allowed_credentials: Option<std::sync::Arc<std::collections::HashSet<u64>>> =
@@ -1295,6 +1320,7 @@ pub async fn post_messages(
             websearch_cache_profile.as_ref(),
             estimated_input_tokens,
             allowed_credentials.as_deref(),
+            cache_pool_id,
         )
         .await;
     }
@@ -1546,6 +1572,7 @@ pub async fn post_messages(
             allowed_credentials: allowed_credentials.as_deref(),
             cache_sim_pct,
             cache_sim_scale_hit: prompt_cache.sim_scale_hit,
+            cache_pool_id,
             state: &state,
         };
         handle_stream_request(provider, stream_request).await
@@ -1560,6 +1587,7 @@ pub async fn post_messages(
             allowed_credentials: allowed_credentials.as_deref(),
             cache_sim_pct,
             cache_sim_scale_hit: prompt_cache.sim_scale_hit,
+            cache_pool_id,
             cache_tracker: prompt_cache
                 .accounting_enabled
                 .then_some(&prompt_cache.tracker),
@@ -1602,14 +1630,17 @@ async fn handle_stream_request(
 
     let final_cache_context = match (context.cache_tracker, context.cache_profile) {
         (Some(tracker), Some(profile)) => {
-            let resolved = resolved_cache_usage(tracker, api_result.credential_id, profile);
+            // API Key 级缓存池开启时按 Key 命名空间计算，否则按实际凭据隔离
+            let cache_ns = context.cache_pool_id.unwrap_or(api_result.credential_id);
+            let resolved = resolved_cache_usage(tracker, cache_ns, profile);
             tracing::info!(
                 credential_id = api_result.credential_id,
+                cache_ns,
                 final_cache_creation_input_tokens = resolved.cache_creation_input_tokens,
                 final_cache_read_input_tokens = resolved.cache_read_input_tokens,
                 "Resolved cache usage for stream request"
             );
-            tracker.update(api_result.credential_id, profile);
+            tracker.update(cache_ns, profile);
             Some(resolved)
         }
         _ => None,
@@ -1631,12 +1662,16 @@ async fn handle_stream_request(
     );
     ctx.cache_sim_pct = context.cache_sim_pct;
     ctx.cache_sim_scale_hit = context.cache_sim_scale_hit;
-    ctx.prefer_upstream_input = context
+    // 一次读锁取齐两个全局开关，避免连续两次加锁
+    (ctx.prefer_upstream_input, ctx.expose_credit_usage) = context
         .state
         .global_config
         .as_ref()
-        .map(|c| c.read().prefer_upstream_input_tokens)
-        .unwrap_or(false);
+        .map(|c| {
+            let cfg = c.read();
+            (cfg.prefer_upstream_input_tokens, cfg.expose_credit_usage)
+        })
+        .unwrap_or((false, true));
 
     // 生成初始事件
     let initial_events = ctx.generate_initial_events();
@@ -1901,14 +1936,17 @@ async fn handle_non_stream_request(
 
     let final_cache_context = match (context.cache_tracker, context.cache_profile) {
         (Some(tracker), Some(profile)) => {
-            let resolved = resolved_cache_usage(tracker, api_result.credential_id, profile);
+            // API Key 级缓存池开启时按 Key 命名空间计算，否则按实际凭据隔离
+            let cache_ns = context.cache_pool_id.unwrap_or(api_result.credential_id);
+            let resolved = resolved_cache_usage(tracker, cache_ns, profile);
             tracing::info!(
                 credential_id = api_result.credential_id,
+                cache_ns,
                 final_cache_creation_input_tokens = resolved.cache_creation_input_tokens,
                 final_cache_read_input_tokens = resolved.cache_read_input_tokens,
                 "Resolved cache usage for non-stream request"
             );
-            tracker.update(api_result.credential_id, profile);
+            tracker.update(cache_ns, profile);
             Some(resolved)
         }
         _ => None,
@@ -2184,7 +2222,14 @@ async fn handle_non_stream_request(
             "input_tokens": billed_input_tokens,
             "output_tokens": output_tokens
         });
-        if let Some(ref metering) = metering {
+        // expose_credit_usage=false 时不向下游透传积分字段（上面的 report_usage 内部记账不受影响）
+        let expose_credit = context
+            .state
+            .global_config
+            .as_ref()
+            .map(|c| c.read().expose_credit_usage)
+            .unwrap_or(true);
+        if expose_credit && let Some(ref metering) = metering {
             inject_credit_usage_fields(&mut usage, metering);
         }
         if let Some(cache_context) = final_cache_context {
@@ -2583,6 +2628,16 @@ mod tests {
         assert_eq!(usage["cache_read_input_tokens"], 8);
         assert_eq!(usage["cache_creation"]["ephemeral_5m_input_tokens"], 3);
         assert_eq!(usage["cache_creation"]["ephemeral_1h_input_tokens"], 4);
+    }
+
+    #[test]
+    fn test_api_key_pool_namespace_isolated_from_credential_ids() {
+        // 高位置 1：正常分配的凭据 id（自增小整数）不会与 API Key 命名空间冲突
+        assert_eq!(api_key_pool_namespace(0), 1u64 << 63);
+        assert_eq!(api_key_pool_namespace(2), (1u64 << 63) | 2);
+        assert!(api_key_pool_namespace(i64::MAX) >= (1u64 << 63));
+        // 两个不同 API Key id 映射到不同命名空间
+        assert_ne!(api_key_pool_namespace(1), api_key_pool_namespace(2));
     }
 
     #[test]

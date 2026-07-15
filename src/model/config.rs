@@ -109,6 +109,18 @@ pub struct Config {
     #[serde(default)]
     pub prefer_upstream_input_tokens: bool,
 
+    /// 是否在响应 usage 中向下游透传上游 Kiro 积分消耗
+    /// （credit_usage / credit_unit / credit_unit_plural 三个非标字段）。
+    /// false 时对下游剥离，管理后台的内部积分统计不受影响。默认 true（保持现状）
+    #[serde(default = "default_true")]
+    pub expose_credit_usage: bool,
+
+    /// prompt cache 命名空间是否按 API Key 划分（缓存池）。
+    /// true：同一 API Key 的请求共享一个缓存池，多凭据轮换不再造成缓存 miss；
+    /// false：按上游凭据隔离（现状，凭据轮换时会整段重计 cache 创建）。默认 false
+    #[serde(default)]
+    pub prompt_cache_api_key_pool: bool,
+
     /// 默认端点名称（凭据未显式指定 endpoint 时使用）
     #[serde(default = "default_endpoint")]
     pub default_endpoint: String,
@@ -807,6 +819,8 @@ impl Default for Config {
             prompt_cache_accounting_enabled: default_true(),
             prompt_cache_sim_scale_hit: default_true(),
             prefer_upstream_input_tokens: false,
+            expose_credit_usage: default_true(),
+            prompt_cache_api_key_pool: false,
             default_endpoint: default_endpoint(),
             proxy_pool_enabled: false,
             proxy_pool_path: None,

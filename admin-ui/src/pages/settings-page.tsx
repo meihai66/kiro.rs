@@ -187,6 +187,8 @@ export function SettingsPage() {
   const [promptCacheAccountingEnabled, setPromptCacheAccountingEnabled] =
     useState(true)
   const [promptCacheSimScaleHit, setPromptCacheSimScaleHit] = useState(true)
+  const [promptCacheApiKeyPool, setPromptCacheApiKeyPool] = useState(false)
+  const [exposeCreditUsage, setExposeCreditUsage] = useState(true)
   const [preferUpstreamInputTokens, setPreferUpstreamInputTokens] =
     useState(false)
   const [defaultEndpoint, setDefaultEndpoint] = useState('ide')
@@ -278,6 +280,8 @@ export function SettingsPage() {
       setPromptCacheTtlSeconds(globalConfig.promptCacheTtlSeconds.toString())
       setPromptCacheAccountingEnabled(globalConfig.promptCacheAccountingEnabled)
       setPromptCacheSimScaleHit(globalConfig.promptCacheSimScaleHit ?? true)
+      setPromptCacheApiKeyPool(globalConfig.promptCacheApiKeyPool ?? false)
+      setExposeCreditUsage(globalConfig.exposeCreditUsage ?? true)
       setPreferUpstreamInputTokens(
         globalConfig.preferUpstreamInputTokens ?? false
       )
@@ -383,6 +387,18 @@ export function SettingsPage() {
       promptCacheSimScaleHit !== globalConfig.promptCacheSimScaleHit
     ) {
       globalPayload.promptCacheSimScaleHit = promptCacheSimScaleHit
+      hasGlobalChanges = true
+    }
+
+    if (
+      promptCacheApiKeyPool !== (globalConfig?.promptCacheApiKeyPool ?? false)
+    ) {
+      globalPayload.promptCacheApiKeyPool = promptCacheApiKeyPool
+      hasGlobalChanges = true
+    }
+
+    if (exposeCreditUsage !== (globalConfig?.exposeCreditUsage ?? true)) {
+      globalPayload.exposeCreditUsage = exposeCreditUsage
       hasGlobalChanges = true
     }
 
@@ -876,6 +892,40 @@ export function SettingsPage() {
                 <Switch
                   checked={promptCacheSimScaleHit}
                   onCheckedChange={setPromptCacheSimScaleHit}
+                  disabled={isPending}
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <div>
+                  <label className="text-sm font-medium">
+                    API Key 级缓存池
+                  </label>
+                  <p className="text-xs text-muted-foreground">
+                    开启后 prompt cache 按 API Key 划分命名空间（多凭据轮换不再造成缓存
+                    miss）；关闭（默认）则按上游凭据隔离，凭据轮换时会整段重计 cache 创建。
+                    注意：需开启「Prompt Cache 记账」才生效；开启后不同 API Key
+                    之间不再共享相同前缀的命中；切换开关瞬间已热的会话会各重计一次 cache 创建
+                  </p>
+                </div>
+                <Switch
+                  checked={promptCacheApiKeyPool}
+                  onCheckedChange={setPromptCacheApiKeyPool}
+                  disabled={isPending}
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <div>
+                  <label className="text-sm font-medium">
+                    透传积分消耗给下游
+                  </label>
+                  <p className="text-xs text-muted-foreground">
+                    开启（默认）：响应 usage 携带 credit_usage 等真实 Kiro
+                    积分字段；关闭后对下游剥离（避免暴露成本底牌），管理后台内部统计不受影响
+                  </p>
+                </div>
+                <Switch
+                  checked={exposeCreditUsage}
+                  onCheckedChange={setExposeCreditUsage}
                   disabled={isPending}
                 />
               </div>

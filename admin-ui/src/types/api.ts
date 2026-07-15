@@ -194,6 +194,20 @@ export interface StatsSummaryResponse {
   totalRequests: number
   totalSuccess: number
   totalFail: number
+  /** 「预计可撑」估算的消耗采样窗口（分钟） */
+  creditWindowMinutes?: number
+  /** 窗口内点数消耗合计 */
+  recentCreditUsage?: number
+  /** 每分钟点数消耗速率 */
+  creditPerMinute?: number
+  /** 启用凭据的缓存余额合计（点数） */
+  remainingCredits?: number
+  /** 计入余额合计的凭据数（有缓存余额的） */
+  balanceCountedCredentials?: number
+  /** 启用中凭据总数 */
+  enabledCredentials?: number
+  /** 预计还能撑的秒数；窗口内无消耗时为 null */
+  estimatedRemainingSecs?: number | null
 }
 
 // ===== 超额计费偏好 =====
@@ -743,6 +757,8 @@ export interface GlobalConfigResponse {
   promptCacheTtlSeconds: number
   promptCacheAccountingEnabled: boolean
   promptCacheSimScaleHit: boolean
+  promptCacheApiKeyPool: boolean
+  exposeCreditUsage: boolean
   preferUpstreamInputTokens: boolean
   defaultEndpoint: string
   compression: CompressionConfigResponse
@@ -792,6 +808,8 @@ export interface UpdateGlobalConfigRequest {
   promptCacheTtlSeconds?: number
   promptCacheAccountingEnabled?: boolean
   promptCacheSimScaleHit?: boolean
+  promptCacheApiKeyPool?: boolean
+  exposeCreditUsage?: boolean
   preferUpstreamInputTokens?: boolean
   defaultEndpoint?: string
   compression?: UpdateCompressionConfigRequest

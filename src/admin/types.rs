@@ -1005,6 +1005,10 @@ pub struct GlobalConfigResponse {
     pub prompt_cache_sim_scale_hit: bool,
     /// 是否优先采用上游真实输入 token 作为 usage 口径（回退本地估算）
     pub prefer_upstream_input_tokens: bool,
+    /// 是否向下游透传上游积分消耗（credit_usage / credit_unit / credit_unit_plural）
+    pub expose_credit_usage: bool,
+    /// prompt cache 命名空间是否按 API Key 划分（缓存池）；false=按凭据隔离
+    pub prompt_cache_api_key_pool: bool,
     /// 默认端点名称（凭据未显式指定 endpoint 时使用）
     pub default_endpoint: String,
     /// 压缩配置
@@ -1092,6 +1096,10 @@ pub struct UpdateGlobalConfigRequest {
     pub prompt_cache_sim_scale_hit: Option<bool>,
     /// 是否优先采用上游真实输入 token 作为 usage 口径（可选）
     pub prefer_upstream_input_tokens: Option<bool>,
+    /// 是否向下游透传上游积分消耗（可选）
+    pub expose_credit_usage: Option<bool>,
+    /// prompt cache 命名空间是否按 API Key 划分（可选）
+    pub prompt_cache_api_key_pool: Option<bool>,
     /// 默认端点名称（可选）
     pub default_endpoint: Option<String>,
     /// 压缩配置（可选）

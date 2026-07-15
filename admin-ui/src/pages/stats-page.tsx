@@ -34,7 +34,7 @@ export function StatsPage() {
   })
   const { data: summary } = useQuery({
     queryKey: ['stats-summary'],
-    queryFn: getStatsSummary,
+    queryFn: () => getStatsSummary(),
     refetchInterval: 30_000,
   })
 

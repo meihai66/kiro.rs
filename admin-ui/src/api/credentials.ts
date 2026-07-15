@@ -305,8 +305,12 @@ export async function getRpmAnalysis(
 }
 
 // 全局摘要（启动时间 + 总请求计数）
-export async function getStatsSummary(): Promise<StatsSummaryResponse> {
-  const { data } = await api.get<StatsSummaryResponse>('/stats/summary')
+export async function getStatsSummary(
+  creditWindowMinutes?: number
+): Promise<StatsSummaryResponse> {
+  const { data } = await api.get<StatsSummaryResponse>('/stats/summary', {
+    params: creditWindowMinutes ? { creditWindowMinutes } : undefined,
+  })
   return data
 }
 

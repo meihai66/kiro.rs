@@ -1060,7 +1060,13 @@ pub struct MultiTokenManager {
     /// replace_all_credentials 是「清空 + 批量插入」，若两个并发 persist 各自在锁外取到
     /// 不同新旧程度的快照，后提交者会用过期快照覆盖先提交者的改动（last-writer-wins 丢改动）。
     persist_lock: Mutex<()>,
+    /// 最近点数消耗账本：(时间, credit)，用于「预计可撑时长」估算。
+    /// 只保留最近 CREDIT_LEDGER_MAX_WINDOW 内的记录，内存态、重启清零。
+    credit_ledger: Mutex<std::collections::VecDeque<(Instant, f64)>>,
 }
+
+/// 点数消耗账本最大保留窗口（1 小时）
+const CREDIT_LEDGER_MAX_WINDOW: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// 凭据可用性诊断：被禁用的凭据
 #[allow(dead_code)]
@@ -1308,6 +1314,7 @@ impl MultiTokenManager {
             last_stats_save_at: Mutex::new(None),
             stats_dirty: AtomicBool::new(false),
             persist_lock: Mutex::new(()),
+            credit_ledger: Mutex::new(std::collections::VecDeque::new()),
         };
 
         // 同步凭据级 RPM 覆盖到 rate_limiter（避免重启后丢失节流配置）
@@ -2938,7 +2945,59 @@ impl MultiTokenManager {
                 return;
             }
         }
+        // 记入时间窗口账本（用于「预计可撑时长」估算）
+        if credit_usage.is_finite() && credit_usage > 0.0 {
+            let now = Instant::now();
+            let mut ledger = self.credit_ledger.lock();
+            ledger.push_back((now, credit_usage));
+            while let Some(&(t, _)) = ledger.front() {
+                if now.duration_since(t) > CREDIT_LEDGER_MAX_WINDOW {
+                    ledger.pop_front();
+                } else {
+                    break;
+                }
+            }
+        }
         self.save_stats_debounced();
+    }
+
+    /// 最近 window 时间内的点数消耗合计（内存账本，重启清零）
+    pub fn recent_credit_usage(&self, window: std::time::Duration) -> f64 {
+        let window = window.min(CREDIT_LEDGER_MAX_WINDOW);
+        let now = Instant::now();
+        let ledger = self.credit_ledger.lock();
+        ledger
+            .iter()
+            .rev()
+            .take_while(|(t, _)| now.duration_since(*t) <= window)
+            .map(|(_, c)| c)
+            .sum()
+    }
+
+    /// 汇总启用中凭据的缓存余额：(剩余点数合计, 有余额缓存的凭据数, 启用中凭据总数)。
+    /// 只统计已初始化的缓存条目，未查询过余额的凭据不计入合计。
+    pub fn total_remaining_balance(&self) -> (f64, usize, usize) {
+        let enabled_ids: Vec<u64> = {
+            let entries = self.entries.lock();
+            entries
+                .iter()
+                .filter(|e| !e.disabled)
+                .map(|e| e.id)
+                .collect()
+        };
+        let enabled_total = enabled_ids.len();
+        let cache = self.balance_cache.lock();
+        let mut sum = 0.0;
+        let mut counted = 0;
+        for id in enabled_ids {
+            if let Some(cached) = cache.get(&id)
+                && cached.initialized
+            {
+                sum += cached.remaining.max(0.0);
+                counted += 1;
+            }
+        }
+        (sum, counted, enabled_total)
     }
 
     /// 报告指定凭据 API 调用失败

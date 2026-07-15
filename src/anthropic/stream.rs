@@ -610,6 +610,9 @@ pub struct StreamContext {
     /// 是否优先采用上游真实输入 token（context_input_tokens）作为 usage 口径，
     /// 上游未返回时回退本地估算 input_tokens。
     pub prefer_upstream_input: bool,
+    /// 是否向下游透传上游积分消耗（credit_usage / credit_unit / credit_unit_plural）。
+    /// false 时最终 usage 不携带这三个字段；内部记账（usage_for_accounting）不受影响。
+    pub expose_credit_usage: bool,
 }
 
 impl StreamContext {
@@ -642,6 +645,7 @@ impl StreamContext {
             cache_sim_pct: None,
             cache_sim_scale_hit: true,
             prefer_upstream_input: false,
+            expose_credit_usage: true,
         }
     }
 
@@ -1255,12 +1259,17 @@ impl StreamContext {
             self.output_tokens
         );
 
-        // 生成最终事件
+        // 生成最终事件（expose_credit_usage=false 时不向下游透传积分字段，
+        // self.metering 仍保留供 usage_for_accounting 内部记账）
         events.extend(self.state_manager.generate_final_events(FinalUsage {
             input_tokens: billed_input_tokens,
             output_tokens: self.output_tokens,
             cache_usage: self.cache_usage,
-            metering: self.metering.as_ref(),
+            metering: if self.expose_credit_usage {
+                self.metering.as_ref()
+            } else {
+                None
+            },
             cache_sim_pct: self.cache_sim_pct,
             cache_sim_scale_hit: self.cache_sim_scale_hit,
         }));
@@ -1428,6 +1437,38 @@ mod tests {
         assert_eq!(message_delta_usage["credit_usage"], json!(0.75));
         assert_eq!(message_delta_usage["credit_unit"], json!("credit"));
         assert_eq!(message_delta_usage["credit_unit_plural"], json!("credits"));
+    }
+
+    #[test]
+    fn test_stream_context_strips_credit_fields_when_expose_disabled() {
+        let mut ctx = StreamContext::new_with_thinking(
+            "test-model",
+            123,
+            zero_cache_usage(),
+            false,
+            HashMap::new(),
+        );
+        ctx.expose_credit_usage = false;
+        ctx.process_kiro_event(&Event::Metering(MeteringEvent {
+            unit: "credit".to_string(),
+            unit_plural: "credits".to_string(),
+            usage: 0.75,
+        }));
+
+        let mut all_events = ctx.generate_initial_events();
+        all_events.extend(ctx.generate_final_events());
+        let message_delta_usage = all_events
+            .iter()
+            .find(|e| e.event == "message_delta")
+            .map(|e| e.data["usage"].clone())
+            .expect("message_delta should exist");
+
+        assert!(message_delta_usage.get("credit_usage").is_none());
+        assert!(message_delta_usage.get("credit_unit").is_none());
+        assert!(message_delta_usage.get("credit_unit_plural").is_none());
+        // 内部记账仍能取到真实 credit
+        let (_, _, _, _, credit) = ctx.usage_for_accounting();
+        assert_eq!(credit, 0.75);
     }
 
     #[test]

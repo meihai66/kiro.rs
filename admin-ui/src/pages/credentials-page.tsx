@@ -17,7 +17,6 @@ import {
   Target,
   TrendingUp,
   Upload,
-  Wallet,
   XCircle,
   Zap,
 } from 'lucide-react'
@@ -1055,9 +1054,12 @@ export function CredentialsPage() {
   const allCredentials = data?.credentials ?? []
 
   // 顶部状态条数据：服务级摘要（运行时间/总请求/成功率）+ 凭据汇总（in-flight/RPM）
+  // creditWindow：「预计可撑」的消耗采样窗口（分钟），点击 chip 可循环切换
+  const CREDIT_WINDOWS = [5, 15, 30, 60]
+  const [creditWindow, setCreditWindow] = useState(5)
   const { data: statsSummary } = useQuery({
-    queryKey: ['stats-summary'],
-    queryFn: getStatsSummary,
+    queryKey: ['stats-summary', creditWindow],
+    queryFn: () => getStatsSummary(creditWindow),
     refetchInterval: 30_000,
   })
   const totalInFlight = allCredentials.reduce(
@@ -1065,6 +1067,22 @@ export function CredentialsPage() {
     0
   )
   const totalRpm = allCredentials.reduce((s, c) => s + (c.rpm ?? 0), 0)
+
+  // 「预计可撑」展示：HH:MM:SS（小时可超两位）
+  const formatEta = (secs: number): string => {
+    const h = Math.floor(secs / 3600)
+    const m = Math.floor((secs % 3600) / 60)
+    const s = Math.floor(secs % 60)
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+  }
+  const etaSecs = statsSummary?.estimatedRemainingSecs
+  const etaText =
+    etaSecs !== null && etaSecs !== undefined ? formatEta(etaSecs) : '—'
+  const etaTitle = statsSummary
+    ? `最近 ${statsSummary.creditWindowMinutes ?? creditWindow} 分钟消耗 ${(statsSummary.recentCreditUsage ?? 0).toFixed(2)} 点（${(statsSummary.creditPerMinute ?? 0).toFixed(3)} 点/分）；` +
+      `剩余 ${(statsSummary.remainingCredits ?? 0).toFixed(1)} 点（基于 ${statsSummary.balanceCountedCredentials ?? 0}/${statsSummary.enabledCredentials ?? 0} 个启用凭据的缓存余额）。` +
+      `点击切换采样窗口（当前 ${creditWindow} 分钟）`
+    : '点数消耗速率估算加载中'
 
   // 取凭据当前生效的额度上限：优先实时余额，回退到缓存余额
   const limitFor = (c: CredentialStatusItem): number => {
@@ -1926,12 +1944,27 @@ export function CredentialsPage() {
             <span className="text-muted-foreground">RPM</span>
             <span className="font-mono font-medium">{totalRpm}</span>
           </span>
+          <span
+            className={
+              'inline-flex items-center gap-1 rounded-md border bg-card px-2 py-0.5 text-xs cursor-pointer select-none ' +
+              (etaSecs !== null && etaSecs !== undefined && etaSecs < 3600
+                ? 'text-amber-700 dark:text-amber-400 border-amber-500/40'
+                : '')
+            }
+            title={etaTitle}
+            onClick={() =>
+              setCreditWindow(
+                CREDIT_WINDOWS[
+                  (CREDIT_WINDOWS.indexOf(creditWindow) + 1) %
+                    CREDIT_WINDOWS.length
+                ]
+              )
+            }
+          >
+            <span className="font-mono font-medium">{etaText}</span>
+          </span>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={handleQueryBalances}>
-            <Wallet className="h-4 w-4 mr-2" />
-            查询余额
-          </Button>
           <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
             <Upload className="h-4 w-4 mr-2" />
             导入

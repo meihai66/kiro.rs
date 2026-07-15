@@ -447,7 +447,10 @@ impl AdminService {
     }
 
     /// 全局摘要：启动时间 + 运行时长 + 总请求次数
-    pub fn stats_summary(&self) -> Result<serde_json::Value, AdminServiceError> {
+    pub fn stats_summary(
+        &self,
+        credit_window_minutes: u64,
+    ) -> Result<serde_json::Value, AdminServiceError> {
         let store = self.store.as_ref().ok_or_else(|| {
             AdminServiceError::InvalidRequest("统计 summary 需要 SQLite store".into())
         })?;
@@ -459,12 +462,35 @@ impl AdminService {
             .copied()
             .unwrap_or_else(chrono::Utc::now);
         let uptime_secs = (chrono::Utc::now() - started).num_seconds().max(0);
+
+        // 「预计可撑时长」：最近 N 分钟点数消耗速率 vs 启用凭据的缓存余额合计
+        let window_minutes = credit_window_minutes.clamp(1, 60);
+        let recent_credit = self
+            .token_manager
+            .recent_credit_usage(std::time::Duration::from_secs(window_minutes * 60));
+        let credit_per_minute = recent_credit / window_minutes as f64;
+        let (remaining_credits, balance_counted, enabled_total) =
+            self.token_manager.total_remaining_balance();
+        // 速率为 0（窗口内无消耗）时无法估算，返回 null
+        let estimated_remaining_secs = if credit_per_minute > 0.0 {
+            Some((remaining_credits / credit_per_minute * 60.0).round() as u64)
+        } else {
+            None
+        };
+
         Ok(serde_json::json!({
             "startedAt": started,
             "uptimeSecs": uptime_secs,
             "totalRequests": success + fail,
             "totalSuccess": success,
             "totalFail": fail,
+            "creditWindowMinutes": window_minutes,
+            "recentCreditUsage": recent_credit,
+            "creditPerMinute": credit_per_minute,
+            "remainingCredits": remaining_credits,
+            "balanceCountedCredentials": balance_counted,
+            "enabledCredentials": enabled_total,
+            "estimatedRemainingSecs": estimated_remaining_secs,
         }))
     }
 
@@ -2128,6 +2154,8 @@ impl AdminService {
             prompt_cache_accounting_enabled: config.prompt_cache_accounting_enabled,
             prompt_cache_sim_scale_hit: config.prompt_cache_sim_scale_hit,
             prefer_upstream_input_tokens: config.prefer_upstream_input_tokens,
+            expose_credit_usage: config.expose_credit_usage,
+            prompt_cache_api_key_pool: config.prompt_cache_api_key_pool,
             default_endpoint: config.default_endpoint.clone(),
             compression: super::types::CompressionConfigResponse {
                 enabled: c.enabled,
@@ -2211,6 +2239,14 @@ impl AdminService {
 
             if let Some(enabled) = req.prefer_upstream_input_tokens {
                 config.prefer_upstream_input_tokens = enabled;
+            }
+
+            if let Some(enabled) = req.expose_credit_usage {
+                config.expose_credit_usage = enabled;
+            }
+
+            if let Some(enabled) = req.prompt_cache_api_key_pool {
+                config.prompt_cache_api_key_pool = enabled;
             }
 
             if let Some(ref endpoint) = req.default_endpoint {
@@ -3267,6 +3303,8 @@ mod tests {
             prompt_cache_ttl_seconds: None,
             prompt_cache_accounting_enabled: None,
             prompt_cache_sim_scale_hit: None,
+            expose_credit_usage: None,
+            prompt_cache_api_key_pool: None,
             prefer_upstream_input_tokens: None,
             default_endpoint: Some("cli".to_string()),
             compression: None,
@@ -3315,6 +3353,8 @@ mod tests {
             prompt_cache_ttl_seconds: None,
             prompt_cache_accounting_enabled: None,
             prompt_cache_sim_scale_hit: None,
+            expose_credit_usage: None,
+            prompt_cache_api_key_pool: None,
             prefer_upstream_input_tokens: None,
             default_endpoint: Some("".to_string()),
             compression: None,
@@ -3362,6 +3402,8 @@ mod tests {
             prompt_cache_ttl_seconds: None,
             prompt_cache_accounting_enabled: None,
             prompt_cache_sim_scale_hit: None,
+            expose_credit_usage: None,
+            prompt_cache_api_key_pool: None,
             prefer_upstream_input_tokens: None,
             default_endpoint: Some("   ".to_string()),
             compression: None,
@@ -3409,6 +3451,8 @@ mod tests {
             prompt_cache_ttl_seconds: None,
             prompt_cache_accounting_enabled: None,
             prompt_cache_sim_scale_hit: None,
+            expose_credit_usage: None,
+            prompt_cache_api_key_pool: None,
             prefer_upstream_input_tokens: None,
             default_endpoint: Some("unknown".to_string()),
             compression: None,
@@ -3453,6 +3497,8 @@ mod tests {
             prompt_cache_ttl_seconds: None,
             prompt_cache_accounting_enabled: None,
             prompt_cache_sim_scale_hit: None,
+            expose_credit_usage: None,
+            prompt_cache_api_key_pool: None,
             prefer_upstream_input_tokens: None,
             default_endpoint: Some("  cli  ".to_string()),
             compression: None,
