@@ -1,5 +1,12 @@
 # Changelog
 
+## [v1.1.75] - 2026-07-16
+
+### 修复
+
+- **推送标题去掉 `-rs` 后缀** — 阈值告警/测试推送标题由「kiro-rs …」改为「kiro …」 (`src/push.rs`, `src/admin/service.rs`)
+- **设置页单位文字防挤压换行** — 单位文字（秒/分钟/个并发/%）加 `shrink-0 whitespace-nowrap`，避免被 `w-full` 输入框挤成竖排换行 (`admin-ui/src/pages/settings-page.tsx`)
+
 ## [v1.1.74] - 2026-07-16
 
 ### 新增
