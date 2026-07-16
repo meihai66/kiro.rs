@@ -1570,7 +1570,7 @@ export function SettingsPage() {
                   onChange={(e) => setBalanceAutoRefreshSecs(e.target.value)}
                   disabled={isPending}
                 />
-                <span className="text-sm">秒</span>
+                <span className="text-sm shrink-0 whitespace-nowrap">秒</span>
               </div>
               <p className="text-[11px] text-muted-foreground">
                 有效范围：0（关闭）或 60~86400 秒
@@ -1594,7 +1594,7 @@ export function SettingsPage() {
                     }
                     disabled={isPending}
                   />
-                  <span className="text-sm">个并发</span>
+                  <span className="text-sm shrink-0 whitespace-nowrap">个并发</span>
                 </div>
                 <p className="text-[11px] text-muted-foreground">
                   后台刷新 + 启动初始化的并发数（1~256，默认 8）。每个凭据走各自代理出口时可调高（如
@@ -1867,7 +1867,7 @@ export function SettingsPage() {
                     )
                   }
                 />
-                <span className="text-sm">秒</span>
+                <span className="text-sm shrink-0 whitespace-nowrap">秒</span>
                 <Button
                   type="button"
                   size="sm"
@@ -1897,7 +1897,7 @@ export function SettingsPage() {
                       )
                     }
                   />
-                  <span className="text-sm">分钟</span>
+                  <span className="text-sm shrink-0 whitespace-nowrap">分钟</span>
                   <Button
                     type="button"
                     size="sm"
@@ -1934,7 +1934,7 @@ export function SettingsPage() {
                   }
                   disabled={isPending}
                 />
-                <span className="text-sm">%</span>
+                <span className="text-sm shrink-0 whitespace-nowrap">%</span>
               </div>
             </CardContent>
           </Card>

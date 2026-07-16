@@ -433,7 +433,7 @@ impl AdminService {
         override_cfg: Option<crate::model::config::PushNotificationConfig>,
     ) -> Result<u64, AdminServiceError> {
         let cfg = override_cfg.unwrap_or_else(|| self.config.read().push_notification.clone());
-        crate::push::send_push(&cfg, "kiro-rs 测试推送", "这是一条测试消息：推送配置有效。")
+        crate::push::send_push(&cfg, "kiro 测试推送", "这是一条测试消息：推送配置有效。")
             .await
             .map_err(|e| AdminServiceError::InvalidRequest(format!("测试推送失败：{}", e)))
     }

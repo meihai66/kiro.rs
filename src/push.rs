@@ -139,7 +139,7 @@ pub fn spawn_alert_monitor(config: Arc<RwLock<Config>>, token_manager: Arc<Multi
                 continue;
             }
             let body = alerts.join("；");
-            match send_push(&cfg, "kiro-rs 阈值告警", &body).await {
+            match send_push(&cfg, "kiro 阈值告警", &body).await {
                 Ok(pushed) => {
                     last_push_at = Some(Instant::now());
                     tracing::info!(pushed, body = %body, "阈值告警推送已发送");
