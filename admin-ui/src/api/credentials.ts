@@ -314,6 +314,16 @@ export async function getStatsSummary(
   return data
 }
 
+// 测试推送：body 携带当前表单配置（先测后存），验证密钥/收件人
+export async function testPush(
+  cfg: import('@/types/api').PushNotificationConfig
+): Promise<SuccessResponse> {
+  const { data } = await api.post<SuccessResponse>('/push-test', cfg, {
+    timeout: 30_000,
+  })
+  return data
+}
+
 // 对话测试：admin 凭据触发一次最小请求
 export async function testChat(req: import('@/types/api').TestChatRequest) {
   const { data } = await api.post<import('@/types/api').TestChatResponse>(

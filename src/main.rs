@@ -7,6 +7,7 @@ mod http_client;
 pub mod image;
 mod kiro;
 mod model;
+mod push;
 mod storage;
 pub mod token;
 
@@ -300,6 +301,9 @@ async fn main() {
             }
         });
     }
+
+    // 提醒推送：阈值监控后台任务（可用凭据数 / 预计可用时长，30 分钟推送冷却）
+    push::spawn_alert_monitor(config.clone(), token_manager.clone());
 
     // 错误日志后台清理：每小时按 (max_count, max_age_days) prune
     {

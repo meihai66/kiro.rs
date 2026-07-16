@@ -426,6 +426,18 @@ impl AdminService {
         })
     }
 
+    /// 发送一条测试推送（绕过 30 分钟冷却与总开关）。
+    /// `override_cfg` 提供时优先使用（前端可先测后存），否则用已保存的配置。
+    pub async fn test_push(
+        &self,
+        override_cfg: Option<crate::model::config::PushNotificationConfig>,
+    ) -> Result<u64, AdminServiceError> {
+        let cfg = override_cfg.unwrap_or_else(|| self.config.read().push_notification.clone());
+        crate::push::send_push(&cfg, "kiro-rs 测试推送", "这是一条测试消息：推送配置有效。")
+            .await
+            .map_err(|e| AdminServiceError::InvalidRequest(format!("测试推送失败：{}", e)))
+    }
+
     /// 清空所有统计数据：
     /// - api_keys 表 success_count / fail_count 归零
     /// - 每个凭据 success_count / rate_limit_count 归零
@@ -2194,6 +2206,7 @@ impl AdminService {
             pricing: config.pricing.clone(),
             model_mapping: config.model_mapping.clone(),
             models: config.models.clone(),
+            push_notification: config.push_notification.clone(),
         }
     }
 
@@ -2422,6 +2435,47 @@ impl AdminService {
             if let Some(model_mapping) = &req.model_mapping {
                 config.model_mapping = model_mapping.clone();
             }
+            if let Some(push) = &req.push_notification {
+                // 整体替换 + 规范化：trim 字符串、去重收件人、clamp 采样窗口
+                let mut p = push.clone();
+                p.api_url = p.api_url.trim().to_string();
+                p.api_key = p.api_key.trim().to_string();
+                p.priority = match p.priority.trim() {
+                    "urgent" => "urgent".to_string(),
+                    _ => "normal".to_string(),
+                };
+                p.group_ids.sort_unstable();
+                p.group_ids.dedup();
+                p.user_ids.sort_unstable();
+                p.user_ids.dedup();
+                p.usernames = p
+                    .usernames
+                    .iter()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                p.usernames.dedup();
+                p.credit_window_minutes = p.credit_window_minutes.clamp(1, 60);
+                if p.enabled {
+                    if p.api_key.is_empty() {
+                        return Err(AdminServiceError::InvalidRequest(
+                            "启用提醒推送需要配置推送 API Key".into(),
+                        ));
+                    }
+                    if !p.has_recipients() {
+                        return Err(AdminServiceError::InvalidRequest(
+                            "启用提醒推送需要至少一个收件人（用户组 / 用户 id / 用户名）".into(),
+                        ));
+                    }
+                    if p.min_available_credentials == 0 && p.min_remaining_minutes == 0 {
+                        return Err(AdminServiceError::InvalidRequest(
+                            "启用提醒推送需要至少设置一个阈值（可用凭据数 / 预计可用时长）".into(),
+                        ));
+                    }
+                }
+                config.push_notification = p;
+            }
+
             if let Some(models) = &req.models {
                 // 整体替换：trim 各字段，丢弃 id 为空的行；空列表 = 恢复内置列表
                 config.models = models
@@ -3330,6 +3384,7 @@ mod tests {
             pricing: None,
             model_mapping: None,
             models: None,
+            push_notification: None,
         };
 
         let result = service.update_global_config(req).await;
@@ -3380,6 +3435,7 @@ mod tests {
             pricing: None,
             model_mapping: None,
             models: None,
+            push_notification: None,
         };
 
         let result = service.update_global_config(req).await;
@@ -3429,6 +3485,7 @@ mod tests {
             pricing: None,
             model_mapping: None,
             models: None,
+            push_notification: None,
         };
 
         let result = service.update_global_config(req).await;
@@ -3478,6 +3535,7 @@ mod tests {
             pricing: None,
             model_mapping: None,
             models: None,
+            push_notification: None,
         };
 
         let result = service.update_global_config(req).await;
@@ -3524,6 +3582,7 @@ mod tests {
             pricing: None,
             model_mapping: None,
             models: None,
+            push_notification: None,
         };
 
         let result = service.update_global_config(req).await;

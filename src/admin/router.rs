@@ -18,8 +18,8 @@ use super::{
         reset_failure_count, reset_rate_limit_stats, rotate_proxies_now,
         set_credential_allow_overuse, set_credential_disabled, set_credential_email,
         set_credential_endpoint, set_credential_priority, set_credential_region,
-        set_credential_rpm, set_overage_preference, test_chat, test_proxy, unbind_credential_proxy,
-        update_api_key, update_global_config, update_proxy_config,
+        set_credential_rpm, set_overage_preference, test_chat, test_proxy, test_push,
+        unbind_credential_proxy, update_api_key, update_global_config, update_proxy_config,
     },
     middleware::{AdminState, admin_auth_middleware},
 };
@@ -71,6 +71,7 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/stats/reset", post(reset_all_stats))
         .route("/stats/reset-rate-limits", post(reset_rate_limit_stats))
         .route("/test-chat", post(test_chat))
+        .route("/push-test", post(test_push))
         .route(
             "/credentials/{id}/overage-preference",
             post(set_overage_preference),

@@ -320,6 +320,23 @@ pub async fn test_chat(
     }
 }
 
+/// POST /api/admin/push-test
+/// 发送一条测试推送验证密钥/收件人配置。body 可携带一份推送配置（先测后存）；
+/// 不带 body 时用已保存的配置。
+pub async fn test_push(
+    State(state): State<AdminState>,
+    body: Option<Json<crate::model::config::PushNotificationConfig>>,
+) -> impl IntoResponse {
+    match state.service.test_push(body.map(|Json(c)| c)).await {
+        Ok(pushed) => Json(SuccessResponse::new(format!(
+            "测试推送已发送（送达 {} 个用户）",
+            pushed
+        )))
+        .into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
 /// GET /api/admin/stats/rpm-history?hours=24
 /// 所有凭据汇总的 RPM 历史（用于全局仪表盘）
 pub async fn get_rpm_history_aggregate(

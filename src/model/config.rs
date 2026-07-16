@@ -261,9 +261,70 @@ pub struct Config {
     #[serde(default)]
     pub models: Vec<ModelEntry>,
 
+    /// 提醒推送配置（阈值告警推送到 ogpush）
+    #[serde(default)]
+    pub push_notification: PushNotificationConfig,
+
     /// 配置文件路径（运行时元数据，不写入 JSON）
     #[serde(skip)]
     config_path: Option<PathBuf>,
+}
+
+/// 提醒推送配置：可用凭据数 / 预计可用时长 低于阈值时，调用 ogpush 推送接口告警。
+///
+/// 两个阈值独立启用（0 = 不检查该项）；同一轮检查两项同时触发只合并推送一条；
+/// 相邻两次推送之间固定间隔至少 30 分钟（硬编码，不可配置）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PushNotificationConfig {
+    /// 总开关
+    pub enabled: bool,
+    /// 推送接口地址
+    pub api_url: String,
+    /// X-API-Key 密钥
+    pub api_key: String,
+    /// 收件用户组 id 列表（与 user_ids / usernames 至少一个非空）
+    pub group_ids: Vec<i64>,
+    /// 收件用户 id 列表
+    pub user_ids: Vec<i64>,
+    /// 收件用户名列表
+    pub usernames: Vec<String>,
+    /// 优先级：normal（响一声）| urgent（全屏弹出 + 循环响铃）
+    pub priority: String,
+    /// 可用凭据数低于此值时推送（0 = 不检查）
+    pub min_available_credentials: u32,
+    /// 预计可用时长低于此分钟数时推送（0 = 不检查）
+    pub min_remaining_minutes: u32,
+    /// 估算消耗速率的采样窗口（分钟），默认 5
+    pub credit_window_minutes: u32,
+}
+
+impl Default for PushNotificationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            api_url: default_push_api_url(),
+            api_key: String::new(),
+            group_ids: Vec::new(),
+            user_ids: Vec::new(),
+            usernames: Vec::new(),
+            priority: "normal".to_string(),
+            min_available_credentials: 0,
+            min_remaining_minutes: 0,
+            credit_window_minutes: 5,
+        }
+    }
+}
+
+impl PushNotificationConfig {
+    /// 是否配置了至少一个收件人
+    pub fn has_recipients(&self) -> bool {
+        !self.group_ids.is_empty() || !self.user_ids.is_empty() || !self.usernames.is_empty()
+    }
+}
+
+fn default_push_api_url() -> String {
+    "https://ogpush.ogog.dev/api/push".to_string()
 }
 
 /// 单档价格（单位：美元 / 每百万 token）
@@ -850,6 +911,7 @@ impl Default for Config {
             pricing: PricingConfig::default(),
             model_mapping: ModelMappingConfig::default(),
             models: Vec::new(),
+            push_notification: PushNotificationConfig::default(),
             config_path: None,
         }
     }

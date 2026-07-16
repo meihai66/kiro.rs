@@ -1057,6 +1057,8 @@ pub struct GlobalConfigResponse {
     pub model_mapping: crate::model::config::ModelMappingConfig,
     /// `/v1/models` 自定义模型列表（为空则用内置列表）
     pub models: Vec<crate::model::config::ModelEntry>,
+    /// 提醒推送配置（阈值告警推送）
+    pub push_notification: crate::model::config::PushNotificationConfig,
 }
 
 /// 压缩配置响应
@@ -1148,6 +1150,8 @@ pub struct UpdateGlobalConfigRequest {
     pub model_mapping: Option<crate::model::config::ModelMappingConfig>,
     /// `/v1/models` 自定义模型列表（可选；提供则整体替换，空数组恢复内置列表）
     pub models: Option<Vec<crate::model::config::ModelEntry>>,
+    /// 提醒推送配置（可选；提供则整体替换）
+    pub push_notification: Option<crate::model::config::PushNotificationConfig>,
 }
 
 /// 更新压缩配置请求

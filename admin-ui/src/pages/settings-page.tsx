@@ -12,11 +12,13 @@ import {
 } from '@/hooks/use-credentials'
 import { extractErrorMessage } from '@/lib/utils'
 import { storage } from '@/lib/storage'
+import { testPush } from '@/api/credentials'
 import type {
   ModelBodyLimitRule,
   ModelEntry,
   ModelMappingConfig,
   PricingConfig,
+  PushNotificationConfig,
   UpdateCompressionConfigRequest,
   UpdateGlobalConfigRequest,
 } from '@/types/api'
@@ -143,6 +145,72 @@ const draftToBodyLimits = (d: BodyLimitRuleDraft[]): ModelBodyLimitRule[] =>
     maxBytes: parseInt(r.maxBytes) || 0,
   }))
 
+// 提醒推送编辑态（数字/列表字段用字符串保存，保存时再解析）
+type PushDraft = {
+  enabled: boolean
+  apiUrl: string
+  apiKey: string
+  groupIds: string
+  userIds: string
+  usernames: string
+  priority: string
+  minAvailableCredentials: string
+  minRemainingMinutes: string
+  creditWindowMinutes: string
+}
+const DEFAULT_PUSH_DRAFT: PushDraft = {
+  enabled: false,
+  apiUrl: 'https://ogpush.ogog.dev/api/push',
+  apiKey: '',
+  groupIds: '',
+  userIds: '',
+  usernames: '',
+  priority: 'normal',
+  minAvailableCredentials: '0',
+  minRemainingMinutes: '0',
+  creditWindowMinutes: '5',
+}
+const pushToDraft = (p: PushNotificationConfig): PushDraft => ({
+  enabled: p.enabled,
+  apiUrl: p.apiUrl,
+  apiKey: p.apiKey,
+  groupIds: (p.groupIds ?? []).join(', '),
+  userIds: (p.userIds ?? []).join(', '),
+  usernames: (p.usernames ?? []).join(', '),
+  priority: p.priority === 'urgent' ? 'urgent' : 'normal',
+  minAvailableCredentials: String(p.minAvailableCredentials ?? 0),
+  minRemainingMinutes: String(p.minRemainingMinutes ?? 0),
+  creditWindowMinutes: String(p.creditWindowMinutes ?? 5),
+})
+const parseIdList = (s: string): number[] =>
+  s
+    .split(/[,，\s]+/)
+    .map((x) => parseInt(x, 10))
+    .filter((n) => Number.isFinite(n) && n > 0)
+const parseNameList = (s: string): string[] =>
+  s
+    .split(/[,，\s]+/)
+    .map((x) => x.trim())
+    .filter(Boolean)
+const draftToPush = (d: PushDraft): PushNotificationConfig => ({
+  enabled: d.enabled,
+  apiUrl: d.apiUrl.trim(),
+  apiKey: d.apiKey.trim(),
+  groupIds: parseIdList(d.groupIds),
+  userIds: parseIdList(d.userIds),
+  usernames: parseNameList(d.usernames),
+  priority: d.priority === 'urgent' ? 'urgent' : 'normal',
+  minAvailableCredentials: Math.max(
+    0,
+    parseInt(d.minAvailableCredentials, 10) || 0
+  ),
+  minRemainingMinutes: Math.max(0, parseInt(d.minRemainingMinutes, 10) || 0),
+  creditWindowMinutes: Math.min(
+    60,
+    Math.max(1, parseInt(d.creditWindowMinutes, 10) || 5)
+  ),
+})
+
 // /v1/models 模型列表编辑态（数字字段用字符串保存，保存时再转数字）
 type ModelEntryDraft = {
   id: string
@@ -207,6 +275,15 @@ export function SettingsPage() {
     toast.success(`自动刷新频率已保存：${refreshSecs}s`)
   }
 
+  // 首页「预计可用时长」采样窗口（分钟，仅前端 localStorage）
+  const [creditWindowMins, setCreditWindowMins] = useState(() =>
+    storage.getCreditWindowMinutes()
+  )
+  const handleSaveCreditWindow = () => {
+    storage.setCreditWindowMinutes(creditWindowMins)
+    toast.success(`采样窗口已保存：最近 ${creditWindowMins} 分钟`)
+  }
+
   // 自动禁用规则（textarea，每行一条）
   const [autoDisablePatternsText, setAutoDisablePatternsText] = useState('')
   // 错误内容替换规则（每行一条 pattern===replacement）
@@ -269,6 +346,23 @@ export function SettingsPage() {
 
   // /v1/models 自定义模型列表（空 = 内置列表）
   const [modelsList, setModelsList] = useState<ModelEntryDraft[]>([])
+
+  // 提醒推送
+  const [pushDraft, setPushDraft] = useState<PushDraft>(DEFAULT_PUSH_DRAFT)
+  const [pushTesting, setPushTesting] = useState(false)
+  const updatePush = <K extends keyof PushDraft>(key: K, value: PushDraft[K]) =>
+    setPushDraft((p) => ({ ...p, [key]: value }))
+  const handleTestPush = async () => {
+    setPushTesting(true)
+    try {
+      const resp = await testPush(draftToPush(pushDraft))
+      toast.success(resp.message || '测试推送已发送')
+    } catch (e) {
+      toast.error(extractErrorMessage(e))
+    } finally {
+      setPushTesting(false)
+    }
+  }
 
   const isLoading = globalLoading || proxyLoading
   const isPending = globalPending || proxyPending
@@ -343,6 +437,9 @@ export function SettingsPage() {
         setModelMapping(modelMappingToDraft(globalConfig.modelMapping))
       }
       setModelsList(modelsToDraft(globalConfig.models ?? []))
+      if (globalConfig.pushNotification) {
+        setPushDraft(pushToDraft(globalConfig.pushNotification))
+      }
     }
     if (proxyConfig) {
       setProxyUrl(proxyConfig.proxyUrl || '')
@@ -654,6 +751,44 @@ export function SettingsPage() {
     ) {
       globalPayload.models = draftToModels(modelsList)
       hasGlobalChanges = true
+    }
+
+    // 提醒推送（整体替换；JSON 深比较检测变更）
+    if (globalConfig) {
+      const newPush = draftToPush(pushDraft)
+      if (
+        JSON.stringify(newPush) !==
+        JSON.stringify(
+          globalConfig.pushNotification
+            ? draftToPush(pushToDraft(globalConfig.pushNotification))
+            : draftToPush(DEFAULT_PUSH_DRAFT)
+        )
+      ) {
+        // 前置校验，与后端一致，避免整单保存被 400 卡住
+        if (newPush.enabled) {
+          if (!newPush.apiKey) {
+            toast.error('启用提醒推送需要配置推送 API Key')
+            return
+          }
+          if (
+            newPush.groupIds.length === 0 &&
+            newPush.userIds.length === 0 &&
+            newPush.usernames.length === 0
+          ) {
+            toast.error('启用提醒推送需要至少一个收件人（用户组/用户ID/用户名）')
+            return
+          }
+          if (
+            newPush.minAvailableCredentials === 0 &&
+            newPush.minRemainingMinutes === 0
+          ) {
+            toast.error('启用提醒推送需要至少设置一个阈值')
+            return
+          }
+        }
+        globalPayload.pushNotification = newPush
+        hasGlobalChanges = true
+      }
     }
 
     const proxyPayload: Record<string, string | null> = {
@@ -1555,6 +1690,161 @@ export function SettingsPage() {
             </CardContent>
           </Card>
 
+          {/* 提醒推送 */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">提醒推送</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <label className="text-sm font-medium">启用提醒推送</label>
+                  <p className="text-xs text-muted-foreground">
+                    可用凭据数 / 预计可用时长低于阈值时推送提醒（ogpush）。
+                    两项同时触发只推一条；相邻两次推送至少间隔 30 分钟。
+                  </p>
+                </div>
+                <Switch
+                  checked={pushDraft.enabled}
+                  onCheckedChange={(v) => updatePush('enabled', v)}
+                  disabled={isPending}
+                />
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="text-sm font-medium">推送 API Key</label>
+                  <Input
+                    placeholder="ogk_xxxxxxxx"
+                    value={pushDraft.apiKey}
+                    onChange={(e) => updatePush('apiKey', e.target.value)}
+                    disabled={isPending}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-sm font-medium">推送接口地址</label>
+                  <Input
+                    placeholder="https://ogpush.ogog.dev/api/push"
+                    value={pushDraft.apiUrl}
+                    onChange={(e) => updatePush('apiUrl', e.target.value)}
+                    disabled={isPending}
+                  />
+                </div>
+              </div>
+              <div className="space-y-1">
+                <div className="text-sm font-medium">收件人（至少填一项，多个逗号分隔，取并集）</div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div className="space-y-1">
+                    <label className="text-xs text-muted-foreground">用户组 ID</label>
+                    <Input
+                      placeholder="如 1, 2"
+                      value={pushDraft.groupIds}
+                      onChange={(e) => updatePush('groupIds', e.target.value)}
+                      disabled={isPending}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs text-muted-foreground">用户 ID</label>
+                    <Input
+                      placeholder="如 3, 4"
+                      value={pushDraft.userIds}
+                      onChange={(e) => updatePush('userIds', e.target.value)}
+                      disabled={isPending}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs text-muted-foreground">用户名</label>
+                    <Input
+                      placeholder="如 alice, bob"
+                      value={pushDraft.usernames}
+                      onChange={(e) => updatePush('usernames', e.target.value)}
+                      disabled={isPending}
+                    />
+                  </div>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="text-sm font-medium">优先级</label>
+                  <select
+                    className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
+                    value={pushDraft.priority}
+                    onChange={(e) => updatePush('priority', e.target.value)}
+                    disabled={isPending}
+                  >
+                    <option value="normal">normal（响一声）</option>
+                    <option value="urgent">urgent（全屏弹出 + 循环响铃）</option>
+                  </select>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-sm font-medium">采样窗口（分钟）</label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={60}
+                    value={pushDraft.creditWindowMinutes}
+                    onChange={(e) =>
+                      updatePush('creditWindowMinutes', e.target.value)
+                    }
+                    disabled={isPending}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    按最近 N 分钟消耗速率估算可用时长（1~60）
+                  </p>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2 border-t">
+                <div className="space-y-1">
+                  <label className="text-sm font-medium">
+                    可用凭据数低于（个）
+                  </label>
+                  <Input
+                    type="number"
+                    min={0}
+                    value={pushDraft.minAvailableCredentials}
+                    onChange={(e) =>
+                      updatePush('minAvailableCredentials', e.target.value)
+                    }
+                    disabled={isPending}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    未禁用且不在冷却的凭据数低于该值时推送；0 = 不检查
+                  </p>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-sm font-medium">
+                    预计可用时长低于（分钟）
+                  </label>
+                  <Input
+                    type="number"
+                    min={0}
+                    value={pushDraft.minRemainingMinutes}
+                    onChange={(e) =>
+                      updatePush('minRemainingMinutes', e.target.value)
+                    }
+                    disabled={isPending}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    剩余点数 ÷ 消耗速率折算的可撑分钟数低于该值时推送；0 = 不检查
+                  </p>
+                </div>
+              </div>
+              <div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={handleTestPush}
+                  disabled={isPending || pushTesting}
+                >
+                  {pushTesting ? '发送中…' : '发送测试推送'}
+                </Button>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  用上方当前填写的配置立即发一条测试消息（无需先保存，不受 30 分钟间隔限制）
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+
           {/* 前端：自动刷新频率（仅本浏览器） */}
           <Card>
             <CardHeader>
@@ -1586,6 +1876,37 @@ export function SettingsPage() {
                 >
                   保存
                 </Button>
+              </div>
+              <div className="pt-3 border-t space-y-2">
+                <label className="text-sm font-medium">
+                  预计可用时长采样窗口
+                </label>
+                <p className="text-xs text-muted-foreground">
+                  首页「预计可用时长」按最近 N 分钟的积分消耗速率估算，
+                  仅本浏览器生效（保存在 localStorage）。范围 1~1440 分钟。
+                </p>
+                <div className="flex items-center gap-2 max-w-xs">
+                  <Input
+                    type="number"
+                    min={1}
+                    max={1440}
+                    value={creditWindowMins}
+                    onChange={(e) =>
+                      setCreditWindowMins(
+                        Math.max(1, Math.min(1440, Number(e.target.value) || 5))
+                      )
+                    }
+                  />
+                  <span className="text-sm">分钟</span>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={handleSaveCreditWindow}
+                  >
+                    保存
+                  </Button>
+                </div>
               </div>
             </CardContent>
           </Card>

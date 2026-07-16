@@ -92,6 +92,7 @@ import {
   useSetDisabled,
 } from '@/hooks/use-credentials'
 import { extractErrorMessage } from '@/lib/utils'
+import { storage } from '@/lib/storage'
 import type {
   BalanceResponse,
   CachedBalanceInfo,
@@ -367,33 +368,31 @@ function classifyCredential(
 }
 
 const EMPTY_FILL = 'var(--color-muted)'
-/** 全成功时的纯绿（emerald-500 基调），与渐变起点稍有区分，让“出现失败”一眼可见 */
+/** 成功率 ≥95% 视为正常时的纯绿（emerald-500 基调） */
 const PERFECT_GREEN = 'hsl(158, 75%, 40%)'
-/** 失败率→颜色的容忍度指数：>1 时低失败率更偏绿，需接近全失败才转红（数值越大越容忍） */
-const FAIL_TOLERANCE = 1.3
 
-/** 每格按“失败率”在 绿→黄→红 之间连续取色（失败与 429 合并计入失败）。
+/** 每格按“成功率”分档取色（失败与 429 合并计入失败）。
  *
- * - 全成功 = 纯绿（PERFECT_GREEN）；
- * - 一旦出现失败/429，从黄绿开始，随失败率升高经黄色过渡到红色（走 hue 而非 RGB 直混，
- *   避免绿红直接混成脏褐色）；
- * - 失败率经 `^FAIL_TOLERANCE` 映射：少量失败仍明显偏绿，接近全失败才转纯红。
+ * - 成功率 ≥95% = 正常，纯绿（PERFECT_GREEN）；
+ * - 之后每降 10 个百分点降一档（85~95 一档、75~85 一档……<5 为最后一档），
+ *   档位 hue 从 100°(黄绿) 经 60°(黄) 均匀走到 0°(红)，共 10 档
+ *   （走 hue 而非 RGB 直混，避免绿红直接混成脏褐色）。
  *
- * 每格 100 次请求 → 失败率天然是 0%~100% 的百分比刻度，不同失败数对应不同颜色。 */
+ * 每格 100 次请求 → 成功率天然是 0%~100% 的百分比刻度，每 10 次一档。 */
 function outcomeCellColor(s: number, e: number, r: number): string {
   const total = s + e + r
   if (total <= 0) return EMPTY_FILL
-  const bad = e + r // 失败与 429 合并计入
-  if (bad === 0) return PERFECT_GREEN
-  const failRate = Math.min(bad / total, 1)
-  // hue：约 100°(黄绿) → 0°(红)，经 60°(黄) 过渡；容忍度曲线让低失败率停留在绿端
-  const hue = 100 * (1 - Math.pow(failRate, FAIL_TOLERANCE))
+  const successPct = (s / total) * 100
+  if (successPct >= 95) return PERFECT_GREEN
+  // 档位：85~95 → 1，75~85 → 2 …… <5 → 10
+  const band = Math.min(10, Math.floor((95 - successPct) / 10) + 1)
+  const hue = 100 * (1 - (band - 1) / 9)
   return `hsl(${hue.toFixed(0)}, 82%, 46%)`
 }
 
 /** 最近 1000 次请求分布条：一行 10 格（每格 = 100 次请求的一块，左旧右新），
- * 格色 = 该块内 失败率（失败与 429 合并）在 绿→黄→红 连续渐变上取色（全成功纯绿，
- * 失败率越高越偏红，容忍度较大：少量失败仍偏绿）；
+ * 格色 = 该块内 成功率（失败与 429 合并计入失败）分档取色：≥95% 最绿，
+ * 每降 10 个百分点降一档，逐档从黄绿经黄过渡到红；
  * 最新一格未满 100 次时按次数部分填充，其余灰底。
  * 共 10 个节点 + 组件级 memo，渲染开销可忽略；高度 7px 不撑高表格行。 */
 const RecentOutcomeStrip = memo(function RecentOutcomeStrip({
@@ -414,7 +413,7 @@ const RecentOutcomeStrip = memo(function RecentOutcomeStrip({
   return (
     <div
       className="mt-0.5 flex h-[7px] items-stretch gap-px"
-      title="最近 1000 次请求（每格 100 次，左旧右新）：格色 = 失败率(失败+429合并) 在 绿→黄→红 上取色，全成功=绿，越红失败越多"
+      title="最近 1000 次请求（每格 100 次，左旧右新）：格色 = 成功率分档取色（失败+429合并计入失败），≥95% 最绿，每降 10% 降一档趋向红"
     >
       {slots.map((chunk, i) => {
         if (chunk === null) {
@@ -1054,9 +1053,8 @@ export function CredentialsPage() {
   const allCredentials = data?.credentials ?? []
 
   // 顶部状态条数据：服务级摘要（运行时间/总请求/成功率）+ 凭据汇总（in-flight/RPM）
-  // creditWindow：「预计可撑」的消耗采样窗口（分钟），点击 chip 可循环切换
-  const CREDIT_WINDOWS = [5, 15, 30, 60]
-  const [creditWindow, setCreditWindow] = useState(5)
+  // creditWindow：「预计可撑」的消耗采样窗口（分钟），在设置页配置（localStorage）
+  const creditWindow = storage.getCreditWindowMinutes()
   const { data: statsSummary } = useQuery({
     queryKey: ['stats-summary', creditWindow],
     queryFn: () => getStatsSummary(creditWindow),
@@ -1081,7 +1079,7 @@ export function CredentialsPage() {
   const etaTitle = statsSummary
     ? `最近 ${statsSummary.creditWindowMinutes ?? creditWindow} 分钟消耗 ${(statsSummary.recentCreditUsage ?? 0).toFixed(2)} 点（${(statsSummary.creditPerMinute ?? 0).toFixed(3)} 点/分）；` +
       `剩余 ${(statsSummary.remainingCredits ?? 0).toFixed(1)} 点（基于 ${statsSummary.balanceCountedCredentials ?? 0}/${statsSummary.enabledCredentials ?? 0} 个启用凭据的缓存余额）。` +
-      `点击切换采样窗口（当前 ${creditWindow} 分钟）`
+      `采样窗口 ${creditWindow} 分钟（可在设置页修改）`
     : '点数消耗速率估算加载中'
 
   // 取凭据当前生效的额度上限：优先实时余额，回退到缓存余额
@@ -1946,20 +1944,12 @@ export function CredentialsPage() {
           </span>
           <span
             className={
-              'inline-flex items-center gap-1 rounded-md border bg-card px-2 py-0.5 text-xs cursor-pointer select-none ' +
+              'inline-flex items-center gap-1 rounded-md border bg-card px-2 py-0.5 text-xs ' +
               (etaSecs !== null && etaSecs !== undefined && etaSecs < 3600
                 ? 'text-amber-700 dark:text-amber-400 border-amber-500/40'
                 : '')
             }
             title={etaTitle}
-            onClick={() =>
-              setCreditWindow(
-                CREDIT_WINDOWS[
-                  (CREDIT_WINDOWS.indexOf(creditWindow) + 1) %
-                    CREDIT_WINDOWS.length
-                ]
-              )
-            }
           >
             <span className="font-mono font-medium">{etaText}</span>
           </span>

@@ -751,6 +751,30 @@ export interface ModelEntry {
   maxCompletionTokens: number
 }
 
+// 提醒推送配置（阈值告警推送到 ogpush）
+export interface PushNotificationConfig {
+  /** 总开关 */
+  enabled: boolean
+  /** 推送接口地址 */
+  apiUrl: string
+  /** X-API-Key 密钥 */
+  apiKey: string
+  /** 收件用户组 id 列表 */
+  groupIds: number[]
+  /** 收件用户 id 列表 */
+  userIds: number[]
+  /** 收件用户名列表 */
+  usernames: string[]
+  /** normal | urgent */
+  priority: string
+  /** 可用凭据数低于此值时推送（0 = 不检查） */
+  minAvailableCredentials: number
+  /** 预计可用时长低于此分钟数时推送（0 = 不检查） */
+  minRemainingMinutes: number
+  /** 估算消耗速率的采样窗口（分钟，1~60） */
+  creditWindowMinutes: number
+}
+
 export interface GlobalConfigResponse {
   region: string
   credentialRpm: number | null
@@ -785,6 +809,7 @@ export interface GlobalConfigResponse {
   pricing: PricingConfig
   modelMapping: ModelMappingConfig
   models: ModelEntry[]
+  pushNotification: PushNotificationConfig
 }
 
 export interface UpdateCompressionConfigRequest {
@@ -835,6 +860,7 @@ export interface UpdateGlobalConfigRequest {
   pricing?: PricingConfig
   modelMapping?: ModelMappingConfig
   models?: ModelEntry[]
+  pushNotification?: PushNotificationConfig
 }
 
 // ===== 错误日志 =====
