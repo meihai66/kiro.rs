@@ -24,13 +24,21 @@ pub struct ApiKeyEntry {
     pub max_concurrent: u32,
     pub cache_read_min_pct: u32,
     pub cache_read_max_pct: u32,
-    pub in_flight: AtomicU32,
+    /// 并发计数器。用 Arc 包裹使其跨 reload 存活：reload 重建 entry 时复用
+    /// 同一个计数器，在途请求的 guard（持有旧 entry）drop 时减的仍是它，
+    /// 避免「复制数值 + 旧 guard 减旧计数器」导致的永久虚高。
+    pub in_flight: Arc<AtomicU32>,
     /// 允许使用的凭据 ID 集合（None = 全部可用；Some 一定非空）
     pub allowed_credentials: Option<Arc<HashSet<u64>>>,
 }
 
 impl ApiKeyEntry {
     pub fn from_row(row: &ApiKeyRow) -> Arc<Self> {
+        Self::from_row_with_counter(row, Arc::new(AtomicU32::new(0)))
+    }
+
+    /// 用指定的并发计数器构建 entry（reload 时传入旧 entry 的计数器以保持连续）
+    pub fn from_row_with_counter(row: &ApiKeyRow, in_flight: Arc<AtomicU32>) -> Arc<Self> {
         // 空列表 = 全部可用 → None；否则收敛为非空 HashSet
         let allowed_credentials = if row.allowed_credentials.is_empty() {
             None
@@ -50,7 +58,7 @@ impl ApiKeyEntry {
             max_concurrent: row.max_concurrent,
             cache_read_min_pct: row.cache_read_min_pct,
             cache_read_max_pct: row.cache_read_max_pct,
-            in_flight: AtomicU32::new(0),
+            in_flight,
             allowed_credentials,
         })
     }
@@ -168,12 +176,11 @@ impl ApiKeyManager {
         let rows = self.store.list_api_keys()?;
         let mut new_map = HashMap::with_capacity(rows.len());
         for row in &rows {
-            // 保留旧 entry 的 in_flight 计数
+            // 复用旧 entry 的同一个 in_flight 计数器（不是复制数值）：
+            // 在途请求的 guard 持有旧 entry，drop 时减的就是这同一个 Atomic，
+            // 否则新 entry 从 N 起步且永远没人减，会永久虚高并占掉并发名额
             let entry = if let Some(old) = self.keys.read().get(&row.key) {
-                let in_flight = old.in_flight.load(Ordering::Relaxed);
-                let new_entry = ApiKeyEntry::from_row(row);
-                new_entry.in_flight.store(in_flight, Ordering::Relaxed);
-                new_entry
+                ApiKeyEntry::from_row_with_counter(row, old.in_flight.clone())
             } else {
                 ApiKeyEntry::from_row(row)
             };
@@ -273,6 +280,59 @@ pub fn apply_cache_simulation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_store() -> Arc<Store> {
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "kiro_apikey_test_{}_{}.db",
+            std::process::id(),
+            n
+        ));
+        let _ = std::fs::remove_file(&path);
+        Store::open(&path).expect("open store")
+    }
+
+    /// reload 必须复用同一个 in_flight 计数器：
+    /// 在途请求（guard 持有旧 entry）在 reload 之后 drop，计数应回到 0，
+    /// 而不是把 reload 时复制的数值永久留在新 entry 上。
+    #[tokio::test]
+    async fn test_reload_shares_in_flight_counter() {
+        let store = temp_store();
+        store
+            .create_api_key(&crate::storage::ApiKeyCreate {
+                key: "sk-test-reload".into(),
+                name: "t".into(),
+                description: None,
+                enabled: true,
+                max_concurrent: 0,
+                cache_read_min_pct: 0,
+                cache_read_max_pct: 0,
+                allowed_credentials: vec![],
+            })
+            .expect("create key");
+        let mgr = ApiKeyManager::load(store).expect("load");
+
+        let guard = mgr.authorize("sk-test-reload").expect("authorize");
+        let id = guard.key_id();
+        assert_eq!(mgr.snapshot_in_flight().get(&id), Some(&1));
+
+        // 模拟 admin CRUD 触发的 reload（此时请求仍在途）
+        mgr.reload().expect("reload");
+        assert_eq!(
+            mgr.snapshot_in_flight().get(&id),
+            Some(&1),
+            "reload 后在途计数应保留"
+        );
+
+        // 在途请求结束：guard 减的应是 reload 后的同一个计数器
+        drop(guard);
+        assert_eq!(
+            mgr.snapshot_in_flight().get(&id),
+            Some(&0),
+            "guard drop 后计数应归零，而不是永久虚高"
+        );
+    }
 
     // ---- 旧模式：按总输入比例（scale_hit_only = false）----
     #[test]

@@ -95,6 +95,9 @@ struct StreamRequestContext<'a> {
     cache_sim_scale_hit: bool,
     /// API Key 级缓存池命名空间（None = 按凭据隔离，维持现状）
     cache_pool_id: Option<u64>,
+    /// API Key 并发 guard 槽位：SSE 成功建立时从中 take 出 guard 挂到流的生命周期上
+    /// （否则中间件在响应头就绪时就释放并发位，整个流式输出期间不占并发）
+    auth_slot: Option<AuthSlot>,
     state: &'a super::middleware::AppState,
 }
 
@@ -1591,6 +1594,7 @@ pub async fn post_messages(
             cache_sim_pct,
             cache_sim_scale_hit: prompt_cache.sim_scale_hit,
             cache_pool_id,
+            auth_slot: auth_slot.as_ref().map(|Extension(s)| s.clone()),
             state: &state,
         };
         handle_stream_request(provider, stream_request).await
@@ -1711,6 +1715,25 @@ async fn handle_stream_request(
         api_result.credential_id,
         interrupt_log,
     );
+
+    // 把 API Key 并发 guard 从槽位中取出，挂到 SSE 流的生命周期上：
+    // 流结束/客户端断开时才释放并发位，让「并发」统计与上限覆盖整个流式输出期间。
+    // 成功/失败口径保持原语义：SSE 头就绪即计成功（中途断流只落 stream_interrupted 日志）。
+    let auth_guard = {
+        let mut g = context
+            .auth_slot
+            .as_ref()
+            .and_then(|slot| slot.lock().take());
+        if let Some(g) = g.as_mut() {
+            g.mark_success();
+        }
+        g
+    };
+    use futures::StreamExt;
+    let stream = stream.map(move |item| {
+        let _hold = &auth_guard; // 闭包持有 guard，随流一起 drop
+        item
+    });
 
     // 返回 SSE 响应（标记上游成功，供 API Key 统计计数）
     let mut response = Response::builder()
