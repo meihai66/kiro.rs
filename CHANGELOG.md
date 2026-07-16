@@ -1,5 +1,11 @@
 # Changelog
 
+## [v1.1.77] - 2026-07-16
+
+### 修复
+
+- **API Key 并发统计两处修复（reload 虚高 / 流式不占位）** — reload 复用同一个 in-flight 计数器（`Arc<AtomicU32>`）而非复制数值，在途请求 guard drop 时减的即当前计数器，CRUD/清空统计后并发数不再永久虚高；SSE 建立成功后将 AuthGuard 挂到流的生命周期上，流结束/断开才释放并发位，「并发」统计与「最大并发」限制覆盖整个流式输出期间 (`src/api_key_manager.rs`, `src/anthropic/handlers.rs`)
+
 ## [v1.1.76] - 2026-07-16
 
 ### 修复
