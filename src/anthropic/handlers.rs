@@ -275,6 +275,13 @@ fn is_improperly_formed_request_error(err: &Error) -> bool {
     s.contains("Improperly formed request")
 }
 
+/// 从错误链中取出上游实际返回的 HTTP 状态码（未到达上游时为 None）。
+/// 用于兜底映射前按结构化状态码分类，避免只靠字符串匹配漏掉新文案的上游 4xx。
+fn upstream_status_of(err: &Error) -> Option<u16> {
+    err.downcast_ref::<crate::kiro::provider::UpstreamAttemptError>()
+        .and_then(|a| a.upstream_status)
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 struct AdaptiveCompressionOutcome {
     initial_bytes: usize,
@@ -745,6 +752,17 @@ fn map_kiro_provider_error_to_response_with_log(
                 message: err.to_string(),
                 retry_after_secs: None,
             }
+        }
+    } else if upstream_status_of(&err) == Some(400) {
+        // 上游明确返回 400 的其余场景（如 TOOL_USE_RESULT_MISMATCH）：
+        // 确定性请求问题，原样以 400 透传给客户端，避免 502 诱发无意义重试。
+        // 已知文案（Input is too long / Improperly formed request）在上面有专门分支。
+        tracing::warn!(error = %err, "上游返回 400（请求问题），按 400 透传给客户端");
+        Mapped {
+            status: StatusCode::BAD_REQUEST,
+            error_type: "invalid_request_error",
+            message: err.to_string(),
+            retry_after_secs: None,
         }
     } else {
         tracing::error!("Kiro API 调用失败: {}", err);
@@ -2756,6 +2774,54 @@ mod tests {
             "{}",
             anyhow::anyhow!("400 Improperly formed request"),
         );
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_unknown_upstream_400_maps_to_400_not_502() {
+        // 上游 400 的未知文案（如 TOOL_USE_RESULT_MISMATCH）应按结构化状态码透传 400，
+        // 而不是落入 catch-all 变成 502（会诱发客户端无意义重试）
+        let err = crate::kiro::provider::UpstreamAttemptError::wrap(
+            1,
+            Some(400),
+            anyhow::anyhow!(
+                "流式 API 请求失败: 400 Bad Request messages.11: `tool_use` ids were found \
+                 without `tool_result` blocks (reason=TOOL_USE_RESULT_MISMATCH)"
+            ),
+        );
+        let response = map_kiro_provider_error_to_response("{}", err);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_upstream_500_still_maps_to_502() {
+        // 5xx / 未知错误仍走 502 兜底
+        let err = crate::kiro::provider::UpstreamAttemptError::wrap(
+            1,
+            Some(500),
+            anyhow::anyhow!("流式 API 请求失败: 500 Internal Server Error something broke"),
+        );
+        let response = map_kiro_provider_error_to_response("{}", err);
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn test_known_400_flavors_keep_specific_branches() {
+        // 已知 400 文案仍走各自专门分支（消息更友好），不受新兜底影响
+        let err = crate::kiro::provider::UpstreamAttemptError::wrap(
+            1,
+            Some(400),
+            anyhow::anyhow!("流式 API 请求失败: 400 Input is too long."),
+        );
+        let response = map_kiro_provider_error_to_response("{}", err);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let err = crate::kiro::provider::UpstreamAttemptError::wrap(
+            1,
+            Some(400),
+            anyhow::anyhow!("流式 API 请求失败: 400 Improperly formed request"),
+        );
+        let response = map_kiro_provider_error_to_response("{}", err);
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }
