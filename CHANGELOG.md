@@ -1,5 +1,16 @@
 # Changelog
 
+## [v1.1.74] - 2026-07-16
+
+### 新增
+
+- **提醒推送（阈值告警）** — 设置页新增「提醒推送」配置：当可用凭据数或预计可用时长低于阈值时通过 ogpush 推送告警，两项同时触发时合并为一条，推送间隔至少 30 分钟；支持测试推送（先测后存）(`src/push.rs`, `src/admin/service.rs`, `src/model/config.rs`, `admin-ui/src/pages/settings-page.tsx`)
+
+### 优化
+
+- **最近 1000 次请求分布条改为成功率分档取色** — ≥95% 为最绿，成功率每降 10% 降一档，替代原连续渐变取色 (`admin-ui/src/pages/credentials-page.tsx`)
+- **「预计可用时长」采样窗口设置化** — 首页预计可用时长的采样窗口改为设置页配置（分钟数），移除点击循环切换交互 (`admin-ui/src/pages/settings-page.tsx`, `admin-ui/src/pages/credentials-page.tsx`)
+
 ## [v1.1.73] - 2026-07-16
 
 ### 新增
