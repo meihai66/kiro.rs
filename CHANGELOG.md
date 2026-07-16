@@ -1,5 +1,11 @@
 # Changelog
 
+## [v1.1.76] - 2026-07-16
+
+### 修复
+
+- **未知文案的上游 400 按 400 透传，不再落入 502 兜底** — 映射层新增 `upstream_status_of()`，从错误链取 `UpstreamAttemptError` 的结构化上游状态码；上游 400（如 `TOOL_USE_RESULT_MISMATCH`）返回 400 `invalid_request_error` 并保留上游原文，避免 502 诱发客户端无意义重试；已知 400 文案、429/5xx/网络错误分支行为不变 (`src/anthropic/handlers.rs`)
+
 ## [v1.1.75] - 2026-07-16
 
 ### 修复
