@@ -1,5 +1,20 @@
 # Changelog
 
+## [v1.1.78] - 2026-07-18
+
+### 新增
+
+- **API Key 凭据批量导入** — Admin「添加凭据」API Key 模式支持多行批量粘贴（每行一个 `ksk_` Key，去重后逐条验证导入）；import-token-json 管线支持 `kiroApiKey` 项（无需 `refreshToken`），去重按 API Key 精确匹配；批量导出携带 api_key 凭据（`kiroApiKey` + `endpoint`），导出文件可直接回导 (`admin-ui/src/components/add-credential-dialog.tsx`, `admin-ui/src/components/import-token-json-dialog.tsx`, `src/admin/service.rs`)
+- **InvalidConfig 启动校验加固** — `authMethod=api_key` 但缺少 `kiroApiKey` 的凭据启动时自动禁用（InvalidConfig），`reset_and_enable` 拒绝恢复；凭据快照 `auth_method` 归一，仅填 `kiroApiKey` 时也显示 api_key (`src/kiro/token_manager.rs`, `src/admin/service.rs`)
+
+### 修复
+
+- **全新安装 JSON→SQLite 迁移启动失败** — 手写 credentials.json 不带 `id` 时迁移不再报错 (`src/storage/migration.rs`)
+
+### 文档
+
+- **API Key 凭据文档** — README/CLAUDE.md 补充 API Key 凭据说明，新增 `credentials.example.apikey.json`
+
 ## [v1.1.77] - 2026-07-16
 
 ### 修复
