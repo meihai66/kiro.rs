@@ -210,7 +210,16 @@ pub fn migrate_json_if_needed(
             Ok(content) if !content.trim().is_empty() => {
                 use crate::kiro::model::credentials::CredentialsConfig;
                 if let Ok(cfg) = serde_json::from_str::<CredentialsConfig>(&content) {
-                    let creds = cfg.into_sorted_credentials();
+                    let mut creds = cfg.into_sorted_credentials();
+                    // 手写 credentials.json 允许省略 id，迁移入库前自动补齐
+                    // （分配规则与 MultiTokenManager 一致：从现有最大 id 顺延）
+                    let mut next_id = creds.iter().filter_map(|c| c.id).max().unwrap_or(0) + 1;
+                    for c in creds.iter_mut() {
+                        if c.id.is_none() {
+                            c.id = Some(next_id);
+                            next_id += 1;
+                        }
+                    }
                     let imported = creds.len();
                     if imported > 0 {
                         store.replace_all_credentials(&creds)?;

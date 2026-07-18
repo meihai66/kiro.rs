@@ -1678,7 +1678,36 @@ impl AdminService {
                 })
                 .unwrap_or_else(|| "social".to_string());
 
-            // api_key 模式没有 refresh_token，import-token-json 端点会拒绝
+            // api_key 凭据：导出 kiroApiKey（import-token-json 可直接回导）
+            if c.is_api_key_credential() {
+                match c.kiro_api_key.as_deref().map(str::trim) {
+                    Some(key) if !key.is_empty() => {
+                        items.push(TokenJsonItem {
+                            provider: None,
+                            refresh_token: None,
+                            client_id: None,
+                            client_secret: None,
+                            auth_method: Some("api_key".to_string()),
+                            kiro_api_key: Some(key.to_string()),
+                            endpoint: c.endpoint,
+                            priority: c.priority,
+                            region: c.region,
+                            api_region: c.api_region,
+                            machine_id: c.machine_id,
+                            email: c.email,
+                            proxy: None,
+                        });
+                    }
+                    _ => {
+                        skipped.push(ExportSkippedItem {
+                            credential_id: id,
+                            reason: "api_key 凭据缺少 kiroApiKey，无法导出".to_string(),
+                        });
+                    }
+                }
+                continue;
+            }
+
             let refresh_token = match c.refresh_token.as_deref() {
                 Some(rt) if !rt.is_empty() => rt.to_string(),
                 _ => {
@@ -1706,6 +1735,8 @@ impl AdminService {
                 client_id: c.client_id,
                 client_secret: c.client_secret,
                 auth_method: Some(auth_method),
+                kiro_api_key: None,
+                endpoint: None,
                 priority: c.priority,
                 region: c.region,
                 api_region: c.api_region,
@@ -1773,22 +1804,38 @@ impl AdminService {
         // 生成指纹（用于识别和去重）
         let fingerprint = Self::generate_fingerprint(&item);
 
-        // 验证必填字段
-        let refresh_token = match &item.refresh_token {
-            Some(rt) if !rt.is_empty() => rt.clone(),
-            _ => {
-                return ImportItemResult {
-                    index,
-                    fingerprint,
-                    action: ImportAction::Invalid,
-                    reason: Some("缺少 refreshToken".to_string()),
-                    credential_id: None,
-                };
+        // 映射 authMethod（带 kiroApiKey 的项归为 api_key）
+        let auth_method = Self::map_auth_method(&item);
+        let is_api_key = auth_method == "api_key";
+
+        // 验证必填密钥：api_key 凭据要 kiroApiKey，其余要 refreshToken
+        let (refresh_token, kiro_api_key) = if is_api_key {
+            match item.kiro_api_key.as_deref().map(str::trim) {
+                Some(k) if !k.is_empty() => (None, Some(k.to_string())),
+                _ => {
+                    return ImportItemResult {
+                        index,
+                        fingerprint,
+                        action: ImportAction::Invalid,
+                        reason: Some("缺少 kiroApiKey".to_string()),
+                        credential_id: None,
+                    };
+                }
+            }
+        } else {
+            match &item.refresh_token {
+                Some(rt) if !rt.is_empty() => (Some(rt.clone()), None),
+                _ => {
+                    return ImportItemResult {
+                        index,
+                        fingerprint,
+                        action: ImportAction::Invalid,
+                        reason: Some("缺少 refreshToken".to_string()),
+                        credential_id: None,
+                    };
+                }
             }
         };
-
-        // 映射 authMethod
-        let auth_method = Self::map_auth_method(&item);
 
         // IdC 需要 clientId 和 clientSecret
         if auth_method == "idc" && (item.client_id.is_none() || item.client_secret.is_none()) {
@@ -1801,8 +1848,13 @@ impl AdminService {
             };
         }
 
-        // 检查是否已存在（通过 refreshToken 前缀匹配）
-        if self.token_manager.has_refresh_token_prefix(&refresh_token) {
+        // 检查是否已存在（api_key 精确匹配；refreshToken 前缀匹配）
+        let duplicate = match (&kiro_api_key, &refresh_token) {
+            (Some(key), _) => self.token_manager.has_kiro_api_key(key),
+            (None, Some(rt)) => self.token_manager.has_refresh_token_prefix(rt),
+            (None, None) => false,
+        };
+        if duplicate {
             return ImportItemResult {
                 index,
                 fingerprint,
@@ -1903,8 +1955,8 @@ impl AdminService {
         let new_cred = KiroCredentials {
             id: None,
             access_token: None,
-            refresh_token: Some(refresh_token),
-            kiro_api_key: None,
+            refresh_token,
+            kiro_api_key,
             profile_arn: None,
             expires_at: None,
             auth_method: Some(auth_method),
@@ -1914,7 +1966,10 @@ impl AdminService {
             region,
             api_region,
             machine_id: item.machine_id,
-            endpoint: None,
+            endpoint: item
+                .endpoint
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty()),
             email: item
                 .email
                 .as_ref()
@@ -2048,16 +2103,17 @@ impl AdminService {
 
     /// 生成凭据指纹（用于识别）
     fn generate_fingerprint(item: &TokenJsonItem) -> String {
-        // 使用 refreshToken 前 16 字符作为指纹
+        // 使用 refreshToken / kiroApiKey 前 16 字符作为指纹
         // 使用 floor_char_boundary 安全截断，避免在多字节字符中间切割导致 panic
         item.refresh_token
-            .as_ref()
-            .map(|rt| {
-                if rt.len() >= 16 {
-                    let end = floor_char_boundary(rt, 16);
-                    format!("{}...", &rt[..end])
+            .as_deref()
+            .or(item.kiro_api_key.as_deref())
+            .map(|secret| {
+                if secret.len() >= 16 {
+                    let end = floor_char_boundary(secret, 16);
+                    format!("{}...", &secret[..end])
                 } else {
-                    rt.clone()
+                    secret.to_string()
                 }
             })
             .unwrap_or_else(|| "(empty)".to_string())
@@ -2065,12 +2121,22 @@ impl AdminService {
 
     /// 映射 provider/authMethod 到标准 authMethod
     fn map_auth_method(item: &TokenJsonItem) -> String {
+        // 带 kiroApiKey 的项直接按 api_key 凭据处理
+        if item
+            .kiro_api_key
+            .as_deref()
+            .is_some_and(|k| !k.trim().is_empty())
+        {
+            return "api_key".to_string();
+        }
+
         // 优先使用 authMethod 字段
         if let Some(auth) = &item.auth_method {
             let auth_lower = auth.to_lowercase();
             return match auth_lower.as_str() {
                 "idc" | "builder-id" | "builderid" => "idc".to_string(),
                 "social" => "social".to_string(),
+                "apikey" | "api_key" => "api_key".to_string(),
                 _ => auth_lower,
             };
         }
@@ -3247,6 +3313,53 @@ mod tests {
         assert!(masked.contains("***"));
         // ASCII 长串保持原行为：前 8 + *** + 后 4
         assert_eq!(mask_key("ksk_abcdefghijklmnop"), "ksk_abcd***mnop");
+    }
+
+    fn empty_token_json_item() -> TokenJsonItem {
+        TokenJsonItem {
+            provider: None,
+            refresh_token: None,
+            client_id: None,
+            client_secret: None,
+            auth_method: None,
+            kiro_api_key: None,
+            endpoint: None,
+            priority: 10,
+            region: None,
+            api_region: None,
+            machine_id: None,
+            email: None,
+            proxy: None,
+        }
+    }
+
+    #[test]
+    fn test_map_auth_method_kiro_api_key() {
+        // 带 kiroApiKey 的项直接归为 api_key（不看 provider / authMethod）
+        let mut item = empty_token_json_item();
+        item.kiro_api_key = Some("ksk_test".to_string());
+        item.provider = Some("Github".to_string());
+        assert_eq!(AdminService::map_auth_method(&item), "api_key");
+
+        // authMethod 写 apikey 别名也归一
+        let mut item = empty_token_json_item();
+        item.auth_method = Some("apiKey".to_string());
+        assert_eq!(AdminService::map_auth_method(&item), "api_key");
+
+        // 空白 kiroApiKey 不触发 api_key 判定
+        let mut item = empty_token_json_item();
+        item.kiro_api_key = Some("  ".to_string());
+        assert_eq!(AdminService::map_auth_method(&item), "social");
+    }
+
+    #[test]
+    fn test_generate_fingerprint_falls_back_to_kiro_api_key() {
+        let mut item = empty_token_json_item();
+        item.kiro_api_key = Some("ksk_abcdefghijklmnop".to_string());
+        assert_eq!(
+            AdminService::generate_fingerprint(&item),
+            "ksk_abcdefghijkl..."
+        );
     }
 
     fn create_test_service() -> AdminService {

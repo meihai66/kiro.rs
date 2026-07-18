@@ -433,6 +433,12 @@ pub struct TokenJsonItem {
     pub client_secret: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_method: Option<String>,
+    /// Kiro API Key（`ksk_*`）；提供时按 api_key 凭据导入，无需 refreshToken
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kiro_api_key: Option<String>,
+    /// 凭据级端点（`ide` / `cli`），主要供 api_key 凭据使用
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
     #[serde(default = "default_import_priority")]
     pub priority: u32,
     #[serde(skip_serializing_if = "Option::is_none")]

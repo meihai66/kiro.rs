@@ -284,11 +284,8 @@ mod tests {
     fn temp_store() -> Arc<Store> {
         static SEQ: AtomicU32 = AtomicU32::new(0);
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "kiro_apikey_test_{}_{}.db",
-            std::process::id(),
-            n
-        ));
+        let path =
+            std::env::temp_dir().join(format!("kiro_apikey_test_{}_{}.db", std::process::id(), n));
         let _ = std::fs::remove_file(&path);
         Store::open(&path).expect("open store")
     }

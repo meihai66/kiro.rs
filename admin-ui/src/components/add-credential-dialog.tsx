@@ -9,7 +9,7 @@ import {
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { useAddCredential } from '@/hooks/use-credentials'
+import { useAddCredential, useImportTokenJson } from '@/hooks/use-credentials'
 import { extractErrorMessage } from '@/lib/utils'
 
 interface AddCredentialDialogProps {
@@ -32,8 +32,18 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
   const [endpoint, setEndpoint] = useState('')
   const [autoBindProxy, setAutoBindProxy] = useState(true)
 
-  const { mutate, isPending } = useAddCredential()
+  const { mutate, isPending: isAddPending } = useAddCredential()
+  const { mutate: importMutate, isPending: isImportPending } = useImportTokenJson()
+  const isPending = isAddPending || isImportPending
   const isApiKey = authMethod === 'api_key'
+  // API Key 模式支持批量：每行一个 ksk_ Key（去重后）
+  const apiKeys = [...new Set(
+    kiroApiKey
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean)
+  )]
+  const isBatch = isApiKey && apiKeys.length > 1
 
   const resetForm = () => {
     setRefreshToken('')
@@ -53,8 +63,49 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
     e.preventDefault()
 
     if (isApiKey) {
-      if (!kiroApiKey.trim()) {
+      if (apiKeys.length === 0) {
         toast.error('请输入 Kiro API Key')
+        return
+      }
+      if (isBatch) {
+        // 批量走 import-token-json 管线（逐条验证 + 去重 + 自动绑代理）
+        importMutate(
+          {
+            dryRun: false,
+            items: apiKeys.map((key) => ({
+              kiroApiKey: key,
+              authMethod: 'api_key',
+              priority: Number.isFinite(parseInt(priority)) ? parseInt(priority) : 10,
+              region: region.trim() || undefined,
+              apiRegion: apiRegion.trim() || undefined,
+              endpoint: endpoint.trim() || undefined,
+            })),
+          },
+          {
+            onSuccess: (data) => {
+              const { added, skipped, invalid } = data.summary
+              if (added > 0) {
+                toast.success(`批量导入完成：新增 ${added} 条${skipped > 0 ? `，跳过 ${skipped} 条（已存在）` : ''}`)
+              } else {
+                toast.warning(`没有新增凭据：跳过 ${skipped} 条，失败 ${invalid} 条`)
+              }
+              if (invalid > 0) {
+                const reasons = data.items
+                  .filter((it) => it.action === 'invalid')
+                  .slice(0, 3)
+                  .map((it) => `${it.fingerprint}: ${it.reason ?? '未知原因'}`)
+                toast.error(`${invalid} 条导入失败\n${reasons.join('\n')}`, { duration: 8000 })
+              }
+              if (added > 0) {
+                onOpenChange(false)
+                resetForm()
+              }
+            },
+            onError: (error: unknown) => {
+              toast.error(`批量导入失败: ${extractErrorMessage(error)}`)
+            },
+          }
+        )
         return
       }
     } else {
@@ -72,7 +123,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
     mutate(
       {
         refreshToken: isApiKey ? undefined : refreshToken.trim(),
-        kiroApiKey: isApiKey ? kiroApiKey.trim() : undefined,
+        kiroApiKey: isApiKey ? apiKeys[0] : undefined,
         authMethod,
         region: region.trim() || undefined,
         apiRegion: apiRegion.trim() || undefined,
@@ -111,14 +162,20 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
                 <label htmlFor="kiroApiKey" className="text-sm font-medium">
                   Kiro API Key <span className="text-red-500">*</span>
                 </label>
-                <Input
+                <textarea
                   id="kiroApiKey"
-                  type="password"
-                  placeholder="格式: ksk_xxxxxxxx"
+                  rows={4}
+                  placeholder={'格式: ksk_xxxxxxxx\n每行一个 Key，多行即批量导入'}
                   value={kiroApiKey}
                   onChange={(e) => setKiroApiKey(e.target.value)}
                   disabled={isPending}
+                  className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
                 />
+                <p className="text-xs text-muted-foreground">
+                  {isBatch
+                    ? `批量模式：共 ${apiKeys.length} 个 Key，将逐条验证并去重导入；Machine ID 自动派生、代理自动分配`
+                    : '支持粘贴多行批量导入，每行一个 ksk_ Key'}
+                </p>
               </div>
             ) : (
               <div className="space-y-2">
@@ -242,7 +299,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
                 placeholder="留空使用配置中字段, 否则由刷新Token自动派生"
                 value={machineId}
                 onChange={(e) => setMachineId(e.target.value)}
-                disabled={isPending}
+                disabled={isPending || isBatch}
               />
               <p className="text-xs text-muted-foreground">
                 可选，64 位十六进制字符串，留空使用配置中字段, 否则由刷新Token自动派生
@@ -277,9 +334,9 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
                   type="checkbox"
                   checked={!autoBindProxy}
                   onChange={(e) => setAutoBindProxy(!e.target.checked)}
-                  disabled={isPending}
+                  disabled={isPending || isBatch}
                 />
-                暂不绑定代理（导入后手动指派）
+                暂不绑定代理（导入后手动指派）{isBatch && '（批量模式固定自动分配）'}
               </label>
               <p className="text-xs text-muted-foreground">
                 启用代理池时：默认勾选将自动从池里分配最优代理；勾选此项则导入后凭据保持禁用，需到凭据列表手动绑定。代理池未启用时此选项无影响。
@@ -297,7 +354,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
               取消
             </Button>
             <Button type="submit" disabled={isPending}>
-              {isPending ? '添加中...' : '添加'}
+              {isPending ? '添加中...' : isBatch ? `批量导入 ${apiKeys.length} 条` : '添加'}
             </Button>
           </DialogFooter>
         </form>

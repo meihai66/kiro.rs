@@ -467,6 +467,10 @@ export interface TokenJsonItem {
   clientId?: string
   clientSecret?: string
   authMethod?: string
+  /** Kiro API Key（ksk_*）；提供时按 api_key 凭据导入，无需 refreshToken */
+  kiroApiKey?: string
+  /** 凭据级端点（ide / cli），主要供 api_key 凭据使用 */
+  endpoint?: string
   priority?: number
   region?: string
   apiRegion?: string

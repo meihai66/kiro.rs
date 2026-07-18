@@ -231,7 +231,9 @@ docker-compose up
 | `refreshToken` | string | OAuth 刷新令牌                                  |
 | `profileArn`   | string | AWS Profile ARN（可选，登录时返回）                   |
 | `expiresAt`    | string | Token 过期时间 (RFC3339)                        |
-| `authMethod`   | string | 认证方式：`social` 或 `idc`                       |
+| `authMethod`   | string | 认证方式：`social`、`idc` 或 `api_key`              |
+| `kiroApiKey`   | string | Kiro API Key（`ksk_` 开头，`api_key` 认证用）        |
+| `endpoint`     | string | 凭据级端点：`ide` 或 `cli`，未填使用 `config.defaultEndpoint` |
 | `clientId`     | string | IdC 登录的客户端 ID（IdC 认证必填）                     |
 | `clientSecret` | string | IdC 登录的客户端密钥（IdC 认证必填）                      |
 | `priority`     | number | 凭据优先级，数字越小越优先，默认为 0                         |
@@ -299,6 +301,30 @@ docker-compose up
 - 单凭据最多重试 3 次，单请求最多重试 9 次
 - 自动故障转移到下一个可用凭据
 - 多凭据格式下 Token 刷新后自动回写到源文件
+
+#### API Key 凭据（Kiro CLI headless 模式）
+
+支持用 Kiro CLI headless 模式的 API Key（`ksk_` 开头）作为凭据，无需 OAuth 刷新流程：API Key 直接作为 Bearer Token 使用，永不过期，请求自动附带 `tokentype: API_KEY` 头。
+
+```json
+{
+   "kiroApiKey": "ksk_your_api_key_here",
+   "authMethod": "api_key",
+   "endpoint": "cli"
+}
+```
+
+也可以通过环境变量临时注入（自动创建最高优先级凭据）：
+
+```bash
+KIRO_API_KEY=ksk_xxx ./kiro-rs -c config.json --credentials credentials.json
+```
+
+说明：
+- API Key 凭据可与 OAuth 凭据混合放在多凭据数组中，同样参与优先级排序和故障转移
+- Admin 面板「添加凭据」选择 API Key 类型后，**支持粘贴多行批量导入**（每行一个 `ksk_` Key，自动去重、逐条验证）
+- Admin 的批量导入端点 `POST /api/admin/credentials/import-token-json` 也接受 `{"kiroApiKey": "ksk_xxx"}` 项（无需 refreshToken），批量导出同样会带上 API Key 凭据
+- `authMethod: "api_key"` 但缺少 `kiroApiKey` 的凭据会在启动时自动禁用（`InvalidConfig`），修正配置后重启恢复
 
 ### Region 配置
 

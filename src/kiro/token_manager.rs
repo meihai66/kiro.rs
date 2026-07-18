@@ -732,6 +732,8 @@ pub enum DisableReason {
     Manual,
     /// 额度已用尽（如 MONTHLY_REQUEST_COUNT）
     QuotaExceeded,
+    /// 凭据配置无效（如 authMethod=api_key 但缺少 kiroApiKey），需修正配置后重启
+    InvalidConfig,
 }
 
 impl DisableReason {
@@ -746,6 +748,7 @@ impl DisableReason {
             DisableReason::ModelUnavailable => "模型暂时不可用",
             DisableReason::Manual => "手动禁用",
             DisableReason::QuotaExceeded => "额度已用尽",
+            DisableReason::InvalidConfig => "凭据配置无效",
         }
     }
 }
@@ -1213,6 +1216,16 @@ impl MultiTokenManager {
                     }
                     id
                 });
+                // authMethod=api_key 但缺少有效 kiroApiKey：启动即禁用，
+                // 避免请求路径反复取不到 token 空转重试（修正配置后重启恢复）
+                let invalid_config =
+                    cred.is_api_key_credential() && validate_credential_secret(&cred).is_err();
+                if invalid_config {
+                    tracing::warn!(
+                        "凭据 #{} 配置了 authMethod=api_key 但缺少有效 kiroApiKey，已自动禁用",
+                        id
+                    );
+                }
                 if cred.machine_id.is_none()
                     && let Some(machine_id) =
                         machine_id::generate_from_credentials(&cred, config_ref)
@@ -1238,13 +1251,15 @@ impl MultiTokenManager {
                     credentials: cred.clone(),
                     failure_count: 0,
                     refresh_failure_count: 0,
-                    disabled: cred.disabled, // 从配置文件读取 disabled 状态
-                    auto_heal_reason: if cred.disabled {
+                    disabled: cred.disabled || invalid_config, // 从配置文件读取 disabled 状态
+                    auto_heal_reason: if cred.disabled || invalid_config {
                         Some(AutoHealReason::Manual)
                     } else {
                         None
                     },
-                    disable_reason: if cred.disabled {
+                    disable_reason: if invalid_config {
+                        Some(DisableReason::InvalidConfig)
+                    } else if cred.disabled {
                         Some(DisableReason::Manual)
                     } else {
                         None
@@ -3489,14 +3504,20 @@ impl MultiTokenManager {
                         disable_reason: e.disable_reason,
                         failure_count: e.failure_count,
                         refresh_failure_count: e.refresh_failure_count,
-                        auth_method: e.credentials.auth_method.as_deref().map(|m| {
-                            if m.eq_ignore_ascii_case("builder-id") || m.eq_ignore_ascii_case("iam")
-                            {
-                                "idc".to_string()
-                            } else {
-                                m.to_string()
-                            }
-                        }),
+                        auth_method: if e.credentials.is_api_key_credential() {
+                            // 只填了 kiroApiKey 未写 authMethod 时也归一为 api_key
+                            Some("api_key".to_string())
+                        } else {
+                            e.credentials.auth_method.as_deref().map(|m| {
+                                if m.eq_ignore_ascii_case("builder-id")
+                                    || m.eq_ignore_ascii_case("iam")
+                                {
+                                    "idc".to_string()
+                                } else {
+                                    m.to_string()
+                                }
+                            })
+                        },
                         has_profile_arn: e.credentials.profile_arn.is_some(),
                         expires_at: e.credentials.expires_at.clone(),
                         refresh_token_hash: hash,
@@ -3718,6 +3739,12 @@ impl MultiTokenManager {
                 .iter_mut()
                 .find(|e| e.id == id)
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
+            if entry.disable_reason == Some(DisableReason::InvalidConfig) {
+                anyhow::bail!(
+                    "凭据 #{} 因配置无效被禁用（如缺少 kiroApiKey），请修正配置后重启服务",
+                    id
+                );
+            }
             entry.failure_count = 0;
             entry.refresh_failure_count = 0;
             entry.disabled = false;
@@ -4332,6 +4359,18 @@ impl MultiTokenManager {
     ///
     /// 用于批量导入时的去重检查，通过比较 refreshToken 前 32 字符判断是否重复
     /// 使用 floor_char_boundary 安全截断，避免在多字节字符中间切割导致 panic
+    /// 检查是否已存在指定的 Kiro API Key（精确匹配，用于批量导入去重）
+    pub fn has_kiro_api_key(&self, kiro_api_key: &str) -> bool {
+        let target = kiro_api_key.trim();
+        let entries = self.entries.lock();
+        entries.iter().any(|e| {
+            e.credentials
+                .kiro_api_key
+                .as_deref()
+                .is_some_and(|k| k.trim() == target)
+        })
+    }
+
     pub fn has_refresh_token_prefix(&self, refresh_token: &str) -> bool {
         let prefix_len = floor_char_boundary(refresh_token, 32);
         let new_prefix = &refresh_token[..prefix_len];
@@ -4796,6 +4835,78 @@ mod tests {
             MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
         assert_eq!(manager.total_count(), 2);
         assert_eq!(manager.available_count(), 2);
+    }
+
+    #[test]
+    fn test_multi_token_manager_api_key_missing_kiro_api_key_auto_disabled() {
+        let config = Config::default();
+
+        // auth_method=api_key 但缺少 kiro_api_key → 启动即自动禁用
+        let mut bad_cred = KiroCredentials::default();
+        bad_cred.auth_method = Some("api_key".to_string());
+
+        let mut good_cred = KiroCredentials::default();
+        good_cred.refresh_token = Some("a".repeat(150));
+
+        let manager =
+            MultiTokenManager::new(config, vec![bad_cred, good_cred], None, None, false).unwrap();
+        assert_eq!(manager.total_count(), 2);
+        assert_eq!(manager.available_count(), 1);
+    }
+
+    #[test]
+    fn test_multi_token_manager_api_key_empty_kiro_api_key_auto_disabled() {
+        let config = Config::default();
+
+        // kiro_api_key 为空白 → 同样视为无效配置
+        let mut cred = KiroCredentials::default();
+        cred.auth_method = Some("api_key".to_string());
+        cred.kiro_api_key = Some("   ".to_string());
+
+        let manager = MultiTokenManager::new(config, vec![cred], None, None, false).unwrap();
+        assert_eq!(manager.available_count(), 0);
+    }
+
+    #[test]
+    fn test_multi_token_manager_api_key_with_kiro_api_key_not_disabled() {
+        let config = Config::default();
+
+        let mut cred = KiroCredentials::default();
+        cred.auth_method = Some("api_key".to_string());
+        cred.kiro_api_key = Some("ksk_test123".to_string());
+
+        let manager = MultiTokenManager::new(config, vec![cred], None, None, false).unwrap();
+        assert_eq!(manager.total_count(), 1);
+        assert_eq!(manager.available_count(), 1);
+    }
+
+    #[test]
+    fn test_has_kiro_api_key() {
+        let config = Config::default();
+        let mut cred = KiroCredentials::default();
+        cred.kiro_api_key = Some("ksk_existing_key".to_string());
+        cred.auth_method = Some("api_key".to_string());
+
+        let manager = MultiTokenManager::new(config, vec![cred], None, None, false).unwrap();
+        assert!(manager.has_kiro_api_key("ksk_existing_key"));
+        assert!(manager.has_kiro_api_key("  ksk_existing_key  ")); // trim 后匹配
+        assert!(!manager.has_kiro_api_key("ksk_other_key"));
+    }
+
+    #[test]
+    fn test_reset_and_enable_rejects_invalid_config_credential() {
+        let config = Config::default();
+
+        let mut bad_cred = KiroCredentials::default();
+        bad_cred.auth_method = Some("api_key".to_string());
+
+        let manager = MultiTokenManager::new(config, vec![bad_cred], None, None, false).unwrap();
+        let snapshot = manager.snapshot();
+        let id = snapshot.entries[0].id;
+
+        let err = manager.reset_and_enable(id).unwrap_err();
+        assert!(err.to_string().contains("配置无效"));
+        assert_eq!(manager.available_count(), 0);
     }
 
     #[test]

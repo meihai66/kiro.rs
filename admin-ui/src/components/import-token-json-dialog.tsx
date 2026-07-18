@@ -220,6 +220,21 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
           continue
         }
 
+        // API Key 凭据：{ kiroApiKey, ... }（无需 refreshToken）
+        if (typeof obj.kiroApiKey === 'string' && obj.kiroApiKey.trim()) {
+          validItems.push({
+            kiroApiKey: obj.kiroApiKey.trim(),
+            authMethod: 'api_key',
+            endpoint: typeof obj.endpoint === 'string' ? obj.endpoint : undefined,
+            priority: typeof obj.priority === 'number' ? obj.priority : undefined,
+            region: typeof obj.region === 'string' ? obj.region : undefined,
+            apiRegion: typeof obj.apiRegion === 'string' ? obj.apiRegion : undefined,
+            machineId: typeof obj.machineId === 'string' ? obj.machineId : undefined,
+            email: pickEmail(obj),
+          })
+          continue
+        }
+
         // 扁平格式：{ refreshToken, ... }
         if (typeof obj.refreshToken === 'string' && obj.refreshToken.trim()) {
           const tokenItem = { ...obj, refreshToken: obj.refreshToken.trim() } as TokenJsonItem
@@ -239,7 +254,7 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
       }
 
       if (validItems.length === 0) {
-        toast.error('JSON 中没有找到有效的凭据（需要包含 refreshToken 字段）')
+        toast.error('JSON 中没有找到有效的凭据（需要包含 refreshToken 或 kiroApiKey 字段）')
         return null
       }
       return validItems
