@@ -704,10 +704,12 @@ fn map_kiro_provider_error_to_response_with_log(
             retry_after_secs: None,
         }
     } else if is_no_credentials_error(&err) {
-        tracing::error!(error = %err, "没有可用的凭据");
+        // 返回 429 而非 5xx：下游网关/客户端会把 5xx 当渠道故障直接熔断，
+        // 429 则按限流退避重试，凭据补充/恢复后可自动继续服务。
+        tracing::error!(error = %err, "没有可用的凭据，返回 429");
         Mapped {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            error_type: "service_unavailable",
+            status: StatusCode::TOO_MANY_REQUESTS,
+            error_type: "rate_limit_error",
             message: "No credentials available. Please add or enable credentials via Admin API or credentials.json.".to_string(),
             retry_after_secs: None,
         }
@@ -2814,6 +2816,17 @@ mod tests {
         );
         let response = map_kiro_provider_error_to_response("{}", err);
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_no_credentials_maps_to_429() {
+        // 无可用凭据返回 429 而非 5xx：下游网关会把 5xx 当渠道故障熔断，
+        // 429 则按限流退避重试
+        let response = map_kiro_provider_error_to_response(
+            "{}",
+            anyhow::anyhow!("没有可用的凭据（可用: 0/0），请添加或启用凭据后重试"),
+        );
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[test]

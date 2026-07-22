@@ -203,6 +203,13 @@ pub struct Config {
     #[serde(default)]
     pub rate_limit_ignore_retry_after: bool,
 
+    /// 严格遵循上游 Retry-After：上游 429 带 Retry-After 时按原值冷却，
+    /// 不做 [min, max] clamp、不随机（仅保留 24h 防御上限）。
+    /// 上游未带 Retry-After 时仍走原有逻辑（随机或最短冷却）。
+    /// 与 rate_limit_ignore_retry_after 同时开启时，带 Retry-After 的响应以本开关优先。
+    #[serde(default)]
+    pub rate_limit_follow_retry_after: bool,
+
     /// 全局关闭 429 冷却开关。
     /// 开启后所有 429（包括容量类）都不会让凭据进入冷却状态——只会触发一次"换号重试"，
     /// 下一次轮询时该凭据立即可被再次选中。默认 false（保留冷却保护）。
@@ -903,6 +910,7 @@ impl Default for Config {
             rate_limit_cooldown_max_secs: default_rate_limit_cooldown_max_secs(),
             capacity_pressure_cooldown_secs: default_capacity_pressure_cooldown_secs(),
             rate_limit_ignore_retry_after: false,
+            rate_limit_follow_retry_after: false,
             rate_limit_disable_cooldown: false,
             error_log_enabled: true,
             error_log_max_count: default_error_log_max_count(),

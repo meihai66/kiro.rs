@@ -1568,6 +1568,7 @@ impl MultiTokenManager {
         rate_limit_cooldown_max_secs: Option<u64>,
         capacity_pressure_cooldown_secs: Option<u64>,
         rate_limit_ignore_retry_after: Option<bool>,
+        rate_limit_follow_retry_after: Option<bool>,
         rate_limit_disable_cooldown: Option<bool>,
     ) {
         let mut cfg = self.config.write();
@@ -1582,6 +1583,9 @@ impl MultiTokenManager {
         }
         if let Some(v) = rate_limit_ignore_retry_after {
             cfg.rate_limit_ignore_retry_after = v;
+        }
+        if let Some(v) = rate_limit_follow_retry_after {
+            cfg.rate_limit_follow_retry_after = v;
         }
         if let Some(v) = rate_limit_disable_cooldown {
             cfg.rate_limit_disable_cooldown = v;

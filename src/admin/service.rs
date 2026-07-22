@@ -2264,6 +2264,7 @@ impl AdminService {
             rate_limit_cooldown_max_secs: config.rate_limit_cooldown_max_secs,
             capacity_pressure_cooldown_secs: config.capacity_pressure_cooldown_secs,
             rate_limit_ignore_retry_after: config.rate_limit_ignore_retry_after,
+            rate_limit_follow_retry_after: config.rate_limit_follow_retry_after,
             rate_limit_disable_cooldown: config.rate_limit_disable_cooldown,
             error_log_enabled: config.error_log_enabled,
             error_log_max_count: config.error_log_max_count,
@@ -2466,6 +2467,10 @@ impl AdminService {
                 config.rate_limit_ignore_retry_after = v;
             }
 
+            if let Some(v) = req.rate_limit_follow_retry_after {
+                config.rate_limit_follow_retry_after = v;
+            }
+
             if let Some(v) = req.rate_limit_disable_cooldown {
                 config.rate_limit_disable_cooldown = v;
             }
@@ -2605,6 +2610,7 @@ impl AdminService {
             || req.rate_limit_cooldown_max_secs.is_some()
             || req.capacity_pressure_cooldown_secs.is_some()
             || req.rate_limit_ignore_retry_after.is_some()
+            || req.rate_limit_follow_retry_after.is_some()
             || req.rate_limit_disable_cooldown.is_some()
         {
             self.token_manager.update_rate_limit_runtime(
@@ -2612,6 +2618,7 @@ impl AdminService {
                 Some(config.rate_limit_cooldown_max_secs),
                 Some(config.capacity_pressure_cooldown_secs),
                 Some(config.rate_limit_ignore_retry_after),
+                Some(config.rate_limit_follow_retry_after),
                 Some(config.rate_limit_disable_cooldown),
             );
         }
@@ -3489,6 +3496,7 @@ mod tests {
             rate_limit_cooldown_max_secs: None,
             capacity_pressure_cooldown_secs: None,
             rate_limit_ignore_retry_after: None,
+            rate_limit_follow_retry_after: None,
             rate_limit_disable_cooldown: None,
             error_log_enabled: None,
             error_log_max_count: None,
@@ -3540,6 +3548,7 @@ mod tests {
             rate_limit_cooldown_max_secs: None,
             capacity_pressure_cooldown_secs: None,
             rate_limit_ignore_retry_after: None,
+            rate_limit_follow_retry_after: None,
             rate_limit_disable_cooldown: None,
             error_log_enabled: None,
             error_log_max_count: None,
@@ -3590,6 +3599,7 @@ mod tests {
             rate_limit_cooldown_max_secs: None,
             capacity_pressure_cooldown_secs: None,
             rate_limit_ignore_retry_after: None,
+            rate_limit_follow_retry_after: None,
             rate_limit_disable_cooldown: None,
             error_log_enabled: None,
             error_log_max_count: None,
@@ -3640,6 +3650,7 @@ mod tests {
             rate_limit_cooldown_max_secs: None,
             capacity_pressure_cooldown_secs: None,
             rate_limit_ignore_retry_after: None,
+            rate_limit_follow_retry_after: None,
             rate_limit_disable_cooldown: None,
             error_log_enabled: None,
             error_log_max_count: None,
@@ -3687,6 +3698,7 @@ mod tests {
             rate_limit_cooldown_max_secs: None,
             capacity_pressure_cooldown_secs: None,
             rate_limit_ignore_retry_after: None,
+            rate_limit_follow_retry_after: None,
             rate_limit_disable_cooldown: None,
             error_log_enabled: None,
             error_log_max_count: None,

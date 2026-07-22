@@ -804,6 +804,8 @@ export interface GlobalConfigResponse {
   rateLimitCooldownMaxSecs: number
   capacityPressureCooldownSecs: number
   rateLimitIgnoreRetryAfter: boolean
+  /** 严格遵循上游 Retry-After（带头时按原值冷却，不 clamp 不随机） */
+  rateLimitFollowRetryAfter: boolean
   /** 全局关闭 429 冷却（开启后所有 429 不再让凭据进入冷却） */
   rateLimitDisableCooldown: boolean
   errorLogEnabled: boolean
@@ -856,6 +858,7 @@ export interface UpdateGlobalConfigRequest {
   rateLimitCooldownMaxSecs?: number
   capacityPressureCooldownSecs?: number
   rateLimitIgnoreRetryAfter?: boolean
+  rateLimitFollowRetryAfter?: boolean
   rateLimitDisableCooldown?: boolean
   errorLogEnabled?: boolean
   errorLogMaxCount?: number

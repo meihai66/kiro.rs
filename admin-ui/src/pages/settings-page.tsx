@@ -311,6 +311,8 @@ export function SettingsPage() {
   const [capacityPressureCooldown, setCapacityPressureCooldown] = useState('8')
   const [rateLimitIgnoreRetryAfter, setRateLimitIgnoreRetryAfter] =
     useState(false)
+  const [rateLimitFollowRetryAfter, setRateLimitFollowRetryAfter] =
+    useState(false)
   const [rateLimitDisableCooldown, setRateLimitDisableCooldown] = useState(false)
 
   // 错误日志
@@ -407,6 +409,9 @@ export function SettingsPage() {
       )
       setRateLimitIgnoreRetryAfter(
         globalConfig.rateLimitIgnoreRetryAfter ?? false
+      )
+      setRateLimitFollowRetryAfter(
+        globalConfig.rateLimitFollowRetryAfter ?? false
       )
       setRateLimitDisableCooldown(
         globalConfig.rateLimitDisableCooldown ?? false
@@ -640,6 +645,14 @@ export function SettingsPage() {
       (globalConfig?.rateLimitIgnoreRetryAfter ?? false)
     ) {
       globalPayload.rateLimitIgnoreRetryAfter = rateLimitIgnoreRetryAfter
+      hasGlobalChanges = true
+    }
+
+    if (
+      rateLimitFollowRetryAfter !==
+      (globalConfig?.rateLimitFollowRetryAfter ?? false)
+    ) {
+      globalPayload.rateLimitFollowRetryAfter = rateLimitFollowRetryAfter
       hasGlobalChanges = true
     }
 
@@ -1525,6 +1538,24 @@ export function SettingsPage() {
                 <Switch
                   checked={rateLimitIgnoreRetryAfter}
                   onCheckedChange={setRateLimitIgnoreRetryAfter}
+                  disabled={isPending}
+                />
+              </div>
+              <div className="flex items-center justify-between pt-2 border-t">
+                <div>
+                  <label className="text-sm font-medium">
+                    严格遵循上游 Retry-After
+                  </label>
+                  <p className="text-xs text-muted-foreground">
+                    开启后上游 429 带 Retry-After 时按原值冷却（不 clamp 到
+                    [最短, 最长]、不随机，仅保留 24 小时防御上限）。
+                    上游未带 Retry-After 时仍走原有逻辑。与「忽略上游
+                    Retry-After」同时开启时，带头的响应以本开关优先。
+                  </p>
+                </div>
+                <Switch
+                  checked={rateLimitFollowRetryAfter}
+                  onCheckedChange={setRateLimitFollowRetryAfter}
                   disabled={isPending}
                 />
               </div>

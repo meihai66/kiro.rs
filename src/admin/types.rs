@@ -1047,6 +1047,8 @@ pub struct GlobalConfigResponse {
     pub capacity_pressure_cooldown_secs: u64,
     /// 是否忽略上游 Retry-After，直接在 [min,max] 内随机出冷却
     pub rate_limit_ignore_retry_after: bool,
+    /// 严格遵循上游 Retry-After（带头时按原值冷却，不 clamp 不随机）
+    pub rate_limit_follow_retry_after: bool,
     /// 全局关闭 429 冷却（开启后 429 只触发换号重试，不让凭据进入冷却）
     pub rate_limit_disable_cooldown: bool,
     /// 错误日志开关
@@ -1140,6 +1142,8 @@ pub struct UpdateGlobalConfigRequest {
     pub capacity_pressure_cooldown_secs: Option<u64>,
     /// 忽略上游 Retry-After 直接随机（可选）
     pub rate_limit_ignore_retry_after: Option<bool>,
+    /// 严格遵循上游 Retry-After（可选；带头时按原值冷却，不 clamp 不随机）
+    pub rate_limit_follow_retry_after: Option<bool>,
     /// 全局关闭 429 冷却（可选；开启后所有 429 不再让凭据进入冷却）
     pub rate_limit_disable_cooldown: Option<bool>,
     /// 错误日志开关

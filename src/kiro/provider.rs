@@ -101,6 +101,10 @@ const MAX_RATE_LIMIT_COOLDOWN_SECS: u64 = 300;
 /// 可被 Config.capacity_pressure_cooldown_secs 覆盖。
 const CAPACITY_RATE_LIMIT_COOLDOWN_SECS: u64 = 8;
 
+/// rate_limit_follow_retry_after 开启时对上游 Retry-After 原值的防御上限（24h），
+/// 防止异常的 HTTP-date（如相差数天）把凭据挂死。
+const FOLLOW_RETRY_AFTER_CAP_SECS: u64 = 86_400;
+
 /// Kiro API Provider
 ///
 /// 核心组件，负责与 Kiro API 通信
@@ -1316,6 +1320,10 @@ impl KiroProvider {
         let custom_duration = if is_capacity_pressure {
             // 容量类：优先 Retry-After；否则用容量短冷却（不被 [min,max] 拉伸）
             Some(retry_after.unwrap_or_else(|| Duration::from_secs(capacity_secs)))
+        } else if cfg.rate_limit_follow_retry_after && retry_after.is_some() {
+            // 严格遵循上游 Retry-After：parse_retry_after 已按原值返回（未 clamp），
+            // 直接使用，不随机、不拉伸。未带 Retry-After 时落到下面的原有逻辑。
+            retry_after
         } else if cfg.rate_limit_ignore_retry_after {
             // 用户开启「忽略 Retry-After」：完全无视上游头，直接在 [min,max] 内随机
             let secs = if configured_min_secs == configured_max_secs {
@@ -1383,14 +1391,20 @@ impl KiroProvider {
             return None;
         }
 
-        if let Ok(seconds) = raw.parse::<u64>() {
-            return Some(self.clamp_rate_limit_cooldown(Duration::from_secs(seconds)));
-        }
+        let wait = if let Ok(seconds) = raw.parse::<u64>() {
+            Duration::from_secs(seconds)
+        } else {
+            let retry_at = DateTime::parse_from_rfc2822(raw).ok()?.with_timezone(&Utc);
+            let now = Utc::now();
+            retry_at.signed_duration_since(now).to_std().ok()?
+        };
 
-        let retry_at = DateTime::parse_from_rfc2822(raw).ok()?.with_timezone(&Utc);
-        let now = Utc::now();
-        let wait = retry_at.signed_duration_since(now).to_std().ok()?;
-        Some(self.clamp_rate_limit_cooldown(wait))
+        if self.token_manager.config().rate_limit_follow_retry_after {
+            // 严格遵循上游：不做 [min,max] clamp，仅保留 24h 防御上限
+            Some(wait.min(Duration::from_secs(FOLLOW_RETRY_AFTER_CAP_SECS)))
+        } else {
+            Some(self.clamp_rate_limit_cooldown(wait))
+        }
     }
 
     fn clamp_rate_limit_cooldown(&self, duration: Duration) -> Duration {
@@ -2067,6 +2081,67 @@ mod tests {
             let cooldown = provider.handle_rate_limited_response(1, "Too many requests", None);
             assert_eq!(cooldown, Duration::from_secs(15));
         }
+    }
+
+    /// 开启 `rate_limit_follow_retry_after` 后，parse_retry_after 按原值返回，
+    /// 不再被 [min,max] clamp（仅保留 24h 防御上限）
+    #[test]
+    fn test_parse_retry_after_follow_returns_raw_value() {
+        let mut config = Config::default();
+        config.rate_limit_follow_retry_after = true;
+        let provider = create_test_provider(config, KiroCredentials::default());
+
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", HeaderValue::from_static("5"));
+        assert_eq!(
+            provider.parse_retry_after(&headers).unwrap(),
+            Duration::from_secs(5)
+        );
+
+        headers.insert("retry-after", HeaderValue::from_static("600"));
+        assert_eq!(
+            provider.parse_retry_after(&headers).unwrap(),
+            Duration::from_secs(600)
+        );
+
+        // 异常大值被 24h 防御上限截断
+        headers.insert("retry-after", HeaderValue::from_static("1000000"));
+        assert_eq!(
+            provider.parse_retry_after(&headers).unwrap(),
+            Duration::from_secs(FOLLOW_RETRY_AFTER_CAP_SECS)
+        );
+    }
+
+    /// 开启 `rate_limit_follow_retry_after` 后，带 Retry-After 的普通 429
+    /// 按原值冷却（不随机、不 clamp）；即使同时开了 ignore 也以 follow 优先
+    #[test]
+    fn test_handle_rate_limited_response_follows_retry_after_when_toggled() {
+        let mut config = Config::default();
+        config.rate_limit_cooldown_min_secs = 15;
+        config.rate_limit_cooldown_max_secs = 30;
+        config.rate_limit_follow_retry_after = true;
+        config.rate_limit_ignore_retry_after = true;
+        let provider = create_test_provider(config, KiroCredentials::default());
+
+        let cooldown = provider.handle_rate_limited_response(
+            1,
+            "Too many requests",
+            Some(Duration::from_secs(7)),
+        );
+        assert_eq!(cooldown, Duration::from_secs(7));
+    }
+
+    /// follow 开启但上游未带 Retry-After：回落到原有逻辑（此处 ignore 也开着 → 随机）
+    #[test]
+    fn test_handle_rate_limited_response_follow_without_header_falls_back() {
+        let mut config = Config::default();
+        config.rate_limit_cooldown_min_secs = 15;
+        config.rate_limit_cooldown_max_secs = 30;
+        config.rate_limit_follow_retry_after = true;
+        let provider = create_test_provider(config, KiroCredentials::default());
+
+        let cooldown = provider.handle_rate_limited_response(1, "Too many requests", None);
+        assert_eq!(cooldown, Duration::from_secs(15));
     }
 
     #[test]
