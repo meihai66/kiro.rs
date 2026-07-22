@@ -2259,6 +2259,7 @@ impl AdminService {
             max_total_retries: config.max_total_retries,
             all_credentials_cooldown_bail_threshold_secs: config
                 .all_credentials_cooldown_bail_threshold_secs,
+            proxy_failure_threshold: config.proxy_failure_threshold,
             model_unavailable_breaker_enabled: config.model_unavailable_breaker_enabled,
             import_disabled_by_default: config.import_disabled_by_default,
             balance_auto_refresh_secs: config.balance_auto_refresh_secs,
@@ -2413,6 +2414,15 @@ impl AdminService {
                     ));
                 }
                 config.all_credentials_cooldown_bail_threshold_secs = v;
+            }
+
+            if let Some(v) = req.proxy_failure_threshold {
+                if v > 100 {
+                    return Err(AdminServiceError::InvalidRequest(
+                        "代理连续失败切换阈值过大（>100）".into(),
+                    ));
+                }
+                config.proxy_failure_threshold = v;
             }
 
             if let Some(v) = req.model_unavailable_breaker_enabled {
@@ -2624,6 +2634,11 @@ impl AdminService {
                 Some(config.rate_limit_follow_retry_after),
                 Some(config.rate_limit_disable_cooldown),
             );
+        }
+
+        // 热更新代理连续失败切换阈值（token_manager 持有独立 Config 副本）
+        if let Some(v) = req.proxy_failure_threshold {
+            self.token_manager.update_proxy_failure_threshold(v);
         }
 
         // 热更新 MODEL_TEMPORARILY_UNAVAILABLE 全局熔断开关
@@ -3558,6 +3573,7 @@ mod tests {
             max_retries_per_credential: None,
             max_total_retries: None,
             all_credentials_cooldown_bail_threshold_secs: None,
+            proxy_failure_threshold: None,
             model_unavailable_breaker_enabled: None,
             import_disabled_by_default: None,
             balance_auto_refresh_secs: None,
@@ -3610,6 +3626,7 @@ mod tests {
             max_retries_per_credential: None,
             max_total_retries: None,
             all_credentials_cooldown_bail_threshold_secs: None,
+            proxy_failure_threshold: None,
             model_unavailable_breaker_enabled: None,
             import_disabled_by_default: None,
             balance_auto_refresh_secs: None,
@@ -3661,6 +3678,7 @@ mod tests {
             max_retries_per_credential: None,
             max_total_retries: None,
             all_credentials_cooldown_bail_threshold_secs: None,
+            proxy_failure_threshold: None,
             model_unavailable_breaker_enabled: None,
             import_disabled_by_default: None,
             balance_auto_refresh_secs: None,
@@ -3712,6 +3730,7 @@ mod tests {
             max_retries_per_credential: None,
             max_total_retries: None,
             all_credentials_cooldown_bail_threshold_secs: None,
+            proxy_failure_threshold: None,
             model_unavailable_breaker_enabled: None,
             import_disabled_by_default: None,
             balance_auto_refresh_secs: None,
@@ -3760,6 +3779,7 @@ mod tests {
             max_retries_per_credential: None,
             max_total_retries: None,
             all_credentials_cooldown_bail_threshold_secs: None,
+            proxy_failure_threshold: None,
             model_unavailable_breaker_enabled: None,
             import_disabled_by_default: None,
             balance_auto_refresh_secs: None,

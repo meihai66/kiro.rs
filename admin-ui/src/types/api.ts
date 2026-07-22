@@ -802,6 +802,8 @@ export interface GlobalConfigResponse {
   maxRetriesPerCredential: number
   maxTotalRetries: number
   allCredentialsCooldownBailThresholdSecs: number
+  /** 代理连续网络失败自动切换阈值（0=关闭） */
+  proxyFailureThreshold: number
   modelUnavailableBreakerEnabled: boolean
   importDisabledByDefault: boolean
   balanceAutoRefreshSecs: number
@@ -856,6 +858,7 @@ export interface UpdateGlobalConfigRequest {
   maxRetriesPerCredential?: number
   maxTotalRetries?: number
   allCredentialsCooldownBailThresholdSecs?: number
+  proxyFailureThreshold?: number
   modelUnavailableBreakerEnabled?: boolean
   importDisabledByDefault?: boolean
   balanceAutoRefreshSecs?: number

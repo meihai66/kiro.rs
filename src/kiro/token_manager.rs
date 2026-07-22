@@ -1475,6 +1475,12 @@ impl MultiTokenManager {
         self.config.write().error_replace_rules = rules;
     }
 
+    /// 热更新代理连续网络失败自动切换阈值（0=关闭）
+    pub fn update_proxy_failure_threshold(&self, threshold: u32) {
+        self.config.write().proxy_failure_threshold = threshold;
+        tracing::info!("代理连续失败切换阈值已热更新为 {}", threshold);
+    }
+
     /// 把一次「凭据被自动禁用」事件落到 error_logs 表。
     ///
     /// 若 store 未注入或写入失败，仅打 warn 日志，不会向调用方传播错误。

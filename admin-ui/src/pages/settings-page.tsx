@@ -295,6 +295,7 @@ export function SettingsPage() {
   const [maxRetriesPerCred, setMaxRetriesPerCred] = useState('2')
   const [maxTotalRetries, setMaxTotalRetries] = useState('3')
   const [allCoolingBailSecs, setAllCoolingBailSecs] = useState('2')
+  const [proxyFailureThreshold, setProxyFailureThreshold] = useState('3')
   const [modelUnavailableBreakerEnabled, setModelUnavailableBreakerEnabled] =
     useState(true)
 
@@ -394,6 +395,7 @@ export function SettingsPage() {
       setAllCoolingBailSecs(
         String(globalConfig.allCredentialsCooldownBailThresholdSecs ?? 2)
       )
+      setProxyFailureThreshold(String(globalConfig.proxyFailureThreshold ?? 3))
       setModelUnavailableBreakerEnabled(
         globalConfig.modelUnavailableBreakerEnabled ?? true
       )
@@ -572,6 +574,21 @@ export function SettingsPage() {
       (globalConfig?.allCredentialsCooldownBailThresholdSecs ?? 2)
     ) {
       globalPayload.allCredentialsCooldownBailThresholdSecs = newCoolingBailSecs
+      hasGlobalChanges = true
+    }
+
+    const newProxyFailureThreshold = Math.max(
+      0,
+      parseInt(proxyFailureThreshold, 10) || 0
+    )
+    if (
+      newProxyFailureThreshold !== (globalConfig?.proxyFailureThreshold ?? 3)
+    ) {
+      if (newProxyFailureThreshold > 100) {
+        toast.error('代理连续失败切换阈值应在 0~100（0=关闭）')
+        return
+      }
+      globalPayload.proxyFailureThreshold = newProxyFailureThreshold
       hasGlobalChanges = true
     }
 
@@ -1464,6 +1481,13 @@ export function SettingsPage() {
                   allCoolingBailSecs,
                   setAllCoolingBailSecs,
                   '默认 2；最短可用等待 ≤ 该值则短睡再试，> 则立即 429'
+                )}
+                {numInput(
+                  'proxyFailureThreshold',
+                  '代理连续失败切换阈值',
+                  proxyFailureThreshold,
+                  setProxyFailureThreshold,
+                  '默认 3，0=关闭；代理池启用时同一代理连续 N 次网络失败即标记不可用并为所绑凭据换绑'
                 )}
               </div>
               <div className="flex items-center justify-between pt-2 border-t">
