@@ -1,5 +1,12 @@
 # Changelog
 
+## [v1.1.80] - 2026-07-22
+
+### 新增
+
+- **代理连续网络失败自动禁用换绑** — 同一代理连续 N 次网络层失败（`proxyFailureThreshold`，默认 3）自动标记不可用，并为所绑凭据换绑可用代理；无可用代理时直接禁用凭据（`DisableReason::ProxyUnavailable`） (`src/kiro/proxy_pool.rs`, `src/kiro/token_manager.rs`, `src/kiro/provider.rs`, `src/model/config.rs`)
+- **代理不可用分类与批量重置** — 不可用标记带分类（network_failure / manual）并持久化 SQLite；新增 Admin API：单个禁用/启用、批量重置不可用状态，管理界面代理页同步支持 (`src/admin/handlers.rs`, `src/admin/service.rs`, `src/storage/mod.rs`, `admin-ui/src/pages/proxies-page.tsx`)
+
 ## [v1.1.79] - 2026-07-22
 
 ### 新增
