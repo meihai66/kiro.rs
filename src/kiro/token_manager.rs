@@ -734,6 +734,8 @@ pub enum DisableReason {
     QuotaExceeded,
     /// 凭据配置无效（如 authMethod=api_key 但缺少 kiroApiKey），需修正配置后重启
     InvalidConfig,
+    /// 所绑代理不可用且池中无可替换代理
+    ProxyUnavailable,
 }
 
 impl DisableReason {
@@ -749,6 +751,7 @@ impl DisableReason {
             DisableReason::Manual => "手动禁用",
             DisableReason::QuotaExceeded => "额度已用尽",
             DisableReason::InvalidConfig => "凭据配置无效",
+            DisableReason::ProxyUnavailable => "无可用代理",
         }
     }
 }
@@ -3298,6 +3301,187 @@ impl MultiTokenManager {
         tracing::warn!("凭据 #{} 已标记为代理资源耗尽（ProxyExhausted）", id);
     }
 
+    /// 标记凭据为「无可用代理」并禁用（所绑代理失效且池中无可替换代理时调用）。
+    /// 管理员补充/重置代理后可手动重新启用并绑定。
+    pub fn mark_proxy_unavailable(&self, id: u64) {
+        {
+            let mut entries = self.entries.lock();
+            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                entry.disabled = true;
+                entry.auto_heal_reason = None;
+                entry.disable_reason = Some(DisableReason::ProxyUnavailable);
+                tracing::warn!("凭据 #{} 已因无可用代理被禁用", id);
+            }
+        }
+        self.affinity.remove_by_credential(id);
+        self.record_disable_event(
+            id,
+            DisableReason::ProxyUnavailable,
+            None,
+            "所绑代理不可用且池中无可替换代理，凭据被禁用".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+    }
+
+    /// 上报一次「经凭据所绑代理成功收到上游响应」：清零该代理的连续网络失败计数。
+    /// 未启用代理池或凭据未绑定代理时为 no-op。
+    pub fn report_proxy_network_success(&self, id: u64) {
+        let Some(pool) = self.proxy_pool.read().clone() else {
+            return;
+        };
+        let slot_id = {
+            let entries = self.entries.lock();
+            entries
+                .iter()
+                .find(|e| e.id == id)
+                .and_then(|e| e.credentials.proxy_slot_id.clone())
+        };
+        if let Some(slot_id) = slot_id {
+            pool.record_network_success(&slot_id);
+        }
+    }
+
+    /// 上报一次「经凭据所绑代理的网络层失败」（未收到上游响应）。
+    ///
+    /// 同一代理连续失败达到阈值（`proxy_failure_threshold`，0 = 关闭）时：
+    /// 1. 把该代理标记为不可用（类别 NetworkFailure，持久化）
+    /// 2. 该代理上绑定的所有凭据立即换绑到可用代理
+    /// 3. 池中无可用代理的凭据：解绑并禁用（DisableReason::ProxyUnavailable）
+    ///
+    /// 未启用代理池或凭据未绑定代理时为 no-op。
+    pub fn report_proxy_network_failure(&self, id: u64) {
+        let Some(pool) = self.proxy_pool.read().clone() else {
+            return;
+        };
+        let threshold = self.config.read().proxy_failure_threshold;
+        if threshold == 0 {
+            return;
+        }
+        let slot_id = {
+            let entries = self.entries.lock();
+            entries
+                .iter()
+                .find(|e| e.id == id)
+                .and_then(|e| e.credentials.proxy_slot_id.clone())
+        };
+        let Some(slot_id) = slot_id else {
+            return;
+        };
+
+        let count = pool.record_network_failure(&slot_id);
+        tracing::debug!(
+            credential_id = id,
+            slot_id = %slot_id,
+            count,
+            threshold,
+            "代理网络层失败计数"
+        );
+        // 仅在恰好达到阈值时触发一次（计数在写锁内自增，并发下只有一个调用命中）
+        if count != threshold {
+            return;
+        }
+
+        tracing::warn!(
+            slot_id = %slot_id,
+            threshold,
+            "代理连续 {} 次网络请求失败，标记为不可用并为所绑凭据换绑",
+            count
+        );
+        let reason = format!("连续 {} 次网络请求失败，自动标记不可用", count);
+        if let Err(e) = pool.set_disabled(
+            &slot_id,
+            true,
+            Some(crate::kiro::proxy_pool::ProxyDisabledCategory::NetworkFailure),
+            Some(reason.clone()),
+        ) {
+            tracing::warn!(slot_id = %slot_id, "标记代理不可用失败: {}", e);
+            return;
+        }
+        pool.push_alert(
+            crate::kiro::proxy_pool::AlertLevel::Error,
+            format!("代理 {} {}", slot_id, reason),
+        );
+        self.migrate_creds_off_proxy(&pool, &slot_id);
+    }
+
+    /// 把某代理上绑定的所有凭据换绑到可用代理；无可用代理的凭据解绑并禁用。
+    ///
+    /// 供「连续网络失败自动禁用」与「管理员手动禁用代理」共用。
+    pub fn migrate_creds_off_proxy(
+        &self,
+        pool: &Arc<crate::kiro::proxy_pool::ProxyPool>,
+        slot_id: &str,
+    ) {
+        use crate::kiro::proxy_pool::AlertLevel;
+
+        let bound = match pool.get(slot_id) {
+            Some(e) => e.bound_credential_ids,
+            None => return,
+        };
+        let warning_hours = self.config.read().proxy_expiry_warning_hours;
+        for cred_id in bound {
+            // 优先挑剩余有效期充足的候选；实在没有则放宽到"未过期即可"（应急）
+            let candidate = pool
+                .find_rotation_candidate(slot_id, warning_hours, cred_id)
+                .or_else(|| pool.find_rotation_candidate(slot_id, 0, cred_id));
+            match candidate {
+                Some(new_slot) => {
+                    if let Err(e) = pool.migrate_binding(cred_id, slot_id, &new_slot) {
+                        tracing::warn!(
+                            credential_id = cred_id,
+                            "代理失效换绑：迁移绑定失败: {}",
+                            e
+                        );
+                        pool.push_alert(
+                            AlertLevel::Error,
+                            format!("凭据 #{} 代理失效换绑失败: {}", cred_id, e),
+                        );
+                        continue;
+                    }
+                    if let Err(e) = self.set_proxy_slot(cred_id, Some(new_slot.clone())) {
+                        tracing::warn!(
+                            credential_id = cred_id,
+                            "代理失效换绑：更新凭据 proxy_slot_id 失败: {}",
+                            e
+                        );
+                        // 写回失败则回滚池内迁移，避免不一致
+                        let _ = pool.migrate_binding(cred_id, &new_slot, slot_id);
+                        continue;
+                    }
+                    tracing::info!(
+                        credential_id = cred_id,
+                        from = %slot_id,
+                        to = %new_slot,
+                        "代理失效换绑：凭据已切换到可用代理"
+                    );
+                    pool.push_alert(
+                        AlertLevel::Info,
+                        format!(
+                            "凭据 #{} 已从失效代理 {} 换绑到 {}",
+                            cred_id, slot_id, new_slot
+                        ),
+                    );
+                }
+                None => {
+                    let _ = pool.unbind(slot_id, cred_id);
+                    let _ = self.set_proxy_slot(cred_id, None);
+                    self.mark_proxy_unavailable(cred_id);
+                    pool.push_alert(
+                        AlertLevel::Error,
+                        format!(
+                            "凭据 #{} 所绑代理 {} 失效且池中无可用代理，凭据已禁用",
+                            cred_id, slot_id
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
     /// 标记凭据为认证失败（如 invalid_grant，不会被自动恢复）
     pub fn mark_authentication_failed(&self, id: u64) {
         let mut entries = self.entries.lock();
@@ -4737,6 +4921,127 @@ mod tests {
         // 非 JSON：命中即整段替换（旧行为）
         let out = mgr.match_error_replacement("token is bad").unwrap();
         assert_eq!(out, "unauthorized");
+    }
+
+    fn make_pool_entry(
+        id: &str,
+        slots: u32,
+        hours_valid: i64,
+    ) -> crate::kiro::proxy_pool::ProxyEntry {
+        crate::kiro::proxy_pool::ProxyEntry {
+            id: id.to_string(),
+            url: format!("http://{}.example.com:1080", id),
+            username: None,
+            password: None,
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(hours_valid),
+            slots,
+            bound_credential_ids: vec![],
+            label: None,
+            created_at: chrono::Utc::now(),
+            last_rotated_at: None,
+            disabled: false,
+            disabled_category: None,
+            disabled_reason: None,
+        }
+    }
+
+    #[test]
+    fn test_proxy_network_failure_threshold_switches_to_available_proxy() {
+        let mut config = Config::default();
+        config.proxy_failure_threshold = 2;
+        let mut cred = KiroCredentials::default();
+        cred.id = Some(1);
+        cred.refresh_token = Some("dummy".repeat(40));
+        cred.proxy_slot_id = Some("p-bad".to_string());
+        let mgr = MultiTokenManager::new(config, vec![cred], None, None, false).unwrap();
+
+        let pool = crate::kiro::proxy_pool::ProxyPool::empty();
+        pool.add_many_force(vec![
+            make_pool_entry("p-bad", 1, 100),
+            make_pool_entry("p-good", 1, 100),
+        ]);
+        pool.manual_bind("p-bad", 1).unwrap();
+        mgr.set_proxy_pool(pool.clone());
+
+        // 第 1 次失败：未达阈值，无动作
+        mgr.report_proxy_network_failure(1);
+        assert!(!pool.get("p-bad").unwrap().disabled);
+
+        // 第 2 次失败：达到阈值 → p-bad 被标记不可用，凭据换绑到 p-good
+        mgr.report_proxy_network_failure(1);
+        let bad = pool.get("p-bad").unwrap();
+        assert!(bad.disabled);
+        assert_eq!(
+            bad.disabled_category,
+            Some(crate::kiro::proxy_pool::ProxyDisabledCategory::NetworkFailure)
+        );
+        assert!(bad.bound_credential_ids.is_empty());
+        assert!(
+            pool.get("p-good")
+                .unwrap()
+                .bound_credential_ids
+                .contains(&1)
+        );
+
+        let snap = mgr.snapshot();
+        let entry = snap.entries.iter().find(|e| e.id == 1).unwrap();
+        assert_eq!(entry.proxy_slot_id.as_deref(), Some("p-good"));
+        assert!(!entry.disabled);
+
+        // 成功响应后计数归零（换绑后再失败 1 次不触发新一轮禁用）
+        mgr.report_proxy_network_success(1);
+        mgr.report_proxy_network_failure(1);
+        assert!(!pool.get("p-good").unwrap().disabled);
+    }
+
+    #[test]
+    fn test_proxy_network_failure_no_candidate_disables_credential() {
+        let mut config = Config::default();
+        config.proxy_failure_threshold = 2;
+        let mut cred = KiroCredentials::default();
+        cred.id = Some(1);
+        cred.refresh_token = Some("dummy".repeat(40));
+        cred.proxy_slot_id = Some("p-only".to_string());
+        let mgr = MultiTokenManager::new(config, vec![cred], None, None, false).unwrap();
+
+        // 池中只有这一个代理，无可换绑候选
+        let pool = crate::kiro::proxy_pool::ProxyPool::empty();
+        pool.add_many_force(vec![make_pool_entry("p-only", 1, 100)]);
+        pool.manual_bind("p-only", 1).unwrap();
+        mgr.set_proxy_pool(pool.clone());
+
+        mgr.report_proxy_network_failure(1);
+        mgr.report_proxy_network_failure(1);
+
+        // 代理被标记不可用；凭据解绑并被禁用（无可用代理）
+        assert!(pool.get("p-only").unwrap().disabled);
+        assert!(pool.get("p-only").unwrap().bound_credential_ids.is_empty());
+        let snap = mgr.snapshot();
+        let entry = snap.entries.iter().find(|e| e.id == 1).unwrap();
+        assert_eq!(entry.proxy_slot_id, None);
+        assert!(entry.disabled);
+        assert_eq!(entry.disable_reason, Some(DisableReason::ProxyUnavailable));
+    }
+
+    #[test]
+    fn test_proxy_network_failure_threshold_zero_disables_feature() {
+        let mut config = Config::default();
+        config.proxy_failure_threshold = 0;
+        let mut cred = KiroCredentials::default();
+        cred.id = Some(1);
+        cred.refresh_token = Some("dummy".repeat(40));
+        cred.proxy_slot_id = Some("p-x".to_string());
+        let mgr = MultiTokenManager::new(config, vec![cred], None, None, false).unwrap();
+
+        let pool = crate::kiro::proxy_pool::ProxyPool::empty();
+        pool.add_many_force(vec![make_pool_entry("p-x", 1, 100)]);
+        pool.manual_bind("p-x", 1).unwrap();
+        mgr.set_proxy_pool(pool.clone());
+
+        for _ in 0..10 {
+            mgr.report_proxy_network_failure(1);
+        }
+        assert!(!pool.get("p-x").unwrap().disabled);
     }
 
     #[test]

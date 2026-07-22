@@ -524,7 +524,9 @@ impl KiroProvider {
                         max_retries,
                         e
                     );
-                    // 未收到上游响应：upstream_status=None，不计入上游错误统计
+                    // 未收到上游响应：upstream_status=None，不计入上游错误统计。
+                    // 启用代理池时计入所绑代理的连续网络失败：达到阈值自动禁用该代理并换绑
+                    self.token_manager.report_proxy_network_failure(ctx.id);
                     last_error = Some(UpstreamAttemptError::wrap(ctx.id, None, e.into()));
                     if attempt + 1 < max_retries {
                         sleep(Self::retry_delay(attempt)).await;
@@ -532,6 +534,8 @@ impl KiroProvider {
                     continue;
                 }
             };
+            // 收到上游响应（无论状态码）说明代理链路是通的：清零连续网络失败计数
+            self.token_manager.report_proxy_network_success(ctx.id);
 
             let status = response.status();
             let retry_after = self.parse_retry_after(response.headers());
@@ -912,7 +916,9 @@ impl KiroProvider {
                     );
                     // 网络错误通常是上游/链路瞬态问题，不应导致"禁用凭据"或"切换凭据"
                     // （否则一段时间网络抖动会把所有凭据都误禁用，需要重启才能恢复）
-                    // 未收到上游响应：upstream_status=None，不计入上游错误统计
+                    // 未收到上游响应：upstream_status=None，不计入上游错误统计。
+                    // 启用代理池时计入所绑代理的连续网络失败：达到阈值自动禁用该代理并换绑
+                    self.token_manager.report_proxy_network_failure(ctx.id);
                     last_error = Some(UpstreamAttemptError::wrap(ctx.id, None, e.into()));
                     if attempt + 1 < max_retries {
                         sleep(Self::retry_delay(attempt)).await;
@@ -920,6 +926,8 @@ impl KiroProvider {
                     continue;
                 }
             };
+            // 收到上游响应（无论状态码）说明代理链路是通的：清零连续网络失败计数
+            self.token_manager.report_proxy_network_success(ctx.id);
 
             let status = response.status();
             let retry_after = self.parse_retry_after(response.headers());

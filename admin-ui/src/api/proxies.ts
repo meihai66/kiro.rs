@@ -78,6 +78,27 @@ export async function batchExtendProxies(
   return data
 }
 
+export async function setProxyDisabled(
+  id: string,
+  disabled: boolean
+): Promise<SuccessResponse> {
+  const { data } = await api.post<SuccessResponse>(
+    `/proxies/${encodeURIComponent(id)}/set-disabled`,
+    { disabled }
+  )
+  return data
+}
+
+export async function batchResetProxyDisabled(
+  ids: string[]
+): Promise<BatchProxyResponse> {
+  const { data } = await api.post<BatchProxyResponse>(
+    '/proxies/batch/reset-disabled',
+    { ids }
+  )
+  return data
+}
+
 export async function testProxy(id: string): Promise<ProxyTestResult> {
   const { data } = await api.post<ProxyTestResult>(
     `/proxies/${encodeURIComponent(id)}/test`

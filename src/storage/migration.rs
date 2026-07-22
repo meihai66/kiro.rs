@@ -40,7 +40,10 @@ CREATE TABLE IF NOT EXISTS proxies (
     slots           INTEGER NOT NULL DEFAULT 1,
     label           TEXT,
     created_at      TEXT NOT NULL,
-    last_rotated_at TEXT
+    last_rotated_at TEXT,
+    disabled        INTEGER NOT NULL DEFAULT 0,
+    disabled_category TEXT,
+    disabled_reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS proxy_bindings (
@@ -141,6 +144,10 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
         "rl_count",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
+    // 代理"标记不可用"（连续网络失败自动禁用 / 管理员手动禁用）
+    add_column_if_missing(conn, "proxies", "disabled", "INTEGER NOT NULL DEFAULT 0")?;
+    add_column_if_missing(conn, "proxies", "disabled_category", "TEXT")?;
+    add_column_if_missing(conn, "proxies", "disabled_reason", "TEXT")?;
     // error_log_counters 首次创建（表为空）时用存量日志回填各类累计计数，
     // 避免升级后出现「累计 < 留存」的矛盾展示。回填值是下界（升级前被清理的
     // 历史无从得知）；表非空时 WHERE 子查询保证本语句是 no-op。

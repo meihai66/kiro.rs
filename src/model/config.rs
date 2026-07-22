@@ -141,6 +141,12 @@ pub struct Config {
     #[serde(default = "default_proxy_rotation_interval_seconds")]
     pub proxy_rotation_interval_seconds: u64,
 
+    /// 代理连续网络失败自动切换阈值：同一代理连续 N 次网络层请求失败（未收到上游响应）
+    /// 即标记该代理不可用并把所绑凭据换绑到可用代理；无可用代理时禁用凭据。
+    /// 0 = 关闭自动切换。默认 3
+    #[serde(default = "default_proxy_failure_threshold")]
+    pub proxy_failure_threshold: u32,
+
     /// SQLite 数据库文件路径（默认 ./kiro.db）
     #[serde(default)]
     pub db_path: Option<String>,
@@ -693,6 +699,10 @@ fn default_proxy_expiry_warning_hours() -> i64 {
     24
 }
 
+fn default_proxy_failure_threshold() -> u32 {
+    3
+}
+
 fn default_proxy_rotation_interval_seconds() -> u64 {
     60
 }
@@ -894,6 +904,7 @@ impl Default for Config {
             proxy_pool_path: None,
             proxy_expiry_warning_hours: default_proxy_expiry_warning_hours(),
             proxy_rotation_interval_seconds: default_proxy_rotation_interval_seconds(),
+            proxy_failure_threshold: default_proxy_failure_threshold(),
             db_path: None,
             auto_disable_patterns: Vec::new(),
             error_replace_rules: Vec::new(),

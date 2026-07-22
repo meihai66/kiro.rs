@@ -9,6 +9,7 @@ import {
   PlayCircle,
   Plus,
   RefreshCw,
+  RotateCcw,
   Sliders,
   Trash2,
   Unlink,
@@ -33,12 +34,14 @@ import { ImportProxyDialog } from '@/components/import-proxy-dialog'
 import {
   batchDeleteProxies,
   batchExtendProxies,
+  batchResetProxyDisabled,
   batchSetProxySlots,
   batchTestProxies,
   batchUnbindProxies,
   getProxies,
   getProxyAlerts,
   rotateProxiesNow,
+  setProxyDisabled,
   testProxy,
 } from '@/api/proxies'
 import { extractErrorMessage } from '@/lib/utils'
@@ -57,7 +60,33 @@ function formatRemaining(secs: number): string {
   return `${hours}h ${mins}m`
 }
 
-function statusBadge(status: string, remainingSecs: number) {
+function disabledCategoryLabel(category?: string | null): string {
+  switch (category) {
+    case 'network_failure':
+      return '网络失败'
+    case 'manual':
+      return '手动禁用'
+    default:
+      return '不可用'
+  }
+}
+
+function statusBadge(
+  status: string,
+  remainingSecs: number,
+  disabledCategory?: string | null,
+  disabledReason?: string | null
+) {
+  if (status === 'disabled') {
+    return (
+      <Badge
+        className="bg-red-500/15 text-red-700 dark:text-red-400"
+        title={disabledReason ?? undefined}
+      >
+        不可用 · {disabledCategoryLabel(disabledCategory)}
+      </Badge>
+    )
+  }
   if (status === 'expired') {
     return (
       <Badge variant="outline" className="border-muted text-muted-foreground">
@@ -106,7 +135,7 @@ export function ProxiesPage() {
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({})
   const [showAlerts, setShowAlerts] = useState(false)
   const [statusFilter, setStatusFilter] =
-    useState<'all' | 'available' | 'expiring' | 'expired' | 'full'>('all')
+    useState<'all' | 'available' | 'expiring' | 'expired' | 'full' | 'disabled'>('all')
   const [searchQuery, setSearchQuery] = useState('')
   const [slotsDialogOpen, setSlotsDialogOpen] = useState(false)
   const [extendDialogOpen, setExtendDialogOpen] = useState(false)
@@ -124,6 +153,34 @@ export function ProxiesPage() {
 
   const proxies = data?.proxies ?? []
 
+  const toggleDisabled = useMutation({
+    mutationFn: ({ id, disabled }: { id: string; disabled: boolean }) =>
+      setProxyDisabled(id, disabled),
+    onSuccess: (resp) => {
+      queryClient.invalidateQueries({ queryKey: ['proxies'] })
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+      queryClient.invalidateQueries({ queryKey: ['proxy-alerts'] })
+      toast.success(resp.message)
+    },
+    onError: (e) => toast.error(`操作失败：${extractErrorMessage(e)}`),
+  })
+
+  const batchResetDisabled = useMutation({
+    mutationFn: () => batchResetProxyDisabled(selectedIds),
+    onSuccess: (resp) => {
+      queryClient.invalidateQueries({ queryKey: ['proxies'] })
+      setRowSelection({})
+      if (resp.failCount === 0) {
+        toast.success(`已重置 ${resp.successCount} 个代理的不可用状态`)
+      } else {
+        toast.warning(
+          `重置完成：成功 ${resp.successCount}，失败 ${resp.failCount}`
+        )
+      }
+    },
+    onError: (e) => toast.error(`重置失败：${extractErrorMessage(e)}`),
+  })
+
   // 与统计卡口径对齐：「即将过期」含 status=expiring 与 active 但 <24h
   const isExpiringSoon = (p: ProxyEntryItem) =>
     p.status === 'expiring' || (p.status === 'active' && p.remainingSecs < 86400)
@@ -135,6 +192,7 @@ export function ProxiesPage() {
       expiring: proxies.filter(isExpiringSoon).length,
       expired: proxies.filter((p) => p.status === 'expired').length,
       full: proxies.filter((p) => p.status === 'full').length,
+      disabled: proxies.filter((p) => p.disabled).length,
     }),
     [proxies]
   )
@@ -153,6 +211,9 @@ export function ProxiesPage() {
         break
       case 'full':
         list = list.filter((p) => p.status === 'full')
+        break
+      case 'disabled':
+        list = list.filter((p) => p.disabled)
         break
     }
     const q = searchQuery.trim().toLowerCase()
@@ -230,7 +291,12 @@ export function ProxiesPage() {
         accessorKey: 'status',
         header: '状态',
         cell: ({ row }) =>
-          statusBadge(row.original.status, row.original.remainingSecs),
+          statusBadge(
+            row.original.status,
+            row.original.remainingSecs,
+            row.original.disabledCategory,
+            row.original.disabledReason
+          ),
       },
       {
         id: 'bound',
@@ -290,23 +356,46 @@ export function ProxiesPage() {
         header: '操作',
         cell: ({ row }) => {
           const id = row.original.id
+          const isDisabled = row.original.disabled
           return (
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-7 px-2 text-xs"
-              disabled={testingIds.has(id)}
-              onClick={() => handleTestSingle(id)}
-            >
-              {testingIds.has(id) ? '测试中…' : '测试'}
-            </Button>
+            <div className="flex items-center gap-1">
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 px-2 text-xs"
+                disabled={testingIds.has(id)}
+                onClick={() => handleTestSingle(id)}
+              >
+                {testingIds.has(id) ? '测试中…' : '测试'}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className={`h-7 px-2 text-xs ${
+                  isDisabled ? 'text-emerald-600' : 'text-red-500'
+                }`}
+                disabled={toggleDisabled.isPending}
+                onClick={() => {
+                  if (
+                    isDisabled ||
+                    confirm(
+                      `确定禁用代理 ${id}？其绑定的凭据将自动换绑到可用代理；无可用代理时凭据会被禁用。`
+                    )
+                  ) {
+                    toggleDisabled.mutate({ id, disabled: !isDisabled })
+                  }
+                }}
+              >
+                {isDisabled ? '启用' : '禁用'}
+              </Button>
+            </div>
           )
         },
         enableSorting: false,
       },
     ],
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [testResults, testingIds]
+    [testResults, testingIds, toggleDisabled.isPending]
   )
 
   const handleTestSingle = async (id: string) => {
@@ -493,7 +582,7 @@ export function ProxiesPage() {
       </div>
 
       {/* 统计卡片 */}
-      <div className="grid gap-4 md:grid-cols-4 mb-4">
+      <div className="grid gap-4 md:grid-cols-5 mb-4">
         <StatCard label="代理总数" value={proxies.length} />
         <StatCard
           label="可用代理"
@@ -516,6 +605,11 @@ export function ProxiesPage() {
           }
           tone="warn"
         />
+        <StatCard
+          label="不可用"
+          value={proxies.filter((p) => p.disabled).length}
+          tone="error"
+        />
       </div>
 
       {/* 状态筛选 + 搜索 */}
@@ -527,6 +621,7 @@ export function ProxiesPage() {
             { key: 'expiring', label: '即将过期' },
             { key: 'expired', label: '已过期' },
             { key: 'full', label: '已满' },
+            { key: 'disabled', label: '不可用' },
           ] as const
         ).map(({ key, label }) => (
           <Button
@@ -614,6 +709,16 @@ export function ProxiesPage() {
           >
             <CalendarClock className="h-4 w-4 mr-2" />
             延长到期
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => batchResetDisabled.mutate()}
+            disabled={batchResetDisabled.isPending}
+            title="清除所选代理的不可用标记（连续网络失败 / 手动禁用）"
+          >
+            <RotateCcw className="h-4 w-4 mr-2" />
+            重置不可用
           </Button>
           <Button
             size="sm"
@@ -735,14 +840,16 @@ function StatCard({
 }: {
   label: string
   value: number
-  tone?: 'warn' | 'ok'
+  tone?: 'warn' | 'ok' | 'error'
 }) {
   const valueClass =
     tone === 'warn'
       ? 'text-yellow-600'
       : tone === 'ok'
         ? 'text-emerald-600'
-        : ''
+        : tone === 'error'
+          ? 'text-red-500'
+          : ''
   return (
     <Card>
       <CardHeader className="pb-2">

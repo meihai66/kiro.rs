@@ -544,7 +544,10 @@ export interface ExportCredentialsResponse {
 
 // ============ 代理池 ============
 
-export type ProxyStatus = 'active' | 'expiring' | 'expired' | 'full'
+export type ProxyStatus = 'active' | 'expiring' | 'expired' | 'full' | 'disabled'
+
+/** 代理被标记不可用的类别 */
+export type ProxyDisabledCategory = 'network_failure' | 'manual'
 
 export interface ProxyEntryItem {
   id: string
@@ -559,6 +562,9 @@ export interface ProxyEntryItem {
   label?: string | null
   createdAt: string
   lastRotatedAt?: string | null
+  disabled: boolean
+  disabledCategory?: ProxyDisabledCategory | string | null
+  disabledReason?: string | null
 }
 
 export interface ProxyListResponse {

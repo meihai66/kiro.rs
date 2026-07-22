@@ -12,12 +12,12 @@ use super::{
     middleware::AdminState,
     types::{
         AddCredentialRequest, BatchProxyDeleteRequest, BatchProxyExtendRequest,
-        BatchProxySlotsRequest, BatchProxyUnbindRequest, BindProxyRequest, ClearErrorLogsRequest,
-        CreateApiKeyRequest, ExportCredentialsRequest, ImportProxiesRequest,
-        ImportTokenJsonRequest, ListErrorLogsQuery, SetAllowOveruseRequest,
+        BatchProxyResetDisabledRequest, BatchProxySlotsRequest, BatchProxyUnbindRequest,
+        BindProxyRequest, ClearErrorLogsRequest, CreateApiKeyRequest, ExportCredentialsRequest,
+        ImportProxiesRequest, ImportTokenJsonRequest, ListErrorLogsQuery, SetAllowOveruseRequest,
         SetCredentialRpmRequest, SetDisabledRequest, SetEmailRequest, SetEndpointRequest,
-        SetOveragePreferenceRequest, SetPriorityRequest, SetRegionRequest, SuccessResponse,
-        UpdateApiKeyRequest, UpdateProxyConfigRequest,
+        SetOveragePreferenceRequest, SetPriorityRequest, SetProxyDisabledRequest, SetRegionRequest,
+        SuccessResponse, UpdateApiKeyRequest, UpdateProxyConfigRequest,
     },
 };
 
@@ -536,6 +536,38 @@ pub async fn batch_delete_proxies(
     Json(req): Json<BatchProxyDeleteRequest>,
 ) -> impl IntoResponse {
     match state.service.batch_delete_proxies(req) {
+        Ok(resp) => Json(resp).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/proxies/:id/set-disabled
+/// 手动禁用/启用单个代理（禁用时自动为所绑凭据换绑）
+pub async fn set_proxy_disabled(
+    State(state): State<AdminState>,
+    Path(id): Path<String>,
+    Json(req): Json<SetProxyDisabledRequest>,
+) -> impl IntoResponse {
+    match state.service.set_proxy_disabled(&id, req.disabled) {
+        Ok(()) => {
+            let action = if req.disabled { "禁用" } else { "启用" };
+            Json(SuccessResponse {
+                success: true,
+                message: format!("代理 {} 已{}", id, action),
+            })
+            .into_response()
+        }
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/proxies/batch/reset-disabled
+/// 批量重置不可用状态
+pub async fn batch_reset_proxy_disabled(
+    State(state): State<AdminState>,
+    Json(req): Json<BatchProxyResetDisabledRequest>,
+) -> impl IntoResponse {
+    match state.service.batch_reset_proxy_disabled(req) {
         Ok(resp) => Json(resp).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }

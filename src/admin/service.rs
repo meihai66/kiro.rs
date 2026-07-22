@@ -15,7 +15,7 @@ use crate::http_client::ProxyConfig;
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::provider::KiroProvider;
 use crate::kiro::proxy_pool::{
-    AlertLevel, ProxyEntry, ProxyPool, ProxyTestResult, build_proxy_url,
+    AlertLevel, ProxyDisabledCategory, ProxyEntry, ProxyPool, ProxyTestResult, build_proxy_url,
     parse_host_port_user_pass_line, test_proxy,
 };
 use crate::kiro::proxy_rotation;
@@ -26,14 +26,14 @@ use parking_lot::RwLock;
 use super::error::AdminServiceError;
 use super::types::{
     AddCredentialRequest, AddCredentialResponse, BalanceResponse, BatchProxyDeleteRequest,
-    BatchProxyExtendRequest, BatchProxyItemResult, BatchProxyResponse, BatchProxySlotsRequest,
-    BatchProxyUnbindRequest, BindProxyRequest, CachedBalanceItem, CachedBalancesResponse,
-    CredentialStatusItem, CredentialsStatusResponse, ExportCredentialsRequest,
-    ExportCredentialsResponse, ExportSkippedItem, ImportAction, ImportItemResult,
-    ImportProxiesRequest, ImportProxiesResponse, ImportProxyItemResult, ImportSummary,
-    ImportTokenJsonRequest, ImportTokenJsonResponse, ProxyAlertItem, ProxyAlertsResponse,
-    ProxyConfigResponse, ProxyEntryItem, ProxyListResponse, RpmAnalysisBucket, RpmAnalysisEntry,
-    TokenJsonItem, TokenJsonProxyItem, UpdateProxyConfigRequest,
+    BatchProxyExtendRequest, BatchProxyItemResult, BatchProxyResetDisabledRequest,
+    BatchProxyResponse, BatchProxySlotsRequest, BatchProxyUnbindRequest, BindProxyRequest,
+    CachedBalanceItem, CachedBalancesResponse, CredentialStatusItem, CredentialsStatusResponse,
+    ExportCredentialsRequest, ExportCredentialsResponse, ExportSkippedItem, ImportAction,
+    ImportItemResult, ImportProxiesRequest, ImportProxiesResponse, ImportProxyItemResult,
+    ImportSummary, ImportTokenJsonRequest, ImportTokenJsonResponse, ProxyAlertItem,
+    ProxyAlertsResponse, ProxyConfigResponse, ProxyEntryItem, ProxyListResponse, RpmAnalysisBucket,
+    RpmAnalysisEntry, TokenJsonItem, TokenJsonProxyItem, UpdateProxyConfigRequest,
 };
 
 /// 余额缓存过期时间（秒），5 分钟
@@ -2095,6 +2095,9 @@ impl AdminService {
                 .or_else(|| Some("imported".to_string())),
             created_at: Utc::now(),
             last_rotated_at: None,
+            disabled: false,
+            disabled_category: None,
+            disabled_reason: None,
         };
         let mut ids = pool.add_many_force(vec![entry]);
         ids.pop()
@@ -2689,7 +2692,9 @@ impl AdminService {
             .iter()
             .map(|e| {
                 let remaining = (e.expires_at - now).num_seconds();
-                let status = if e.is_expired(now) {
+                let status = if e.disabled {
+                    "disabled"
+                } else if e.is_expired(now) {
                     "expired"
                 } else if !e.has_free_slot() {
                     "full"
@@ -2712,6 +2717,9 @@ impl AdminService {
                     label: e.label.clone(),
                     created_at: e.created_at,
                     last_rotated_at: e.last_rotated_at,
+                    disabled: e.disabled,
+                    disabled_category: e.disabled_category.map(|c| c.as_str().to_string()),
+                    disabled_reason: e.disabled_reason.clone(),
                 }
             })
             .collect();
@@ -2775,6 +2783,9 @@ impl AdminService {
                         label: req.label.clone(),
                         created_at: now,
                         last_rotated_at: None,
+                        disabled: false,
+                        disabled_category: None,
+                        disabled_reason: None,
                     });
                     // 占位，等 add_many 完成后填充结果
                     items.push(ImportProxyItemResult {
@@ -3067,6 +3078,65 @@ impl AdminService {
         let _ = self.token_manager.set_proxy_slot(credential_id, None);
         let _ = self.token_manager.set_disabled(credential_id, true);
         Ok(())
+    }
+
+    /// 手动禁用/启用单个代理。
+    ///
+    /// - 禁用：类别 Manual；该代理上绑定的凭据立即换绑到可用代理，无可用代理则禁用凭据
+    /// - 启用：清除 disabled 标记、类别、原因与连续失败计数
+    pub fn set_proxy_disabled(&self, id: &str, disabled: bool) -> Result<(), AdminServiceError> {
+        let pool = self.require_proxy_pool()?;
+        if disabled {
+            pool.set_disabled(
+                id,
+                true,
+                Some(ProxyDisabledCategory::Manual),
+                Some("管理员手动禁用".to_string()),
+            )
+            .map_err(|e| AdminServiceError::InvalidRequest(e.to_string()))?;
+            self.token_manager.migrate_creds_off_proxy(&pool, id);
+        } else {
+            pool.set_disabled(id, false, None, None)
+                .map_err(|e| AdminServiceError::InvalidRequest(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// 批量重置不可用状态（清除所选代理的 disabled 标记）
+    pub fn batch_reset_proxy_disabled(
+        &self,
+        req: BatchProxyResetDisabledRequest,
+    ) -> Result<BatchProxyResponse, AdminServiceError> {
+        let pool = self.require_proxy_pool()?;
+        let mut items = Vec::with_capacity(req.ids.len());
+        let mut success_count = 0;
+        let mut fail_count = 0;
+        for id in &req.ids {
+            match pool.set_disabled(id, false, None, None) {
+                Ok(()) => {
+                    success_count += 1;
+                    items.push(BatchProxyItemResult {
+                        id: id.clone(),
+                        success: true,
+                        error: None,
+                    });
+                }
+                Err(e) => {
+                    fail_count += 1;
+                    items.push(BatchProxyItemResult {
+                        id: id.clone(),
+                        success: false,
+                        error: Some(e.to_string()),
+                    });
+                }
+            }
+        }
+        Ok(BatchProxyResponse {
+            total: req.ids.len(),
+            success_count,
+            fail_count,
+            items,
+        })
     }
 
     /// 测试单个代理（出口 IP + 延迟）

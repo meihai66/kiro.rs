@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::kiro::model::credentials::KiroCredentials;
-use crate::kiro::proxy_pool::ProxyEntry;
+use crate::kiro::proxy_pool::{ProxyDisabledCategory, ProxyEntry};
 
 pub mod migration;
 
@@ -134,7 +134,8 @@ impl Store {
         let conn = self.conn()?;
         let mut entries: Vec<ProxyEntry> = {
             let mut stmt = conn.prepare(
-                "SELECT id, url, username, password, expires_at, slots, label, created_at, last_rotated_at \
+                "SELECT id, url, username, password, expires_at, slots, label, created_at, last_rotated_at, \
+                 disabled, disabled_category, disabled_reason \
                  FROM proxies",
             )?;
             stmt.query_map([], row_to_proxy_entry)?
@@ -163,8 +164,8 @@ impl Store {
         tx.execute("DELETE FROM proxies", [])?;
         for e in entries {
             tx.execute(
-                "INSERT INTO proxies(id, url, username, password, expires_at, slots, label, created_at, last_rotated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO proxies(id, url, username, password, expires_at, slots, label, created_at, last_rotated_at, disabled, disabled_category, disabled_reason) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     e.id,
                     e.url,
@@ -175,6 +176,9 @@ impl Store {
                     e.label,
                     e.created_at.to_rfc3339(),
                     e.last_rotated_at.map(|d| d.to_rfc3339()),
+                    e.disabled as i64,
+                    e.disabled_category.map(|c| c.as_str().to_string()),
+                    e.disabled_reason,
                 ],
             )?;
             for cred_id in &e.bound_credential_ids {
@@ -980,6 +984,12 @@ fn row_to_proxy_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProxyEntry> {
         label: row.get(6)?,
         created_at: parse_dt(&created_str).unwrap_or_else(Utc::now),
         last_rotated_at: last_rotated_str.as_deref().and_then(parse_dt),
+        disabled: row.get::<_, i64>(9)? != 0,
+        disabled_category: row
+            .get::<_, Option<String>>(10)?
+            .as_deref()
+            .and_then(ProxyDisabledCategory::from_str_opt),
+        disabled_reason: row.get(11)?,
     })
 }
 

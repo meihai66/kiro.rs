@@ -62,6 +62,46 @@ pub struct ProxyEntry {
     /// 上次被分配出去的时间（auto_bind / manual_bind / 轮换时更新）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_rotated_at: Option<DateTime<Utc>>,
+
+    /// 是否已被标记为不可用（连续网络失败自动禁用 / 管理员手动禁用）。
+    /// 禁用后不参与自动选择/绑定，运行时取 ProxyConfig 也会失败（触发换绑）。
+    #[serde(default)]
+    pub disabled: bool,
+
+    /// 被标记不可用的类别（仅 disabled=true 时有意义）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disabled_category: Option<ProxyDisabledCategory>,
+
+    /// 禁用原因详情（仅 disabled=true 时有意义）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disabled_reason: Option<String>,
+}
+
+/// 代理被标记不可用的类别
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyDisabledCategory {
+    /// 连续网络失败自动禁用
+    NetworkFailure,
+    /// 管理员手动禁用
+    Manual,
+}
+
+impl ProxyDisabledCategory {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ProxyDisabledCategory::NetworkFailure => "network_failure",
+            ProxyDisabledCategory::Manual => "manual",
+        }
+    }
+
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s {
+            "network_failure" => Some(ProxyDisabledCategory::NetworkFailure),
+            "manual" => Some(ProxyDisabledCategory::Manual),
+            _ => None,
+        }
+    }
 }
 
 fn default_slots() -> u32 {
@@ -138,6 +178,9 @@ pub struct ProxyPool {
     /// 内存里的"最近失败"标记（slot_id → 失败时刻），进程重启自动清空。
     /// 仅作用于自动选择路径（pick_idle_candidate / auto_bind），不影响 manual_bind。
     recent_failures: RwLock<HashMap<String, Instant>>,
+    /// 内存里的"连续网络失败"计数（slot_id → 次数），进程重启自动清空。
+    /// 经该代理成功收到上游响应（无论状态码）即归零；达到阈值触发自动禁用 + 换绑。
+    net_failures: RwLock<HashMap<String, u32>>,
 }
 
 #[allow(dead_code)]
@@ -150,6 +193,7 @@ impl ProxyPool {
             alerts: RwLock::new(std::collections::VecDeque::with_capacity(ALERT_BUFFER_CAP)),
             store: RwLock::new(None),
             recent_failures: RwLock::new(HashMap::new()),
+            net_failures: RwLock::new(HashMap::new()),
         })
     }
 
@@ -162,6 +206,7 @@ impl ProxyPool {
             alerts: RwLock::new(std::collections::VecDeque::with_capacity(ALERT_BUFFER_CAP)),
             store: RwLock::new(Some(store)),
             recent_failures: RwLock::new(HashMap::new()),
+            net_failures: RwLock::new(HashMap::new()),
         }))
     }
 
@@ -187,6 +232,7 @@ impl ProxyPool {
             alerts: RwLock::new(std::collections::VecDeque::with_capacity(ALERT_BUFFER_CAP)),
             store: RwLock::new(None),
             recent_failures: RwLock::new(HashMap::new()),
+            net_failures: RwLock::new(HashMap::new()),
         }))
     }
 
@@ -201,6 +247,55 @@ impl ProxyPool {
     /// 清除"最近失败"标记（验证成功后调用，可选）
     pub fn clear_recent_failure(&self, slot_id: &str) {
         self.recent_failures.write().remove(slot_id);
+    }
+
+    /// 记录一次经该代理的网络层失败（未收到上游响应），返回累计连续失败次数
+    pub fn record_network_failure(&self, slot_id: &str) -> u32 {
+        let mut map = self.net_failures.write();
+        let count = map.entry(slot_id.to_string()).or_insert(0);
+        *count = count.saturating_add(1);
+        *count
+    }
+
+    /// 记录一次经该代理成功收到上游响应：连续失败计数归零，并清除"最近失败"标记
+    pub fn record_network_success(&self, slot_id: &str) {
+        self.net_failures.write().remove(slot_id);
+        self.clear_recent_failure(slot_id);
+    }
+
+    /// 当前连续网络失败次数（无记录返回 0）
+    pub fn network_failure_count(&self, slot_id: &str) -> u32 {
+        self.net_failures.read().get(slot_id).copied().unwrap_or(0)
+    }
+
+    /// 标记/取消标记代理不可用（持久化）。
+    ///
+    /// - 禁用：写入类别与原因；同时标记"最近失败"防止短时间内被自动路径选中（双保险）
+    /// - 启用（重置）：清除类别、原因、连续失败计数与"最近失败"标记
+    pub fn set_disabled(
+        &self,
+        id: &str,
+        disabled: bool,
+        category: Option<ProxyDisabledCategory>,
+        reason: Option<String>,
+    ) -> anyhow::Result<()> {
+        {
+            let mut entries = self.entries.write();
+            let entry = entries
+                .iter_mut()
+                .find(|e| e.id == id)
+                .ok_or_else(|| anyhow::anyhow!("代理 {} 不存在", id))?;
+            entry.disabled = disabled;
+            entry.disabled_category = if disabled { category } else { None };
+            entry.disabled_reason = if disabled { reason } else { None };
+        }
+        self.net_failures.write().remove(id);
+        if disabled {
+            self.mark_recent_failure(id);
+        } else {
+            self.clear_recent_failure(id);
+        }
+        self.save()
     }
 
     /// 是否在失败冷却内
@@ -222,7 +317,8 @@ impl ProxyPool {
         entries
             .iter()
             .filter(|e| {
-                e.has_free_slot()
+                !e.disabled
+                    && e.has_free_slot()
                     && (e.expires_at - now).num_hours() > min_validity_hours
                     && !exclude.contains(&e.id)
                     && !self.is_in_failure_cooldown(&e.id)
@@ -286,6 +382,7 @@ impl ProxyPool {
     /// 返回 `Err` 表示：
     /// - 代理不存在
     /// - 代理已过期
+    /// - 代理已被标记为不可用（disabled）
     pub fn proxy_config_for(&self, slot_id: &str) -> anyhow::Result<ProxyConfig> {
         let now = Utc::now();
         let entries = self.entries.read();
@@ -295,6 +392,17 @@ impl ProxyPool {
             .ok_or_else(|| anyhow::anyhow!("代理槽 {} 不存在", slot_id))?;
         if entry.is_expired(now) {
             anyhow::bail!("代理槽 {} 已过期", slot_id);
+        }
+        if entry.disabled {
+            anyhow::bail!(
+                "代理槽 {} 已被标记为不可用{}",
+                slot_id,
+                entry
+                    .disabled_reason
+                    .as_deref()
+                    .map(|r| format!("（{}）", r))
+                    .unwrap_or_default()
+            );
         }
         Ok(entry.to_proxy_config())
     }
@@ -312,7 +420,8 @@ impl ProxyPool {
         entries
             .iter()
             .filter(|e| {
-                e.has_free_slot()
+                !e.disabled
+                    && e.has_free_slot()
                     && (e.expires_at - now).num_hours() > min_validity_hours
                     && !self.is_in_failure_cooldown(&e.id)
             })
@@ -343,7 +452,8 @@ impl ProxyPool {
                 .iter()
                 .enumerate()
                 .filter(|(_, e)| {
-                    e.has_free_slot()
+                    !e.disabled
+                        && e.has_free_slot()
                         && (e.expires_at - now).num_hours() > min_validity_hours
                         && !e.bound_credential_ids.contains(&credential_id)
                         && !self.is_in_failure_cooldown(&e.id)
@@ -386,6 +496,9 @@ impl ProxyPool {
 
             if entry.bound_credential_ids.contains(&credential_id) {
                 return Ok(()); // 幂等
+            }
+            if entry.disabled {
+                anyhow::bail!("代理 {} 已被标记为不可用，请先启用再绑定", proxy_id);
             }
             if !entry.has_free_slot() {
                 anyhow::bail!(
@@ -587,6 +700,7 @@ impl ProxyPool {
             .iter()
             .filter(|e| {
                 e.id != current_proxy_id
+                    && !e.disabled
                     && e.has_free_slot()
                     && (e.expires_at - now).num_hours() > min_validity_hours
                     && !e.bound_credential_ids.contains(&excluded_credential)
@@ -611,6 +725,9 @@ impl ProxyPool {
                 .iter()
                 .position(|e| e.id == to_proxy)
                 .ok_or_else(|| anyhow::anyhow!("目标代理 {} 不存在", to_proxy))?;
+            if entries[to_idx].disabled {
+                anyhow::bail!("目标代理 {} 已被标记为不可用", to_proxy);
+            }
             if !entries[to_idx].has_free_slot() {
                 anyhow::bail!("目标代理 {} 已无空槽", to_proxy);
             }
@@ -831,6 +948,9 @@ mod tests {
             label: None,
             created_at: Utc::now(),
             last_rotated_at: None,
+            disabled: false,
+            disabled_category: None,
+            disabled_reason: None,
         }
     }
 
@@ -1020,6 +1140,79 @@ mod tests {
     }
 
     #[test]
+    fn test_network_failure_counter_and_reset() {
+        let pool = ProxyPool::empty();
+        pool.entries.write().push(fresh_entry("p1", 1, 100));
+
+        assert_eq!(pool.record_network_failure("p1"), 1);
+        assert_eq!(pool.record_network_failure("p1"), 2);
+        assert_eq!(pool.network_failure_count("p1"), 2);
+
+        // 成功收到响应 → 归零
+        pool.record_network_success("p1");
+        assert_eq!(pool.network_failure_count("p1"), 0);
+        assert_eq!(pool.record_network_failure("p1"), 1);
+    }
+
+    #[test]
+    fn test_set_disabled_marks_and_resets() {
+        let pool = ProxyPool::empty();
+        pool.entries.write().push(fresh_entry("p1", 1, 100));
+        pool.record_network_failure("p1");
+
+        pool.set_disabled(
+            "p1",
+            true,
+            Some(ProxyDisabledCategory::NetworkFailure),
+            Some("连续失败".to_string()),
+        )
+        .unwrap();
+        let e = pool.get("p1").unwrap();
+        assert!(e.disabled);
+        assert_eq!(
+            e.disabled_category,
+            Some(ProxyDisabledCategory::NetworkFailure)
+        );
+        assert_eq!(e.disabled_reason.as_deref(), Some("连续失败"));
+        // 禁用时清零连续失败计数
+        assert_eq!(pool.network_failure_count("p1"), 0);
+        // 禁用后取 ProxyConfig 失败
+        assert!(pool.proxy_config_for("p1").is_err());
+
+        // 重置（启用）→ 清除类别与原因，恢复可用
+        pool.set_disabled("p1", false, None, None).unwrap();
+        let e = pool.get("p1").unwrap();
+        assert!(!e.disabled);
+        assert_eq!(e.disabled_category, None);
+        assert_eq!(e.disabled_reason, None);
+        assert!(pool.proxy_config_for("p1").is_ok());
+    }
+
+    #[test]
+    fn test_disabled_excluded_from_auto_selection() {
+        let pool = ProxyPool::empty();
+        pool.entries
+            .write()
+            .extend([fresh_entry("p1", 2, 200), fresh_entry("p2", 2, 100)]);
+
+        // 默认挑 p1（到期更远）
+        assert_eq!(pool.pick_idle_candidate(24), Some("p1".to_string()));
+
+        pool.set_disabled("p1", true, Some(ProxyDisabledCategory::Manual), None)
+            .unwrap();
+        // 禁用后 pick / auto_bind / 轮换候选全部跳过 p1
+        assert_eq!(pool.pick_idle_candidate(24), Some("p2".to_string()));
+        assert_eq!(pool.auto_bind(1, 24).unwrap(), "p2");
+        assert_eq!(
+            pool.find_rotation_candidate("p0", 24, 9),
+            Some("p2".to_string())
+        );
+        // 禁用的代理不允许手动绑定 / 作为迁移目标
+        assert!(pool.manual_bind("p1", 2).is_err());
+        assert!(pool.migrate_binding(1, "p2", "p1").is_err());
+    }
+
+    #[test]
     fn test_proxy_config_for_expired() {
         let pool = ProxyPool::empty();
         let mut p = fresh_entry("p1", 1, 100);
@@ -1040,6 +1233,9 @@ mod tests {
             label: None,
             created_at: Utc::now(),
             last_rotated_at: None,
+            disabled: false,
+            disabled_category: None,
+            disabled_reason: None,
         }
     }
 

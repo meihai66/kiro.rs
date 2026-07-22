@@ -594,6 +594,14 @@ pub struct ProxyEntryItem {
     pub created_at: chrono::DateTime<chrono::Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_rotated_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// 是否被标记为不可用
+    pub disabled: bool,
+    /// 被标记不可用的类别（network_failure / manual）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disabled_category: Option<String>,
+    /// 禁用原因详情
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disabled_reason: Option<String>,
 }
 
 /// 代理池列表响应
@@ -666,6 +674,20 @@ pub struct BatchProxyDeleteRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BatchProxyUnbindRequest {
+    pub ids: Vec<String>,
+}
+
+/// 单个代理禁用/启用请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetProxyDisabledRequest {
+    pub disabled: bool,
+}
+
+/// 批量重置不可用状态请求（把所选代理的 disabled 标记清除）
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchProxyResetDisabledRequest {
     pub ids: Vec<String>,
 }
 

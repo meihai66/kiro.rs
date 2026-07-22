@@ -89,6 +89,12 @@ AppState {
 - 冷却分类管理：`FailureLimit` / `InsufficientBalance` / `ModelUnavailable` / `QuotaExceeded`
 - `MODEL_TEMPORARILY_UNAVAILABLE` 触发全局熔断，禁用所有凭据
 
+## 代理池故障切换
+
+- 启用代理池时，同一代理连续 N 次网络层请求失败（未收到上游响应，`proxyFailureThreshold` 配置，默认 3，0=关闭）→ 该代理被标记不可用（类别 `network_failure`，持久化），其所绑凭据自动换绑到可用代理；池中无可用代理时凭据被禁用（`DisableReason::ProxyUnavailable`）
+- 经代理成功收到上游响应（无论状态码）即清零该代理的连续失败计数
+- 管理员可手动禁用代理（类别 `manual`，同样触发所绑凭据换绑），并可单个/批量重置不可用状态（`POST /proxies/{id}/set-disabled`、`POST /proxies/batch/reset-disabled`）
+
 ## API 端点
 
 **代理端点**:

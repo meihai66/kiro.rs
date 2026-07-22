@@ -8,18 +8,19 @@ use axum::{
 use super::{
     handlers::{
         add_credential, batch_delete_proxies, batch_proxy_extend, batch_proxy_slots,
-        batch_test_proxies, batch_unbind_proxies, bind_credential_proxy, clear_error_logs,
-        create_api_key, delete_api_key, delete_credential, delete_error_log, delete_proxy,
-        export_credentials, force_refresh_token, get_all_credentials, get_cached_balances,
-        get_credential_balance, get_error_log, get_error_log_kind_stats, get_global_config,
-        get_proxy_config, get_rpm_analysis, get_rpm_history, get_rpm_history_aggregate,
-        get_stats_summary, import_proxies, import_token_json, list_api_keys,
-        list_credential_models, list_error_logs, list_proxies, list_proxy_alerts, reset_all_stats,
-        reset_failure_count, reset_rate_limit_stats, rotate_proxies_now,
-        set_credential_allow_overuse, set_credential_disabled, set_credential_email,
-        set_credential_endpoint, set_credential_priority, set_credential_region,
-        set_credential_rpm, set_overage_preference, test_chat, test_proxy, test_push,
-        unbind_credential_proxy, update_api_key, update_global_config, update_proxy_config,
+        batch_reset_proxy_disabled, batch_test_proxies, batch_unbind_proxies,
+        bind_credential_proxy, clear_error_logs, create_api_key, delete_api_key, delete_credential,
+        delete_error_log, delete_proxy, export_credentials, force_refresh_token,
+        get_all_credentials, get_cached_balances, get_credential_balance, get_error_log,
+        get_error_log_kind_stats, get_global_config, get_proxy_config, get_rpm_analysis,
+        get_rpm_history, get_rpm_history_aggregate, get_stats_summary, import_proxies,
+        import_token_json, list_api_keys, list_credential_models, list_error_logs, list_proxies,
+        list_proxy_alerts, reset_all_stats, reset_failure_count, reset_rate_limit_stats,
+        rotate_proxies_now, set_credential_allow_overuse, set_credential_disabled,
+        set_credential_email, set_credential_endpoint, set_credential_priority,
+        set_credential_region, set_credential_rpm, set_overage_preference, set_proxy_disabled,
+        test_chat, test_proxy, test_push, unbind_credential_proxy, update_api_key,
+        update_global_config, update_proxy_config,
     },
     middleware::{AdminState, admin_auth_middleware},
 };
@@ -91,8 +92,13 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/proxies/batch/slots", post(batch_proxy_slots))
         .route("/proxies/batch/extend", post(batch_proxy_extend))
         .route("/proxies/batch/test", post(batch_test_proxies))
+        .route(
+            "/proxies/batch/reset-disabled",
+            post(batch_reset_proxy_disabled),
+        )
         .route("/proxies/{id}", delete(delete_proxy))
         .route("/proxies/{id}/test", post(test_proxy))
+        .route("/proxies/{id}/set-disabled", post(set_proxy_disabled))
         .route("/credentials/{id}/bind-proxy", post(bind_credential_proxy))
         .route(
             "/credentials/{id}/unbind-proxy",
