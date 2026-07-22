@@ -1,5 +1,12 @@
 # Changelog
 
+## [v1.1.79] - 2026-07-22
+
+### 新增
+
+- **无凭据错误改返 429** — 「没有可用的凭据」从 503 service_unavailable 改为 429 rate_limit_error，下游网关不再把无凭据当渠道故障熔断，按限流退避重试，凭据恢复后自动继续 (`src/anthropic/handlers.rs`)
+- **严格遵循上游 Retry-After 开关** — 新增全局开关 `rateLimitFollowRetryAfter`（默认关）：上游 429 带 `Retry-After` 时按原值冷却，不 clamp 到 [min,max]、不随机，仅保留 24h 防御上限；未带头时回落原有逻辑；与「忽略 Retry-After」同开时带头响应以本开关优先；Admin API / 设置页「限流冷却（429）」卡片同步支持（含热更新） (`src/kiro/provider.rs`, `src/model/config.rs`, `src/admin/service.rs`, `admin-ui/src/pages/settings-page.tsx`)
+
 ## [v1.1.78] - 2026-07-18
 
 ### 新增
