@@ -1,5 +1,11 @@
 # Changelog
 
+## [v1.1.81] - 2026-07-22
+
+### 新增
+
+- **设置页支持配置代理连续失败切换阈值** — `/config/global` 新增 `proxyFailureThreshold`（0~100，0=关闭），保存即热更新无需重启；设置页「重试与冷却」卡片新增对应输入框 (`src/admin/service.rs`, `src/admin/types.rs`, `src/kiro/token_manager.rs`, `admin-ui/src/pages/settings-page.tsx`)
+
 ## [v1.1.80] - 2026-07-22
 
 ### 新增
