@@ -1,5 +1,11 @@
 # Changelog
 
+## [v1.1.83] - 2026-07-25
+
+### 新增
+
+- **API Key 导入支持行内代理** — Admin「添加凭据」API Key 批量导入支持 `ksk_xxx|host:port:user:pass` 行内代理格式（也支持 `host:port` 或完整代理 URL，列表格式可选 http/https/socks5 协议），带代理或批量时走 import-token-json 管线，代理自动加入代理池并与该凭据绑定 (`admin-ui/src/components/add-credential-dialog.tsx`, `admin-ui/src/components/import-token-json-dialog.tsx`, `README.md`)
+
 ## [v1.1.82] - 2026-07-24
 
 ### 新增
