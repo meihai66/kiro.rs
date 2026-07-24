@@ -29,11 +29,11 @@ use crate::kiro::affinity::UserAffinityManager;
 use crate::kiro::background_refresh::{
     BackgroundRefreshConfig, BackgroundRefresher, RefreshResult,
 };
+use crate::kiro::client_profile;
 use crate::kiro::cooldown::{CooldownManager, CooldownReason};
 use crate::kiro::endpoint::{
     CLI_ENDPOINT_NAME, CliEndpoint, IDE_ENDPOINT_NAME, IdeEndpoint, KiroEndpoint, RequestContext,
 };
-use crate::kiro::fingerprint::Fingerprint;
 use crate::kiro::machine_id;
 use crate::kiro::metrics::RpmTracker;
 use crate::kiro::model::credentials::KiroCredentials;
@@ -367,7 +367,7 @@ async fn refresh_social_token(
     let refresh_domain = format!("prod.{}.auth.desktop.kiro.dev", region);
     let machine_id = machine_id::generate_from_credentials(credentials, config)
         .ok_or_else(|| anyhow::anyhow!("无法生成 machineId"))?;
-    let kiro_version = &config.kiro_version;
+    let kiro_version = client_profile::resolve(&machine_id, config).kiro_version;
 
     let client = build_client(proxy, 60, config.tls_backend)?;
     let body = RefreshRequest {
@@ -434,9 +434,10 @@ const IDC_AMZ_USER_AGENT_PREFIX: &str = "aws-sdk-js/3.980.0";
 pub(crate) const FALLBACK_IDC_PROFILE_ARN: &str =
     "arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX";
 
-fn build_idc_refresh_user_agents(config: &Config) -> (String, String) {
-    let os_name = &config.system_version;
-    let node_version = &config.node_version;
+fn build_idc_refresh_user_agents(seed: &str, config: &Config) -> (String, String) {
+    let profile = client_profile::resolve(seed, config);
+    let os_name = &profile.system_version;
+    let node_version = &profile.node_version;
 
     let x_amz_user_agent = format!("{} KiroIDE", IDC_AMZ_USER_AGENT_PREFIX);
     let user_agent = format!(
@@ -468,7 +469,10 @@ async fn refresh_idc_token(
     // 优先级：凭据.auth_region > 凭据.region > config.auth_region > config.region
     let region = credentials.effective_auth_region(config);
     let refresh_url = format!("https://oidc.{}.amazonaws.com/token", region);
-    let (x_amz_user_agent, user_agent) = build_idc_refresh_user_agents(config);
+    // machineId 作为 client_profile 的稳定种子；IdC 凭据必有 client_id，一定能派生出来。
+    let profile_seed =
+        machine_id::generate_from_credentials(credentials, config).unwrap_or_default();
+    let (x_amz_user_agent, user_agent) = build_idc_refresh_user_agents(&profile_seed, config);
 
     let client = build_client(proxy, 60, config.tls_backend)?;
     let body = IdcRefreshRequest {
@@ -669,11 +673,12 @@ pub(crate) async fn list_available_profiles_in_region(
     let url = format!("https://q.{}.amazonaws.com/ListAvailableProfiles", region);
     let machine_id = machine_id::generate_from_credentials(credentials, config)
         .ok_or_else(|| anyhow::anyhow!("无法生成 machineId"))?;
-    let kiro_version = &config.kiro_version;
+    let profile = client_profile::resolve(&machine_id, config);
+    let kiro_version = &profile.kiro_version;
     let amz_user_agent = format!("aws-sdk-js/1.0.0 KiroIDE-{}-{}", kiro_version, machine_id);
     let user_agent = format!(
         "aws-sdk-js/1.0.0 ua/2.1 os/{} lang/js md/nodejs#{} api/codewhispererruntime#1.0.0 m/N,E KiroIDE-{}-{}",
-        config.system_version, config.node_version, kiro_version, machine_id
+        profile.system_version, profile.node_version, kiro_version, machine_id
     );
 
     // ListAvailableProfiles 是轻量调用，且首请求会跨区串行探测多个 region——用较短超时
@@ -773,8 +778,6 @@ struct CredentialEntry {
     auto_heal_reason: Option<AutoHealReason>,
     /// 禁用原因（公共 API 展示用）
     disable_reason: Option<DisableReason>,
-    /// 设备指纹（每个凭据独立）
-    fingerprint: Fingerprint,
     /// API 调用成功次数
     success_count: u64,
     /// API 调用累计失败次数（持久化；不随成功清零，与连续 failure_count 区分）
@@ -1238,16 +1241,6 @@ impl MultiTokenManager {
                         has_new_machine_ids = true;
                     }
                 }
-                // 为每个凭据生成独立的设备指纹
-                let fingerprint_seed = cred
-                    .refresh_token
-                    .as_deref()
-                    .or(cred.kiro_api_key.as_deref())
-                    .or(cred.machine_id.as_deref())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| format!("credential-{}", id));
-                let fingerprint = Fingerprint::generate_from_seed(&fingerprint_seed);
-
                 let refresh_token_hash = credential_secret_hash(&cred);
                 CredentialEntry {
                     id,
@@ -1267,7 +1260,6 @@ impl MultiTokenManager {
                     } else {
                         None
                     },
-                    fingerprint,
                     success_count: 0,
                     error_count: 0,
                     last_used_at: None,
@@ -4452,16 +4444,6 @@ impl MultiTokenManager {
             validated_cred.allow_overuse = new_cred.allow_overuse;
             validated_cred.rpm = new_cred.rpm.filter(|&v| v > 0);
 
-            // 为新凭据生成设备指纹
-            let fingerprint_seed = validated_cred
-                .refresh_token
-                .as_deref()
-                .or(validated_cred.kiro_api_key.as_deref())
-                .or(validated_cred.machine_id.as_deref())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| format!("credential-{}", new_id));
-            let fingerprint = Fingerprint::generate_from_seed(&fingerprint_seed);
-
             let entry_secret_hash = credential_secret_hash(&validated_cred);
 
             entries.push(CredentialEntry {
@@ -4472,7 +4454,6 @@ impl MultiTokenManager {
                 disabled: false,
                 auto_heal_reason: None,
                 disable_reason: None,
-                fingerprint,
                 success_count: 0,
                 error_count: 0,
                 last_used_at: None,
@@ -4583,18 +4564,8 @@ impl MultiTokenManager {
     }
 
     // ========================================================================
-    // 增强特性：设备指纹、速率限制、冷却管理、后台刷新
+    // 增强特性：速率限制、冷却管理、后台刷新
     // ========================================================================
-
-    #[allow(dead_code)]
-    /// 获取凭据的设备指纹
-    pub fn get_fingerprint(&self, id: u64) -> Option<Fingerprint> {
-        let entries = self.entries.lock();
-        entries
-            .iter()
-            .find(|e| e.id == id)
-            .map(|e| e.fingerprint.clone())
-    }
 
     #[allow(dead_code)]
     /// 获取速率限制器引用
@@ -5995,10 +5966,10 @@ mod tests {
     #[test]
     fn test_build_idc_refresh_user_agents_uses_config_versions() {
         let mut config = Config::default();
-        config.system_version = "darwin#25.4.0".to_string();
-        config.node_version = "22.22.0".to_string();
+        config.system_version = Some("darwin#25.4.0".to_string());
+        config.node_version = Some("22.22.0".to_string());
 
-        let (amz_user_agent, user_agent) = build_idc_refresh_user_agents(&config);
+        let (amz_user_agent, user_agent) = build_idc_refresh_user_agents("test-seed", &config);
 
         assert_eq!(amz_user_agent, "aws-sdk-js/3.980.0 KiroIDE");
         assert!(user_agent.contains("os/darwin#25.4.0"));
@@ -6007,11 +5978,25 @@ mod tests {
     }
 
     #[test]
+    fn test_build_idc_refresh_user_agents_derives_platform_without_config() {
+        // 未配置 system_version 时应从 client_profile 池派生（永不 Linux），保持跨重启稳定
+        let config = Config::default();
+        let (_, user_agent) = build_idc_refresh_user_agents("stable-seed", &config);
+        assert!(
+            user_agent.contains("os/darwin#") || user_agent.contains("os/win32#"),
+            "derived platform must be mac/win, got: {user_agent}"
+        );
+        // 同一种子应稳定
+        let (_, again) = build_idc_refresh_user_agents("stable-seed", &config);
+        assert_eq!(user_agent, again);
+    }
+
+    #[test]
     fn test_build_usage_limit_user_agents_uses_config_versions() {
         let mut config = Config::default();
-        config.kiro_version = "0.11.107".to_string();
-        config.system_version = "win32#10.0.22631".to_string();
-        config.node_version = "22.22.0".to_string();
+        config.kiro_version = Some("0.11.107".to_string());
+        config.system_version = Some("win32#10.0.22631".to_string());
+        config.node_version = Some("22.22.0".to_string());
         let credentials = KiroCredentials::default();
         let endpoint = IdeEndpoint::new();
         let ctx = RequestContext {

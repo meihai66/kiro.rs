@@ -6,6 +6,7 @@ use uuid::Uuid;
 use super::{
     KiroEndpoint, ListModelsParts, RequestContext, SetUserPreferenceParts, UsageRequestParts,
 };
+use crate::kiro::client_profile;
 use crate::kiro::model::credentials::KiroCredentials;
 
 pub const IDE_ENDPOINT_NAME: &str = "ide";
@@ -25,19 +26,18 @@ impl IdeEndpoint {
     }
 
     fn x_amz_user_agent(&self, ctx: &RequestContext<'_>) -> String {
+        let profile = client_profile::resolve(ctx.machine_id, ctx.config);
         format!(
             "aws-sdk-js/1.0.34 KiroIDE-{}-{}",
-            ctx.config.kiro_version, ctx.machine_id
+            profile.kiro_version, ctx.machine_id
         )
     }
 
     fn user_agent(&self, ctx: &RequestContext<'_>) -> String {
+        let profile = client_profile::resolve(ctx.machine_id, ctx.config);
         format!(
             "aws-sdk-js/1.0.34 ua/2.1 os/{} lang/js md/nodejs#{} api/codewhispererstreaming#1.0.34 m/E KiroIDE-{}-{}",
-            ctx.config.system_version,
-            ctx.config.node_version,
-            ctx.config.kiro_version,
-            ctx.machine_id
+            profile.system_version, profile.node_version, profile.kiro_version, ctx.machine_id
         )
     }
 
@@ -174,21 +174,22 @@ impl KiroEndpoint for IdeEndpoint {
             url.push_str(&format!("&profileArn={}", urlencoding::encode(profile_arn)));
         }
 
+        let profile = client_profile::resolve(ctx.machine_id, ctx.config);
         let mut headers = vec![
             (
                 "x-amz-user-agent",
                 format!(
                     "aws-sdk-js/1.0.0 KiroIDE-{}-{}",
-                    ctx.config.kiro_version, ctx.machine_id
+                    profile.kiro_version, ctx.machine_id
                 ),
             ),
             (
                 "user-agent",
                 format!(
                     "aws-sdk-js/1.0.0 ua/2.1 os/{} lang/js md/nodejs#{} api/codewhispererruntime#1.0.0 m/N,E KiroIDE-{}-{}",
-                    ctx.config.system_version,
-                    ctx.config.node_version,
-                    ctx.config.kiro_version,
+                    profile.system_version,
+                    profile.node_version,
+                    profile.kiro_version,
                     ctx.machine_id
                 ),
             ),

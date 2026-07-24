@@ -1763,7 +1763,7 @@ mod tests {
     fn test_ide_endpoint_decorate_api_headers() {
         let mut config = Config::default();
         config.region = "us-east-1".to_string();
-        config.kiro_version = "0.8.0".to_string();
+        config.kiro_version = Some("0.8.0".to_string());
 
         let mut credentials = KiroCredentials::default();
         credentials.profile_arn = Some("arn:aws:sso::123456789:profile/test".to_string());
@@ -1814,7 +1814,7 @@ mod tests {
     fn test_ide_endpoint_decorate_api_sets_tokentype() {
         let mut config = Config::default();
         config.region = "us-east-1".to_string();
-        config.kiro_version = "0.8.0".to_string();
+        config.kiro_version = Some("0.8.0".to_string());
 
         let mut credentials = KiroCredentials::default();
         credentials.auth_method = Some("api_key".to_string());
@@ -1837,7 +1837,7 @@ mod tests {
     fn test_ide_endpoint_decorate_mcp_includes_profile_arn_for_social_auth() {
         let mut config = Config::default();
         config.region = "us-east-1".to_string();
-        config.kiro_version = "0.8.0".to_string();
+        config.kiro_version = Some("0.8.0".to_string());
 
         let mut credentials = KiroCredentials::default();
         credentials.auth_method = Some("social".to_string());
@@ -1869,7 +1869,7 @@ mod tests {
     fn test_ide_endpoint_decorate_mcp_omits_profile_arn_for_idc_auth() {
         let mut config = Config::default();
         config.region = "us-east-1".to_string();
-        config.kiro_version = "0.8.0".to_string();
+        config.kiro_version = Some("0.8.0".to_string());
 
         let mut credentials = KiroCredentials::default();
         credentials.auth_method = Some("idc".to_string());

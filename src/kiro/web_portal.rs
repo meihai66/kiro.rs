@@ -22,7 +22,8 @@ const KIRO_API_BASE: &str = "https://app.kiro.dev/service/KiroWebPortalService/o
 #[allow(dead_code)]
 const SMITHY_PROTOCOL: &str = "rpc-v2-cbor";
 const AMZ_SDK_REQUEST: &str = "attempt=1; max=1";
-const X_AMZ_USER_AGENT: &str = "aws-sdk-js/1.0.0 kiro-rs/1.0.0";
+// 对齐真实 Kiro 客户端族，避免自曝代理身份（原值含 `kiro-rs/1.0.0`）。
+const X_AMZ_USER_AGENT: &str = "aws-sdk-js/1.0.0 KiroIDE-0.11.107";
 
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -29,8 +29,9 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_region: Option<String>,
 
-    #[serde(default = "default_kiro_version")]
-    pub kiro_version: String,
+    /// Kiro IDE 版本（UA 用）。留空时按凭据从 client_profile 池派生。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kiro_version: Option<String>,
 
     #[serde(default)]
     pub machine_id: Option<String>,
@@ -38,11 +39,13 @@ pub struct Config {
     #[serde(default)]
     pub api_key: Option<String>,
 
-    #[serde(default = "default_system_version")]
-    pub system_version: String,
+    /// 操作系统版本（UA 用，如 `darwin#24.6.0`）。留空时按凭据从 client_profile 池派生（永不 Linux）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_version: Option<String>,
 
-    #[serde(default = "default_node_version")]
-    pub node_version: String,
+    /// Node.js 版本（UA 用）。留空时按凭据从 client_profile 池派生。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_version: Option<String>,
 
     #[serde(default = "default_tls_backend")]
     pub tls_backend: TlsBackend,
@@ -674,19 +677,6 @@ fn default_region() -> String {
     "us-east-1".to_string()
 }
 
-fn default_kiro_version() -> String {
-    "0.11.107".to_string()
-}
-
-fn default_system_version() -> String {
-    const SYSTEM_VERSIONS: &[&str] = &["darwin#24.6.0", "win32#10.0.22631"];
-    SYSTEM_VERSIONS[fastrand::usize(..SYSTEM_VERSIONS.len())].to_string()
-}
-
-fn default_node_version() -> String {
-    "22.22.0".to_string()
-}
-
 fn default_count_tokens_auth_type() -> String {
     "x-api-key".to_string()
 }
@@ -878,11 +868,11 @@ impl Default for Config {
             port: default_port(),
             region: default_region(),
             api_region: None,
-            kiro_version: default_kiro_version(),
+            kiro_version: None,
             machine_id: None,
             api_key: None,
-            system_version: default_system_version(),
-            node_version: default_node_version(),
+            system_version: None,
+            node_version: None,
             tls_backend: default_tls_backend(),
             count_tokens_api_url: None,
             count_tokens_api_key: None,

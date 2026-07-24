@@ -2,9 +2,9 @@
 
 pub mod affinity;
 pub mod background_refresh;
+pub mod client_profile;
 pub mod cooldown;
 pub mod endpoint;
-pub mod fingerprint;
 pub mod machine_id;
 pub mod metrics;
 pub mod model;
