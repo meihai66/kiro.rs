@@ -323,7 +323,8 @@ KIRO_API_KEY=ksk_xxx ./kiro-rs -c config.json --credentials credentials.json
 说明：
 - API Key 凭据可与 OAuth 凭据混合放在多凭据数组中，同样参与优先级排序和故障转移
 - Admin 面板「添加凭据」选择 API Key 类型后，**支持粘贴多行批量导入**（每行一个 `ksk_` Key，自动去重、逐条验证）
-- Admin 的批量导入端点 `POST /api/admin/credentials/import-token-json` 也接受 `{"kiroApiKey": "ksk_xxx"}` 项（无需 refreshToken），批量导出同样会带上 API Key 凭据
+- 每行 Key 后可用 `|` 拼接内嵌代理：`ksk_xxx|host:port:user:pass`（也支持 `host:port` 或完整 URL `socks5://user:pass@host:port`），导入时该代理自动加入代理池并绑定到此凭据；`host:port` 列表格式的协议由面板上的「代理协议」选择器指定（默认 HTTP）
+- Admin 的批量导入端点 `POST /api/admin/credentials/import-token-json` 也接受 `{"kiroApiKey": "ksk_xxx"}` 项（无需 refreshToken），可附带 `proxy: {"url": "..."}` 内嵌代理；批量导出同样会带上 API Key 凭据
 - `authMethod: "api_key"` 但缺少 `kiroApiKey` 的凭据会在启动时自动禁用（`InvalidConfig`），修正配置后重启恢复
 
 ### Region 配置

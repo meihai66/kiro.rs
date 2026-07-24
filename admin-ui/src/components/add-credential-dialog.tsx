@@ -18,6 +18,43 @@ interface AddCredentialDialogProps {
 }
 
 type AuthMethod = 'social' | 'idc' | 'api_key'
+type ProxyScheme = 'http' | 'https' | 'socks5'
+
+interface ParsedApiKeyLine {
+  key: string
+  /** 内嵌代理 URL（可含 user:pass@，已百分号编码）；导入时自动入池并绑定 */
+  proxyUrl?: string
+  /** 代理来自 host:port[:user:pass] 列表格式（受协议选择器影响） */
+  listProxy?: boolean
+}
+
+// 解析一行 API Key：`ksk_xxx`，或 `|` 拼接代理：
+// `ksk_xxx|host:port:user:pass` / `ksk_xxx|host:port` / `ksk_xxx|scheme://user:pass@host:port`
+function parseApiKeyLine(
+  line: string,
+  scheme: ProxyScheme
+): { entry?: ParsedApiKeyLine; error?: string } {
+  const sep = line.indexOf('|')
+  const key = (sep === -1 ? line : line.slice(0, sep)).trim()
+  const proxyRaw = sep === -1 ? '' : line.slice(sep + 1).trim()
+  if (!key) return { error: '缺少 API Key' }
+  if (!proxyRaw) return { entry: { key } }
+  if (proxyRaw.includes('://')) return { entry: { key, proxyUrl: proxyRaw } }
+  const segs = proxyRaw.split(':')
+  const [host, port] = segs
+  const portNum = Number(port)
+  const badShape =
+    !host || !Number.isInteger(portNum) || portNum <= 0 || portNum > 65535 ||
+    (segs.length !== 2 && segs.length < 4)
+  if (badShape) {
+    return { error: `代理格式错误（期望 host:port:user:pass 或 host:port）: ${proxyRaw}` }
+  }
+  // user/pass 可能含特殊字符（pass 还可能含 ':'），编码进 URL，后端会解码
+  const user = segs[2] ?? ''
+  const pass = segs.slice(3).join(':')
+  const auth = user || pass ? `${encodeURIComponent(user)}:${encodeURIComponent(pass)}@` : ''
+  return { entry: { key, proxyUrl: `${scheme}://${auth}${host}:${portNum}`, listProxy: true } }
+}
 
 export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogProps) {
   const [refreshToken, setRefreshToken] = useState('')
@@ -31,19 +68,34 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
   const [machineId, setMachineId] = useState('')
   const [endpoint, setEndpoint] = useState('')
   const [autoBindProxy, setAutoBindProxy] = useState(true)
+  const [proxyScheme, setProxyScheme] = useState<ProxyScheme>('http')
 
   const { mutate, isPending: isAddPending } = useAddCredential()
   const { mutate: importMutate, isPending: isImportPending } = useImportTokenJson()
   const isPending = isAddPending || isImportPending
   const isApiKey = authMethod === 'api_key'
-  // API Key 模式支持批量：每行一个 ksk_ Key（去重后）
-  const apiKeys = [...new Set(
-    kiroApiKey
-      .split('\n')
-      .map((s) => s.trim())
-      .filter(Boolean)
-  )]
-  const isBatch = isApiKey && apiKeys.length > 1
+  // API Key 模式支持批量：每行一个 ksk_ Key，可 `|` 拼接代理（按 Key 去重，保留首次出现）
+  const parsedLines = kiroApiKey
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((line) => ({ line, ...parseApiKeyLine(line, proxyScheme) }))
+  const lineErrors = parsedLines.filter((p) => p.error)
+  const apiKeyEntries: ParsedApiKeyLine[] = []
+  {
+    const seenKeys = new Set<string>()
+    for (const p of parsedLines) {
+      if (p.entry && !seenKeys.has(p.entry.key)) {
+        seenKeys.add(p.entry.key)
+        apiKeyEntries.push(p.entry)
+      }
+    }
+  }
+  const proxyCount = apiKeyEntries.filter((e) => e.proxyUrl).length
+  const hasListProxy = apiKeyEntries.some((e) => e.listProxy)
+  const isBatch = isApiKey && apiKeyEntries.length > 1
+  // 批量或带内嵌代理时走 import-token-json 管线（add-credential API 不支持内嵌代理）
+  const useImportPipeline = isApiKey && (isBatch || proxyCount > 0)
 
   const resetForm = () => {
     setRefreshToken('')
@@ -57,35 +109,46 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
     setMachineId('')
     setEndpoint('')
     setAutoBindProxy(true)
+    setProxyScheme('http')
   }
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
 
     if (isApiKey) {
-      if (apiKeys.length === 0) {
+      if (lineErrors.length > 0) {
+        const detail = lineErrors
+          .slice(0, 3)
+          .map((p) => p.error)
+          .join('\n')
+        toast.error(`${lineErrors.length} 行格式错误\n${detail}`, { duration: 8000 })
+        return
+      }
+      if (apiKeyEntries.length === 0) {
         toast.error('请输入 Kiro API Key')
         return
       }
-      if (isBatch) {
-        // 批量走 import-token-json 管线（逐条验证 + 去重 + 自动绑代理）
+      if (useImportPipeline) {
+        // 批量/带代理走 import-token-json 管线（逐条验证 + 去重 + 内嵌代理入池强绑 / 自动绑代理）
         importMutate(
           {
             dryRun: false,
-            items: apiKeys.map((key) => ({
-              kiroApiKey: key,
+            items: apiKeyEntries.map((entry) => ({
+              kiroApiKey: entry.key,
               authMethod: 'api_key',
               priority: Number.isFinite(parseInt(priority)) ? parseInt(priority) : 10,
               region: region.trim() || undefined,
               apiRegion: apiRegion.trim() || undefined,
               endpoint: endpoint.trim() || undefined,
+              machineId: apiKeyEntries.length === 1 ? machineId.trim() || undefined : undefined,
+              proxy: entry.proxyUrl ? { url: entry.proxyUrl } : undefined,
             })),
           },
           {
             onSuccess: (data) => {
               const { added, skipped, invalid } = data.summary
               if (added > 0) {
-                toast.success(`批量导入完成：新增 ${added} 条${skipped > 0 ? `，跳过 ${skipped} 条（已存在）` : ''}`)
+                toast.success(`导入完成：新增 ${added} 条${skipped > 0 ? `，跳过 ${skipped} 条（已存在）` : ''}`)
               } else {
                 toast.warning(`没有新增凭据：跳过 ${skipped} 条，失败 ${invalid} 条`)
               }
@@ -123,7 +186,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
     mutate(
       {
         refreshToken: isApiKey ? undefined : refreshToken.trim(),
-        kiroApiKey: isApiKey ? apiKeys[0] : undefined,
+        kiroApiKey: isApiKey ? apiKeyEntries[0]?.key : undefined,
         authMethod,
         region: region.trim() || undefined,
         apiRegion: apiRegion.trim() || undefined,
@@ -165,17 +228,45 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
                 <textarea
                   id="kiroApiKey"
                   rows={4}
-                  placeholder={'格式: ksk_xxxxxxxx\n每行一个 Key，多行即批量导入'}
+                  placeholder={'格式: ksk_xxxxxxxx\n带代理: ksk_xxxx|host:port:user:pass\n每行一个 Key，多行即批量导入'}
                   value={kiroApiKey}
                   onChange={(e) => setKiroApiKey(e.target.value)}
                   disabled={isPending}
                   className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
                 />
                 <p className="text-xs text-muted-foreground">
-                  {isBatch
-                    ? `批量模式：共 ${apiKeys.length} 个 Key，将逐条验证并去重导入；Machine ID 自动派生、代理自动分配`
-                    : '支持粘贴多行批量导入，每行一个 ksk_ Key'}
+                  {apiKeyEntries.length > 0
+                    ? `共 ${apiKeyEntries.length} 个 Key` +
+                      (proxyCount > 0 ? `，${proxyCount} 个带内嵌代理（自动入池并绑定）` : '') +
+                      (isBatch ? '；逐条验证并去重导入，Machine ID 自动派生' : '')
+                    : '每行一个 ksk_ Key；可用 | 拼接代理（host:port:user:pass / host:port / 完整 URL），导入时自动加入代理池并绑定'}
                 </p>
+                {lineErrors.length > 0 && (
+                  <p className="text-xs text-red-500">
+                    {lineErrors.length} 行格式错误：{lineErrors[0].error}
+                  </p>
+                )}
+                {hasListProxy && (
+                  <div className="flex items-center gap-2">
+                    <label htmlFor="proxyScheme" className="text-xs text-muted-foreground shrink-0">
+                      代理协议
+                    </label>
+                    <select
+                      id="proxyScheme"
+                      value={proxyScheme}
+                      onChange={(e) => setProxyScheme(e.target.value as ProxyScheme)}
+                      disabled={isPending}
+                      className="h-8 rounded-md border border-input bg-background px-2 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <option value="http">HTTP</option>
+                      <option value="https">HTTPS</option>
+                      <option value="socks5">SOCKS5</option>
+                    </select>
+                    <span className="text-xs text-muted-foreground">
+                      应用于 host:port 列表格式的代理行
+                    </span>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="space-y-2">
@@ -334,9 +425,10 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
                   type="checkbox"
                   checked={!autoBindProxy}
                   onChange={(e) => setAutoBindProxy(!e.target.checked)}
-                  disabled={isPending || isBatch}
+                  disabled={isPending || useImportPipeline}
                 />
-                暂不绑定代理（导入后手动指派）{isBatch && '（批量模式固定自动分配）'}
+                暂不绑定代理（导入后手动指派）
+                {useImportPipeline && (proxyCount > 0 ? '（带内嵌代理时固定绑定该代理）' : '（批量模式固定自动分配）')}
               </label>
               <p className="text-xs text-muted-foreground">
                 启用代理池时：默认勾选将自动从池里分配最优代理；勾选此项则导入后凭据保持禁用，需到凭据列表手动绑定。代理池未启用时此选项无影响。
@@ -354,7 +446,7 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
               取消
             </Button>
             <Button type="submit" disabled={isPending}>
-              {isPending ? '添加中...' : isBatch ? `批量导入 ${apiKeys.length} 条` : '添加'}
+              {isPending ? '添加中...' : isBatch ? `批量导入 ${apiKeyEntries.length} 条` : '添加'}
             </Button>
           </DialogFooter>
         </form>

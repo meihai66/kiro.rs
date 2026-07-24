@@ -14,7 +14,7 @@ import { Switch } from '@/components/ui/switch'
 import { useImportTokenJson, useDeleteCredential } from '@/hooks/use-credentials'
 import { getCredentialBalance, setCredentialDisabled } from '@/api/credentials'
 import { extractErrorMessage } from '@/lib/utils'
-import type { TokenJsonItem, ImportItemResult, ImportSummary } from '@/types/api'
+import type { TokenJsonItem, TokenJsonProxyItem, ImportItemResult, ImportSummary } from '@/types/api'
 
 interface ImportTokenJsonDialogProps {
   open: boolean
@@ -146,6 +146,29 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
     return item
   }, [pickEmail])
 
+  // 内嵌代理（v1.1+ account.proxy）→ 透传给后端，由后端加入代理池并强制绑定
+  const pickProxy = useCallback((obj: Record<string, unknown>): TokenJsonProxyItem | undefined => {
+    const proxyRaw = obj.proxy as Record<string, unknown> | undefined
+    if (!proxyRaw || typeof proxyRaw !== 'object' || typeof proxyRaw.url !== 'string') {
+      return undefined
+    }
+    return {
+      url: proxyRaw.url,
+      type: typeof proxyRaw.type === 'string' ? proxyRaw.type : undefined,
+      expires_at:
+        typeof proxyRaw.expires_at === 'string' ||
+        typeof proxyRaw.expires_at === 'number'
+          ? proxyRaw.expires_at
+          : undefined,
+      expiresAt:
+        typeof proxyRaw.expiresAt === 'string' ||
+        typeof proxyRaw.expiresAt === 'number'
+          ? proxyRaw.expiresAt
+          : undefined,
+      label: typeof proxyRaw.label === 'string' ? proxyRaw.label : undefined,
+    }
+  }, [])
+
   // 将 KAM 账号结构展平为 TokenJsonItem
   const flattenKamAccount = useCallback((account: Record<string, unknown>): TokenJsonItem | null => {
     const cred = account.credentials as Record<string, unknown> | undefined
@@ -155,27 +178,7 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
     // 跳过 error 状态的账号
     if (account.status === 'error') return null
     const authMethod = cred.authMethod as string | undefined
-    // 内嵌代理（v1.1+ account.proxy）→ 透传给后端，由后端加入代理池并强制绑定
-    const proxyRaw = account.proxy as Record<string, unknown> | undefined
-    const proxy =
-      proxyRaw && typeof proxyRaw === 'object' && typeof proxyRaw.url === 'string'
-        ? {
-            url: proxyRaw.url,
-            type: typeof proxyRaw.type === 'string' ? proxyRaw.type : undefined,
-            expires_at:
-              typeof proxyRaw.expires_at === 'string' ||
-              typeof proxyRaw.expires_at === 'number'
-                ? proxyRaw.expires_at
-                : undefined,
-            expiresAt:
-              typeof proxyRaw.expiresAt === 'string' ||
-              typeof proxyRaw.expiresAt === 'number'
-                ? proxyRaw.expiresAt
-                : undefined,
-            label:
-              typeof proxyRaw.label === 'string' ? proxyRaw.label : undefined,
-          }
-        : undefined
+    const proxy = pickProxy(account)
     return {
       refreshToken: cred.refreshToken.trim(),
       clientId: cred.clientId as string | undefined,
@@ -186,7 +189,7 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
       email: pickEmail(account),
       proxy,
     }
-  }, [pickEmail])
+  }, [pickEmail, pickProxy])
 
   // 解析 JSON（兼容 Token JSON / KAM 导出 / 批量导入格式）
   const parseJson = useCallback((text: string): TokenJsonItem[] | null => {
@@ -231,6 +234,7 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
             apiRegion: typeof obj.apiRegion === 'string' ? obj.apiRegion : undefined,
             machineId: typeof obj.machineId === 'string' ? obj.machineId : undefined,
             email: pickEmail(obj),
+            proxy: pickProxy(obj),
           })
           continue
         }
@@ -262,7 +266,7 @@ export function ImportTokenJsonDialog({ open, onOpenChange }: ImportTokenJsonDia
       toast.error('JSON 格式无效')
       return null
     }
-  }, [flattenKamAccount, normalizeKamAccount, pickEmail])
+  }, [flattenKamAccount, normalizeKamAccount, pickEmail, pickProxy])
 
   const readJsonFiles = useCallback(async (files: FileList | File[]) => {
     const jsonFiles = Array.from(files).filter(file => file.name.endsWith('.json'))
