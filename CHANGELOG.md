@@ -1,5 +1,15 @@
 # Changelog
 
+## [v1.1.82] - 2026-07-24
+
+### 新增
+
+- **上游请求指纹按凭据派生桌面平台** — 移植 Kiro-Go 方案，新增 `client_profile` 模块：以凭据 `machineId` 为稳定种子从加权池派生 `{systemVersion, kiroVersion, nodeVersion}`，同账号跨请求/跨重启稳定，平台池仅含真实 macOS/Windows 构建号，永不输出 Linux；IDE 数据面/usage、Social/IdC 刷新、ListAvailableProfiles 的 UA 统一走派生。`config` 的 `kiro_version`/`system_version`/`node_version` 改为 `Option`（留空即派生，显式配置优先），移除随机全局单值行为 (`src/kiro/client_profile.rs`, `src/kiro/endpoint/ide.rs`, `src/kiro/token_manager.rs`, `src/kiro/provider.rs`, `src/model/config.rs`)
+
+### 重构
+
+- **清理设备指纹死代码** — 删除未接线的 `kiro/fingerprint.rs` 及 `CredentialEntry.fingerprint` 字段，修正 `web_portal` 自曝身份的 UA（`kiro-rs/1.0.0` → KiroIDE 客户端族） (`src/kiro/fingerprint.rs`, `src/kiro/web_portal.rs`)
+
 ## [v1.1.81] - 2026-07-22
 
 ### 新增
