@@ -829,6 +829,115 @@ impl Store {
 
         Ok(deleted)
     }
+
+    // ============ Webhook logs ============
+
+    /// 写入一条 Webhook 接收日志，并把表修剪到最新 [`WEBHOOK_LOG_MAX_COUNT`] 条。
+    /// 两条语句同一事务，保证插入与修剪一次提交。返回新行 id。
+    pub fn insert_webhook_log(&self, log: &WebhookLogInsert) -> Result<i64> {
+        let conn = self.conn()?;
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO webhook_logs(at, source_ip, status_code, received, added, skipped, \
+             invalid, summary, request_headers, request_body, response_body) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                log.at.to_rfc3339(),
+                log.source_ip.as_deref(),
+                log.status_code as i64,
+                log.received as i64,
+                log.added as i64,
+                log.skipped as i64,
+                log.invalid as i64,
+                log.summary.as_str(),
+                log.request_headers.as_deref(),
+                log.request_body.as_deref(),
+                log.response_body.as_deref(),
+            ],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.execute(
+            "DELETE FROM webhook_logs WHERE id NOT IN (\
+                SELECT id FROM webhook_logs ORDER BY id DESC LIMIT ?1\
+             )",
+            params![WEBHOOK_LOG_MAX_COUNT as i64],
+        )?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// 列表查询：不取 request_body / response_body 大字段。返回 (条目, 总数)。
+    pub fn list_webhook_logs(
+        &self,
+        limit: u32,
+        offset: u32,
+    ) -> Result<(Vec<WebhookLogSummary>, u64)> {
+        let conn = self.conn()?;
+        let total: i64 = conn.query_row("SELECT COUNT(*) FROM webhook_logs", [], |r| r.get(0))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, at, source_ip, status_code, received, added, skipped, invalid, summary \
+             FROM webhook_logs ORDER BY id DESC LIMIT ?1 OFFSET ?2",
+        )?;
+        let rows = stmt.query_map(params![limit.min(500) as i64, offset as i64], |r| {
+            let at_str: String = r.get(1)?;
+            Ok(WebhookLogSummary {
+                id: r.get(0)?,
+                at: parse_dt(&at_str).unwrap_or_else(Utc::now),
+                source_ip: r.get(2)?,
+                status_code: r.get::<_, i64>(3)? as u16,
+                received: r.get::<_, i64>(4)? as u32,
+                added: r.get::<_, i64>(5)? as u32,
+                skipped: r.get::<_, i64>(6)? as u32,
+                invalid: r.get::<_, i64>(7)? as u32,
+                summary: r.get(8)?,
+            })
+        })?;
+        let items: Vec<WebhookLogSummary> = rows.collect::<rusqlite::Result<_>>()?;
+        Ok((items, total as u64))
+    }
+
+    /// 详情：含完整原始请求体与响应体
+    pub fn get_webhook_log(&self, id: i64) -> Result<Option<WebhookLogRow>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, at, source_ip, status_code, received, added, skipped, invalid, summary, \
+             request_headers, request_body, response_body FROM webhook_logs WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query(params![id])?;
+        if let Some(r) = rows.next()? {
+            let at_str: String = r.get(1)?;
+            Ok(Some(WebhookLogRow {
+                summary_fields: WebhookLogSummary {
+                    id: r.get(0)?,
+                    at: parse_dt(&at_str).unwrap_or_else(Utc::now),
+                    source_ip: r.get(2)?,
+                    status_code: r.get::<_, i64>(3)? as u16,
+                    received: r.get::<_, i64>(4)? as u32,
+                    added: r.get::<_, i64>(5)? as u32,
+                    skipped: r.get::<_, i64>(6)? as u32,
+                    invalid: r.get::<_, i64>(7)? as u32,
+                    summary: r.get(8)?,
+                },
+                request_headers: r.get(9)?,
+                request_body: r.get(10)?,
+                response_body: r.get(11)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn delete_webhook_log(&self, id: i64) -> Result<bool> {
+        let conn = self.conn()?;
+        let n = conn.execute("DELETE FROM webhook_logs WHERE id = ?1", params![id])?;
+        Ok(n > 0)
+    }
+
+    pub fn clear_webhook_logs(&self) -> Result<u64> {
+        let conn = self.conn()?;
+        let n = conn.execute("DELETE FROM webhook_logs", [])?;
+        Ok(n as u64)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -924,6 +1033,53 @@ pub struct ErrorLogRow {
     pub user_id: Option<String>,
     pub request_id: Option<String>,
     pub disable_reason: Option<String>,
+}
+
+// ============ Webhook logs ============
+
+/// Webhook 接收日志最多保留的最新条数（表大小封顶，无需后台清理任务）
+pub const WEBHOOK_LOG_MAX_COUNT: u64 = 500;
+
+/// 写入 Webhook 接收日志的输入结构
+#[derive(Debug, Clone)]
+pub struct WebhookLogInsert {
+    pub at: DateTime<Utc>,
+    /// 来源 IP（取 X-Forwarded-For 首段 / X-Real-IP / 连接对端）
+    pub source_ip: Option<String>,
+    /// 本次返回给推送方的 HTTP 状态码
+    pub status_code: u16,
+    pub received: u32,
+    pub added: u32,
+    pub skipped: u32,
+    pub invalid: u32,
+    pub summary: String,
+    pub request_headers: Option<String>,
+    /// 原始请求体（按 [`crate::webhook::WEBHOOK_LOG_MAX_BODY_BYTES`] 截断）
+    pub request_body: Option<String>,
+    pub response_body: Option<String>,
+}
+
+/// 列表项（不含大字段）
+#[derive(Debug, Clone)]
+pub struct WebhookLogSummary {
+    pub id: i64,
+    pub at: DateTime<Utc>,
+    pub source_ip: Option<String>,
+    pub status_code: u16,
+    pub received: u32,
+    pub added: u32,
+    pub skipped: u32,
+    pub invalid: u32,
+    pub summary: String,
+}
+
+/// 详情（含原始请求体与响应体）
+#[derive(Debug, Clone)]
+pub struct WebhookLogRow {
+    pub summary_fields: WebhookLogSummary,
+    pub request_headers: Option<String>,
+    pub request_body: Option<String>,
+    pub response_body: Option<String>,
 }
 
 // ============ row mappers ============
@@ -1246,6 +1402,95 @@ mod tests {
         let rl = stats.iter().find(|s| s.error_kind == "rate_limit").unwrap();
         assert_eq!(rl.total, 2);
 
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn webhook_log(status: u16, body: &str) -> WebhookLogInsert {
+        WebhookLogInsert {
+            at: Utc::now(),
+            source_ip: Some("203.0.113.9".to_string()),
+            status_code: status,
+            received: 2,
+            added: 1,
+            skipped: 1,
+            invalid: 0,
+            summary: "收到 2 行".to_string(),
+            request_headers: Some("content-type: application/json".to_string()),
+            request_body: Some(body.to_string()),
+            response_body: Some("{}".to_string()),
+        }
+    }
+
+    #[test]
+    fn test_webhook_log_crud_and_retention() {
+        let (store, path) = temp_store();
+
+        let id = store
+            .insert_webhook_log(&webhook_log(200, "{\"keys\":[\"ksk_a\"]}"))
+            .unwrap();
+        let detail = store.get_webhook_log(id).unwrap().expect("detail");
+        assert_eq!(
+            detail.request_body.as_deref(),
+            Some("{\"keys\":[\"ksk_a\"]}")
+        );
+        assert_eq!(detail.summary_fields.status_code, 200);
+        assert_eq!(
+            detail.summary_fields.source_ip.as_deref(),
+            Some("203.0.113.9")
+        );
+        assert_eq!(
+            (detail.summary_fields.received, detail.summary_fields.added),
+            (2, 1)
+        );
+
+        // 列表倒序 + 总数
+        store
+            .insert_webhook_log(&webhook_log(400, "bad json"))
+            .unwrap();
+        let (items, total) = store.list_webhook_logs(10, 0).unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].status_code, 400, "应按 id 倒序");
+
+        // 分页
+        let (page2, _) = store.list_webhook_logs(1, 1).unwrap();
+        assert_eq!(page2.len(), 1);
+        assert_eq!(page2[0].id, id);
+
+        // 删除单条 + 不存在返回 false
+        assert!(store.delete_webhook_log(id).unwrap());
+        assert!(!store.delete_webhook_log(id).unwrap());
+        assert_eq!(store.list_webhook_logs(10, 0).unwrap().1, 1);
+
+        // 清空
+        assert_eq!(store.clear_webhook_logs().unwrap(), 1);
+        assert_eq!(store.list_webhook_logs(10, 0).unwrap().1, 0);
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_webhook_log_trims_to_max_count() {
+        let (store, path) = temp_store();
+        for i in 0..(WEBHOOK_LOG_MAX_COUNT + 5) {
+            store
+                .insert_webhook_log(&webhook_log(200, &format!("body {}", i)))
+                .unwrap();
+        }
+        let (items, total) = store.list_webhook_logs(1, 0).unwrap();
+        assert_eq!(total, WEBHOOK_LOG_MAX_COUNT, "插入时应修剪到上限");
+        // 最新一条保留
+        assert_eq!(
+            store
+                .get_webhook_log(items[0].id)
+                .unwrap()
+                .unwrap()
+                .request_body
+                .as_deref(),
+            Some(format!("body {}", WEBHOOK_LOG_MAX_COUNT + 4).as_str())
+        );
         drop(store);
         let _ = std::fs::remove_file(&path);
     }

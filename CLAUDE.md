@@ -105,6 +105,12 @@ AppState {
 **Admin API** (需配置 `adminApiKey`):
 - 凭据 CRUD、状态监控、余额查询
 
+**Webhook API** (需另配 `webhookApiKey`，且 Admin 已启用):
+- `POST /api/webhook/import-keys` - 外部系统自动推送 `ksk_*` Key（支持 `ksk_xxx|host:port:user:pass` 行内代理），代理入池强绑、验证去重后直接启用参与调度（`src/webhook.rs`，复用 `import_token_json_with_options` 管线的 `force_enable`）
+- 路由始终挂载（Admin 启用时），`webhookEnabled` / `webhookApiKey` 在请求时从共享 Config 读取，管理界面改完即时生效
+- 用 `Bytes` 而非 `Json<T>` 提取请求体：先原样落 `webhook_logs` 表再解析，畸形 JSON 的推送也能在界面看到原文（单体上限 64KB，认证头只记 `<present>`；表按 `WEBHOOK_LOG_MAX_COUNT`=500 在 insert 时修剪）
+- 管理端点：`GET|POST /api/admin/webhook/config`、`GET /api/admin/webhook/logs`、`GET|DELETE /api/admin/webhook/logs/{id}`、`POST /api/admin/webhook/logs/clear`；前端页面 `admin-ui/src/pages/webhook-page.tsx`
+
 ## 重要注意事项
 
 1. **构建顺序**: 必须先构建前端 `admin-ui`，再编译 Rust 后端（静态文件通过 `rust-embed` 嵌入，derive 宏为 `#[derive(Embed)]`）

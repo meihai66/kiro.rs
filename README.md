@@ -186,6 +186,9 @@ docker-compose up
 | `proxyUsername` | string | - | 代理用户名 |
 | `proxyPassword` | string | - | 代理密码 |
 | `adminApiKey` | string | - | Admin API 密钥，配置后启用凭据管理 API 和 Web 管理界面 |
+| `webhookApiKey` | string | - | Webhook API 密钥，配置后启用 `POST /api/webhook/import-keys`（外部系统自动推送 Key 入池，需同时配置 `adminApiKey`；可在管理界面 Webhook 页生成/修改） |
+| `webhookEnabled` | boolean | `true` | Webhook 接口开关，可在管理界面热切换（关闭时接口返回 403） |
+| `webhookLogEnabled` | boolean | `true` | 是否记录 Webhook 接收到的原始请求体（管理界面查阅用，最多留存 500 条） |
 | `credentialRpm` | number | - | 单凭据目标 RPM（每分钟请求数），用于凭据级节流/分流；`0` 或未配置表示使用内置默认策略 |
 | `promptCacheTtlSeconds` | number | `300` | 本地 Prompt Cache TTL（秒） |
 | `promptCacheAccountingEnabled` | boolean | `true` | 是否启用本地 Prompt Cache usage 记账；关闭后不再输出或扣减 cache token |
@@ -326,6 +329,37 @@ KIRO_API_KEY=ksk_xxx ./kiro-rs -c config.json --credentials credentials.json
 - 每行 Key 后可用 `|` 拼接内嵌代理：`ksk_xxx|host:port:user:pass`（也支持 `host:port` 或完整 URL `socks5://user:pass@host:port`），导入时该代理自动加入代理池并绑定到此凭据；`host:port` 列表格式的协议由面板上的「代理协议」选择器指定（默认 HTTP）
 - Admin 的批量导入端点 `POST /api/admin/credentials/import-token-json` 也接受 `{"kiroApiKey": "ksk_xxx"}` 项（无需 refreshToken），可附带 `proxy: {"url": "..."}` 内嵌代理；批量导出同样会带上 API Key 凭据
 - `authMethod: "api_key"` 但缺少 `kiroApiKey` 的凭据会在启动时自动禁用（`InvalidConfig`），修正配置后重启恢复
+
+### Webhook 自动推送 Key（可选）
+
+配置 `webhookApiKey`（需同时配置 `adminApiKey`）后启用 `POST /api/webhook/import-keys`，供发卡/采集等外部系统自动推送 `ksk_*` Key：解析行内代理 → 代理自动入池并强制绑定 → 逐条验证去重 → **导入成功直接启用参与调度**（忽略「导入默认禁用」配置；绑定代理失败的凭据仍保持禁用）。
+
+管理界面 **Webhook** 页可直接开关接口、生成/修改密钥、查看每次推送收到的原始请求体与返回体（开关与密钥改完即时生效，无需重启）。
+
+```bash
+curl -X POST http://127.0.0.1:8990/api/webhook/import-keys \
+  -H "x-api-key: <webhookApiKey>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "keys": [
+      "ksk_xxx|1.2.3.4:8080:user:pass",
+      "ksk_yyy|socks5://user:pass@5.6.7.8:1080",
+      "ksk_zzz"
+    ],
+    "priority": 10,
+    "proxyScheme": "http"
+  }'
+```
+
+说明：
+- 认证支持 `x-api-key` 或 `Authorization: Bearer <webhookApiKey>`（常量时间比较）
+- `keys` 接受字符串数组或多行字符串（每行一条），行格式与管理面板批量导入一致：`ksk_xxx`、`ksk_xxx|host:port`、`ksk_xxx|host:port:user:pass`、`ksk_xxx|scheme://user:pass@host:port`
+- `proxyScheme`（默认 `http`，可选 `https` / `socks5` / `socks5h`）仅作用于 `host:port[:user:pass]` 列表格式的代理行
+- 可选字段：`priority`（默认 10）、`region`、`apiRegion`、`endpoint`（`ide` / `cli`）
+- 无内嵌代理的 Key 在代理池启用时自动从池中分配空闲代理；池中无可用代理时该条导入失败
+- 响应返回 `summary`（added / skipped / invalid 计数）、逐条 `items` 结果和行解析错误 `lineErrors`（Key 已脱敏），已存在的 Key 自动跳过
+- 每次接收会落库一条记录（原始请求体 + 返回体 + 来源 IP，认证头只记「是否携带」不存值；单体最大 64KB，超出截断），可在管理界面 Webhook 页查看/删除/清空
+- 相关 Admin API：`GET|POST /api/admin/webhook/config`（开关 / 密钥）、`GET /api/admin/webhook/logs`、`GET|DELETE /api/admin/webhook/logs/{id}`、`POST /api/admin/webhook/logs/clear`
 
 ### Region 配置
 
@@ -471,6 +505,10 @@ RUST_LOG=debug ./target/release/kiro-rs
 
 - **Admin UI**
   - `GET /admin` - 访问管理页面（需要在编译前构建 `admin-ui/dist`）
+
+- **Webhook API**（需另配 `webhookApiKey`，认证方式同上）
+  - `POST /api/webhook/import-keys` - 外部系统自动推送 `ksk_*` Key：绑定代理、验证后直接启用入池（详见「Webhook 自动推送 Key」一节）
+  - 管理端点（Admin 认证）：`GET|POST /api/admin/webhook/config`、`GET /api/admin/webhook/logs`、`GET|DELETE /api/admin/webhook/logs/:id`、`POST /api/admin/webhook/logs/clear`
 
 ## 注意事项
 

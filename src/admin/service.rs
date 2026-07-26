@@ -79,14 +79,39 @@ fn mask_key(key: &str) -> String {
 }
 
 fn generate_api_key() -> String {
+    generate_key_with_prefix("sk-kiro-")
+}
+
+/// Webhook 密钥用独立前缀，便于在日志/配置里与下游 API Key 区分
+fn generate_webhook_key() -> String {
+    generate_key_with_prefix("sk-webhook-")
+}
+
+fn generate_key_with_prefix(prefix: &str) -> String {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     let mut bytes = [0u8; 30];
     for b in bytes.iter_mut() {
         *b = fastrand::u8(..);
     }
-    let suffix = URL_SAFE_NO_PAD.encode(bytes);
-    format!("sk-kiro-{}", suffix)
+    format!("{}{}", prefix, URL_SAFE_NO_PAD.encode(bytes))
+}
+
+/// storage 行 → API 响应项
+fn webhook_log_summary_item(
+    row: crate::storage::WebhookLogSummary,
+) -> super::types::WebhookLogSummaryItem {
+    super::types::WebhookLogSummaryItem {
+        id: row.id,
+        at: row.at,
+        source_ip: row.source_ip,
+        status_code: row.status_code,
+        received: row.received,
+        added: row.added,
+        skipped: row.skipped,
+        invalid: row.invalid,
+        summary: row.summary,
+    }
 }
 
 impl AdminService {
@@ -782,6 +807,146 @@ impl AdminService {
             .clear_error_logs(before)
             .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
         Ok(super::types::ClearErrorLogsResponse { deleted })
+    }
+
+    // ============ Webhook 管理 ============
+
+    /// Webhook 当前配置（开关 / 密钥 / 日志开关）
+    pub fn get_webhook_config(&self) -> super::types::WebhookConfigResponse {
+        let cfg = self.config.read();
+        let key = cfg
+            .webhook_api_key
+            .as_ref()
+            .map(|k| k.trim().to_string())
+            .unwrap_or_default();
+        super::types::WebhookConfigResponse {
+            enabled: cfg.webhook_enabled,
+            log_enabled: cfg.webhook_log_enabled,
+            has_api_key: !key.is_empty(),
+            api_key_masked: if key.is_empty() {
+                String::new()
+            } else {
+                mask_key(&key)
+            },
+            api_key: key,
+            endpoint_path: "/api/webhook/import-keys".to_string(),
+            log_max_count: crate::storage::WEBHOOK_LOG_MAX_COUNT,
+        }
+    }
+
+    /// 更新 Webhook 配置。持久化成功后即时生效（webhook 中间件请求时读同一份 Config）。
+    pub fn update_webhook_config(
+        &self,
+        req: &super::types::UpdateWebhookConfigRequest,
+    ) -> Result<super::types::WebhookConfigResponse, AdminServiceError> {
+        {
+            let mut cfg = self.config.write();
+
+            // 先算出目标密钥，再判断「启用但无密钥」，避免同一请求里改开关+设密钥被误拒
+            if req.regenerate_api_key.unwrap_or(false) {
+                cfg.webhook_api_key = Some(generate_webhook_key());
+            } else if let Some(key) = &req.api_key {
+                let trimmed = key.trim();
+                cfg.webhook_api_key = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                };
+            }
+
+            if let Some(enabled) = req.enabled {
+                if enabled
+                    && cfg
+                        .webhook_api_key
+                        .as_ref()
+                        .map(|k| k.trim().is_empty())
+                        .unwrap_or(true)
+                {
+                    return Err(AdminServiceError::InvalidRequest(
+                        "启用 Webhook 前需先配置密钥".into(),
+                    ));
+                }
+                cfg.webhook_enabled = enabled;
+            }
+
+            if let Some(log_enabled) = req.log_enabled {
+                cfg.webhook_log_enabled = log_enabled;
+            }
+
+            cfg.save()
+                .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        }
+        Ok(self.get_webhook_config())
+    }
+
+    pub fn list_webhook_logs(
+        &self,
+        query: &super::types::ListWebhookLogsQuery,
+    ) -> Result<super::types::WebhookLogListResponse, AdminServiceError> {
+        let store = self.require_store("Webhook 接收日志")?;
+        let limit = query.limit.clamp(1, 500);
+        let (rows, total) = store
+            .list_webhook_logs(limit, query.offset)
+            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        Ok(super::types::WebhookLogListResponse {
+            total,
+            limit,
+            offset: query.offset,
+            items: rows.into_iter().map(webhook_log_summary_item).collect(),
+        })
+    }
+
+    pub fn get_webhook_log(
+        &self,
+        id: i64,
+    ) -> Result<super::types::WebhookLogDetail, AdminServiceError> {
+        let store = self.require_store("Webhook 接收日志")?;
+        let row = store
+            .get_webhook_log(id)
+            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?
+            .ok_or(AdminServiceError::ResourceNotFound {
+                resource: "Webhook 日志",
+                id,
+            })?;
+        Ok(super::types::WebhookLogDetail {
+            summary_fields: webhook_log_summary_item(row.summary_fields),
+            request_headers: row.request_headers,
+            request_body: row.request_body,
+            response_body: row.response_body,
+        })
+    }
+
+    pub fn delete_webhook_log(&self, id: i64) -> Result<(), AdminServiceError> {
+        let store = self.require_store("Webhook 接收日志")?;
+        let removed = store
+            .delete_webhook_log(id)
+            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        if !removed {
+            return Err(AdminServiceError::ResourceNotFound {
+                resource: "Webhook 日志",
+                id,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn clear_webhook_logs(
+        &self,
+    ) -> Result<super::types::ClearErrorLogsResponse, AdminServiceError> {
+        let store = self.require_store("Webhook 接收日志")?;
+        let deleted = store
+            .clear_webhook_logs()
+            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        Ok(super::types::ClearErrorLogsResponse { deleted })
+    }
+
+    fn require_store(
+        &self,
+        feature: &str,
+    ) -> Result<&Arc<crate::storage::Store>, AdminServiceError> {
+        self.store.as_ref().ok_or_else(|| {
+            AdminServiceError::InvalidRequest(format!("{feature}功能需要 SQLite store"))
+        })
     }
 
     fn require_proxy_pool(&self) -> Result<Arc<ProxyPool>, AdminServiceError> {
@@ -1765,6 +1930,17 @@ impl AdminService {
     /// - BuilderId/builder-id/idc → idc
     /// - Social/social → social
     pub async fn import_token_json(&self, req: ImportTokenJsonRequest) -> ImportTokenJsonResponse {
+        self.import_token_json_with_options(req, false).await
+    }
+
+    /// 批量导入 token.json，`force_enable=true` 时忽略「导入默认禁用」配置，
+    /// 新凭据验证通过并绑好代理后直接启用（Webhook 自动推送场景）。
+    /// 绑定代理失败导致的 disabled 不受影响，仍保持禁用。
+    pub async fn import_token_json_with_options(
+        &self,
+        req: ImportTokenJsonRequest,
+        force_enable: bool,
+    ) -> ImportTokenJsonResponse {
         let items = req.items.into_vec();
         let dry_run = req.dry_run;
 
@@ -1774,7 +1950,9 @@ impl AdminService {
         let mut invalid = 0usize;
 
         for (index, item) in items.into_iter().enumerate() {
-            let result = self.process_token_json_item(index, item, dry_run).await;
+            let result = self
+                .process_token_json_item(index, item, dry_run, force_enable)
+                .await;
             match result.action {
                 ImportAction::Added => added += 1,
                 ImportAction::Skipped => skipped += 1,
@@ -1800,6 +1978,7 @@ impl AdminService {
         index: usize,
         item: TokenJsonItem,
         dry_run: bool,
+        force_enable: bool,
     ) -> ImportItemResult {
         // 生成指纹（用于识别和去重）
         let fingerprint = Self::generate_fingerprint(&item);
@@ -2040,7 +2219,7 @@ impl AdminService {
             }
         }
         // 配置开启时：新凭据默认置 disabled，避免未验证就进调度
-        if reason.is_none() && self.config.read().import_disabled_by_default {
+        if reason.is_none() && !force_enable && self.config.read().import_disabled_by_default {
             let _ = self.token_manager.set_disabled(credential_id, true);
             reason = Some("按「导入默认禁用」配置已置 disabled，验证后请手动启用".to_string());
         }

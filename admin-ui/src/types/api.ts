@@ -959,3 +959,60 @@ export interface TestChatResponse {
   inputTokens: number
   outputTokens: number
 }
+
+// ===== Webhook 管理 =====
+
+export interface WebhookConfigResponse {
+  /** 接口开关（关闭时接口返回 403） */
+  enabled: boolean
+  /** 是否记录接收到的原始请求体 */
+  logEnabled: boolean
+  hasApiKey: boolean
+  /** 完整密钥（未配置时为空字符串） */
+  apiKey: string
+  apiKeyMasked: string
+  /** 接口路径，例如 /api/webhook/import-keys */
+  endpointPath: string
+  /** 接收日志留存条数上限 */
+  logMaxCount: number
+}
+
+export interface UpdateWebhookConfigRequest {
+  enabled?: boolean
+  logEnabled?: boolean
+  /** 空字符串 = 清除密钥 */
+  apiKey?: string
+  regenerateApiKey?: boolean
+}
+
+export interface WebhookLogSummaryItem {
+  id: number
+  at: string
+  sourceIp?: string | null
+  statusCode: number
+  received: number
+  added: number
+  skipped: number
+  invalid: number
+  summary: string
+}
+
+export interface WebhookLogDetail extends WebhookLogSummaryItem {
+  requestHeaders?: string | null
+  /** 收到的原始请求体（超长会被截断并标注） */
+  requestBody?: string | null
+  /** 返回给推送方的响应体 */
+  responseBody?: string | null
+}
+
+export interface WebhookLogListResponse {
+  total: number
+  limit: number
+  offset: number
+  items: WebhookLogSummaryItem[]
+}
+
+export interface ListWebhookLogsParams {
+  limit?: number
+  offset?: number
+}

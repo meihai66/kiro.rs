@@ -79,6 +79,21 @@ pub struct Config {
     #[serde(default)]
     pub admin_api_key: Option<String>,
 
+    /// Webhook API 密钥（可选，启用 `/api/webhook/import-keys` 接口，
+    /// 供外部系统自动推送 `ksk_*` Key 入池；需同时配置 adminApiKey）
+    #[serde(default)]
+    pub webhook_api_key: Option<String>,
+
+    /// Webhook 接口开关（可在管理界面热切换，无需重启）。
+    /// 关闭时接口返回 403；密钥未配置时同样视为不可用。默认 true
+    #[serde(default = "default_true")]
+    pub webhook_enabled: bool,
+
+    /// 是否记录 Webhook 接收到的原始请求体（管理界面查阅用）。默认 true。
+    /// 注意：原始体含推送方明文 `ksk_*` Key，与 credentials 表同等敏感
+    #[serde(default = "default_true")]
+    pub webhook_log_enabled: bool,
+
     /// 单个凭据的目标请求速率（RPM，每分钟请求数）
     ///
     /// 用于凭据级节流/分流：当某个凭据短时间内请求过密时，优先将流量分配到其他可用凭据，
@@ -881,6 +896,9 @@ impl Default for Config {
             proxy_username: None,
             proxy_password: None,
             admin_api_key: None,
+            webhook_api_key: None,
+            webhook_enabled: default_true(),
+            webhook_log_enabled: default_true(),
             credential_rpm: None,
             compression: CompressionConfig::default(),
             prompt_cache_ttl_seconds: default_prompt_cache_ttl_seconds(),

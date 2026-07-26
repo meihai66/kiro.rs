@@ -120,6 +120,23 @@ CREATE TABLE IF NOT EXISTS error_log_counters (
     error_kind  TEXT PRIMARY KEY,
     total       INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS webhook_logs (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    at                TEXT NOT NULL,
+    source_ip         TEXT,
+    status_code       INTEGER NOT NULL,
+    received          INTEGER NOT NULL DEFAULT 0,
+    added             INTEGER NOT NULL DEFAULT 0,
+    skipped           INTEGER NOT NULL DEFAULT 0,
+    invalid           INTEGER NOT NULL DEFAULT 0,
+    summary           TEXT NOT NULL,
+    request_headers   TEXT,
+    request_body      TEXT,
+    response_body     TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_webhook_logs_at ON webhook_logs(at DESC);
 "#;
 
 pub fn ensure_schema(conn: &Connection) -> Result<()> {

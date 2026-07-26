@@ -14,10 +14,11 @@ use super::{
         AddCredentialRequest, BatchProxyDeleteRequest, BatchProxyExtendRequest,
         BatchProxyResetDisabledRequest, BatchProxySlotsRequest, BatchProxyUnbindRequest,
         BindProxyRequest, ClearErrorLogsRequest, CreateApiKeyRequest, ExportCredentialsRequest,
-        ImportProxiesRequest, ImportTokenJsonRequest, ListErrorLogsQuery, SetAllowOveruseRequest,
-        SetCredentialRpmRequest, SetDisabledRequest, SetEmailRequest, SetEndpointRequest,
-        SetOveragePreferenceRequest, SetPriorityRequest, SetProxyDisabledRequest, SetRegionRequest,
-        SuccessResponse, UpdateApiKeyRequest, UpdateProxyConfigRequest,
+        ImportProxiesRequest, ImportTokenJsonRequest, ListErrorLogsQuery, ListWebhookLogsQuery,
+        SetAllowOveruseRequest, SetCredentialRpmRequest, SetDisabledRequest, SetEmailRequest,
+        SetEndpointRequest, SetOveragePreferenceRequest, SetPriorityRequest,
+        SetProxyDisabledRequest, SetRegionRequest, SuccessResponse, UpdateApiKeyRequest,
+        UpdateProxyConfigRequest, UpdateWebhookConfigRequest,
     },
 };
 
@@ -711,6 +712,66 @@ pub async fn clear_error_logs(
     Json(req): Json<ClearErrorLogsRequest>,
 ) -> impl IntoResponse {
     match state.service.clear_error_logs(&req) {
+        Ok(resp) => Json(resp).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+// =================== Webhook handlers ===================
+
+/// GET /api/admin/webhook/config
+pub async fn get_webhook_config(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.service.get_webhook_config())
+}
+
+/// POST /api/admin/webhook/config
+/// body: `{ "enabled": true, "logEnabled": true, "apiKey": "..." | "", "regenerateApiKey": true }`
+pub async fn update_webhook_config(
+    State(state): State<AdminState>,
+    Json(req): Json<UpdateWebhookConfigRequest>,
+) -> impl IntoResponse {
+    match state.service.update_webhook_config(&req) {
+        Ok(resp) => Json(resp).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// GET /api/admin/webhook/logs?limit=50&offset=0
+pub async fn list_webhook_logs(
+    State(state): State<AdminState>,
+    axum::extract::Query(q): axum::extract::Query<ListWebhookLogsQuery>,
+) -> impl IntoResponse {
+    match state.service.list_webhook_logs(&q) {
+        Ok(resp) => Json(resp).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// GET /api/admin/webhook/logs/:id
+pub async fn get_webhook_log(
+    State(state): State<AdminState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match state.service.get_webhook_log(id) {
+        Ok(detail) => Json(detail).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// DELETE /api/admin/webhook/logs/:id
+pub async fn delete_webhook_log(
+    State(state): State<AdminState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match state.service.delete_webhook_log(id) {
+        Ok(_) => Json(SuccessResponse::new(format!("Webhook 日志 #{} 已删除", id))).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/webhook/logs/clear
+pub async fn clear_webhook_logs(State(state): State<AdminState>) -> impl IntoResponse {
+    match state.service.clear_webhook_logs() {
         Ok(resp) => Json(resp).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }

@@ -1015,6 +1015,93 @@ pub struct ClearErrorLogsResponse {
     pub deleted: u64,
 }
 
+// ============ Webhook 管理 ============
+
+/// Webhook 配置响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookConfigResponse {
+    /// 接口开关（关闭时接口返回 403）
+    pub enabled: bool,
+    /// 是否记录接收到的原始请求体
+    pub log_enabled: bool,
+    /// 是否已配置密钥
+    pub has_api_key: bool,
+    /// 完整密钥（供管理界面复制；未配置时为空字符串）
+    pub api_key: String,
+    /// 脱敏密钥（列表展示用）
+    pub api_key_masked: String,
+    /// 接口路径（便于前端直接展示调用地址）
+    pub endpoint_path: String,
+    /// 当前留存的接收日志条数上限
+    pub log_max_count: u64,
+}
+
+/// 更新 Webhook 配置请求（字段省略表示不改）
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateWebhookConfigRequest {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub log_enabled: Option<bool>,
+    /// 新密钥；空字符串表示清除密钥（清除后接口不可用）
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// 随机生成一个新密钥（与 apiKey 同时给出时以本项为准）
+    #[serde(default)]
+    pub regenerate_api_key: Option<bool>,
+}
+
+/// Webhook 接收日志列表项
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookLogSummaryItem {
+    pub id: i64,
+    pub at: chrono::DateTime<chrono::Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_ip: Option<String>,
+    pub status_code: u16,
+    pub received: u32,
+    pub added: u32,
+    pub skipped: u32,
+    pub invalid: u32,
+    pub summary: String,
+}
+
+/// Webhook 接收日志详情（含原始请求体）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookLogDetail {
+    #[serde(flatten)]
+    pub summary_fields: WebhookLogSummaryItem,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_headers: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_body: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_body: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookLogListResponse {
+    pub total: u64,
+    pub limit: u32,
+    pub offset: u32,
+    pub items: Vec<WebhookLogSummaryItem>,
+}
+
+/// 列表查询参数
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListWebhookLogsQuery {
+    #[serde(default = "default_log_limit")]
+    pub limit: u32,
+    #[serde(default)]
+    pub offset: u32,
+}
+
 // ============ 全局配置 ============
 
 /// 全局配置响应

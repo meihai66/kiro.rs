@@ -9,18 +9,19 @@ use super::{
     handlers::{
         add_credential, batch_delete_proxies, batch_proxy_extend, batch_proxy_slots,
         batch_reset_proxy_disabled, batch_test_proxies, batch_unbind_proxies,
-        bind_credential_proxy, clear_error_logs, create_api_key, delete_api_key, delete_credential,
-        delete_error_log, delete_proxy, export_credentials, force_refresh_token,
-        get_all_credentials, get_cached_balances, get_credential_balance, get_error_log,
-        get_error_log_kind_stats, get_global_config, get_proxy_config, get_rpm_analysis,
-        get_rpm_history, get_rpm_history_aggregate, get_stats_summary, import_proxies,
-        import_token_json, list_api_keys, list_credential_models, list_error_logs, list_proxies,
-        list_proxy_alerts, reset_all_stats, reset_failure_count, reset_rate_limit_stats,
+        bind_credential_proxy, clear_error_logs, clear_webhook_logs, create_api_key,
+        delete_api_key, delete_credential, delete_error_log, delete_proxy, delete_webhook_log,
+        export_credentials, force_refresh_token, get_all_credentials, get_cached_balances,
+        get_credential_balance, get_error_log, get_error_log_kind_stats, get_global_config,
+        get_proxy_config, get_rpm_analysis, get_rpm_history, get_rpm_history_aggregate,
+        get_stats_summary, get_webhook_config, get_webhook_log, import_proxies, import_token_json,
+        list_api_keys, list_credential_models, list_error_logs, list_proxies, list_proxy_alerts,
+        list_webhook_logs, reset_all_stats, reset_failure_count, reset_rate_limit_stats,
         rotate_proxies_now, set_credential_allow_overuse, set_credential_disabled,
         set_credential_email, set_credential_endpoint, set_credential_priority,
         set_credential_region, set_credential_rpm, set_overage_preference, set_proxy_disabled,
         test_chat, test_proxy, test_push, unbind_credential_proxy, update_api_key,
-        update_global_config, update_proxy_config,
+        update_global_config, update_proxy_config, update_webhook_config,
     },
     middleware::{AdminState, admin_auth_middleware},
 };
@@ -115,6 +116,17 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route(
             "/error-logs/{id}",
             get(get_error_log).delete(delete_error_log),
+        )
+        // Webhook 管理（开关 / 密钥 / 接收日志）
+        .route(
+            "/webhook/config",
+            get(get_webhook_config).post(update_webhook_config),
+        )
+        .route("/webhook/logs", get(list_webhook_logs))
+        .route("/webhook/logs/clear", post(clear_webhook_logs))
+        .route(
+            "/webhook/logs/{id}",
+            get(get_webhook_log).delete(delete_webhook_log),
         )
         // API Keys
         .route("/api-keys", get(list_api_keys).post(create_api_key))

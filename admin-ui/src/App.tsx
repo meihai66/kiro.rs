@@ -10,6 +10,7 @@ import { ModelCoveragePage } from '@/pages/model-coverage-page'
 import { ProxiesPage } from '@/pages/proxies-page'
 import { SettingsPage } from '@/pages/settings-page'
 import { StatsPage } from '@/pages/stats-page'
+import { WebhookPage } from '@/pages/webhook-page'
 import { Toaster } from '@/components/ui/sonner'
 
 function App() {
@@ -45,6 +46,7 @@ function App() {
             <Route path="/model-coverage" element={<ModelCoveragePage />} />
             <Route path="/stats" element={<StatsPage />} />
             <Route path="/error-logs" element={<ErrorLogsPage />} />
+            <Route path="/webhook" element={<WebhookPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="*" element={<Navigate to="/stats" replace />} />
           </Route>
