@@ -1,5 +1,17 @@
 # Changelog
 
+## [v1.1.84] - 2026-07-26
+
+### 新增
+
+- **Webhook 接口自动接收 Key 入池** — 新增 `POST /api/webhook/import-keys`，独立 `webhookApiKey` 认证（x-api-key / Bearer，常量时间比较，与 Admin Key 分离）；行格式同管理面板批量导入（`ksk_xxx`、`ksk_xxx|host:port[:user:pass]`、完整代理 URL），复用 import-token-json 管线做内嵌代理入池强绑、逐条验证与按 Key 去重；新增 `force_enable`，导入成功可忽略「导入默认禁用」直接参与调度（绑定代理失败的凭据仍保持禁用） (`src/webhook.rs`, `src/admin/router.rs`, `src/model/config.rs`, `src/main.rs`)
+- **Webhook 管理页** — 新增 `/admin/webhook`：接口开关与记录开关热切换（请求时读共享 Config，改完即时生效无需重启）；密钥显示/复制/手填/一键生成（`sk-webhook-` 前缀），留空即清除，无密钥时拒绝启用；接收记录列表与详情展示原始请求体、返回体、请求 headers，支持删除/清空 (`admin-ui/src/pages/webhook-page.tsx`, `admin-ui/src/api/webhook.ts`, `src/admin/service.rs`, `src/admin/types.rs`)
+- **Webhook 请求原文落库** — 用 `Bytes` 替代 `Json<T>` 提取请求体，先原样落库再解析，畸形 JSON 也能查到原文；新增 `webhook_logs` 表，insert 事务内修剪到最新 500 条无需后台清理任务；单体上限 64KB（多字节安全截断），认证头只记 `<present>` 不存值 (`src/storage/mod.rs`, `src/storage/migration.rs`)
+
+### 修复
+
+- **日志 404 误报「凭据不存在」** — 新增 `AdminServiceError::ResourceNotFound`，区分资源缺失与凭据缺失 (`src/admin/error.rs`, `src/admin/handlers.rs`)
+
 ## [v1.1.83] - 2026-07-25
 
 ### 新增
