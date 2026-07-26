@@ -850,10 +850,10 @@ impl AdminService {
         &self,
         req: &super::types::UpdateKeyPollConfigRequest,
     ) -> Result<super::types::KeyPollConfigResponse, AdminServiceError> {
-        {
-            let mut cfg = self.config.write();
-
-            if let Some(url) = &req.api_url {
+        // 先全部校验、算出目标值，最后一次性写入：
+        // 中途 return Err 不能留下「内存已改、文件没存」的半套配置
+        let api_url = match &req.api_url {
+            Some(url) => {
                 let trimmed = url.trim();
                 if trimmed.is_empty() {
                     return Err(AdminServiceError::InvalidRequest("接口地址不能为空".into()));
@@ -863,18 +863,50 @@ impl AdminService {
                         "接口地址需以 http:// 或 https:// 开头".into(),
                     ));
                 }
-                cfg.key_poll.api_url = trimmed.to_string();
+                Some(trimmed.to_string())
+            }
+            None => None,
+        };
+        if let Some(secs) = req.interval_secs {
+            let min = crate::model::config::KEY_POLL_MIN_INTERVAL_SECS;
+            if !(min..=86_400).contains(&secs) {
+                return Err(AdminServiceError::InvalidRequest(format!(
+                    "轮询间隔应在 {min}~86400 秒"
+                )));
+            }
+        }
+        if let Some(v) = req.retry_invalid_max
+            && v > 100
+        {
+            return Err(AdminServiceError::InvalidRequest(
+                "失败重试上限过大（>100）".into(),
+            ));
+        }
+        // 开启前必须有密钥：以本次请求带的新密钥为准（允许同一请求里填密钥 + 开启）
+        if req.enabled == Some(true) {
+            let key_after = req
+                .api_key
+                .as_deref()
+                .map(|k| k.trim().to_string())
+                .unwrap_or_else(|| self.config.read().key_poll.api_key.trim().to_string());
+            if key_after.is_empty() {
+                return Err(AdminServiceError::InvalidRequest(
+                    "启用自动上号前需先填写接口密钥".into(),
+                ));
+            }
+        }
+
+        {
+            let mut cfg = self.config.write();
+            let before = cfg.key_poll.clone();
+
+            if let Some(url) = api_url {
+                cfg.key_poll.api_url = url;
             }
             if let Some(key) = &req.api_key {
                 cfg.key_poll.api_key = key.trim().to_string();
             }
             if let Some(secs) = req.interval_secs {
-                let min = crate::model::config::KEY_POLL_MIN_INTERVAL_SECS;
-                if secs < min || secs > 86_400 {
-                    return Err(AdminServiceError::InvalidRequest(format!(
-                        "轮询间隔应在 {min}~86400 秒"
-                    )));
-                }
                 cfg.key_poll.interval_secs = secs;
             }
             if let Some(p) = req.priority {
@@ -887,25 +919,17 @@ impl AdminService {
                 cfg.key_poll.log_enabled = v;
             }
             if let Some(v) = req.retry_invalid_max {
-                if v > 100 {
-                    return Err(AdminServiceError::InvalidRequest(
-                        "失败重试上限过大（>100）".into(),
-                    ));
-                }
                 cfg.key_poll.retry_invalid_max = v;
             }
-            // 开关放最后判定，允许「同一请求里填密钥 + 开启」
             if let Some(enabled) = req.enabled {
-                if enabled && cfg.key_poll.api_key.trim().is_empty() {
-                    return Err(AdminServiceError::InvalidRequest(
-                        "启用自动上号前需先填写接口密钥".into(),
-                    ));
-                }
                 cfg.key_poll.enabled = enabled;
             }
 
-            cfg.save()
-                .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+            // 落盘失败就回滚内存，避免运行时配置与文件不一致
+            if let Err(e) = cfg.save() {
+                cfg.key_poll = before;
+                return Err(AdminServiceError::InternalError(e.to_string()));
+            }
         }
         Ok(self.get_key_poll_config())
     }
@@ -2110,6 +2134,7 @@ impl AdminService {
                         action: ImportAction::Invalid,
                         reason: Some("缺少 kiroApiKey".to_string()),
                         credential_id: None,
+                        retryable: false,
                     };
                 }
             }
@@ -2123,6 +2148,7 @@ impl AdminService {
                         action: ImportAction::Invalid,
                         reason: Some("缺少 refreshToken".to_string()),
                         credential_id: None,
+                        retryable: false,
                     };
                 }
             }
@@ -2136,6 +2162,7 @@ impl AdminService {
                 action: ImportAction::Invalid,
                 reason: Some(format!("{} 认证需要 clientId 和 clientSecret", auth_method)),
                 credential_id: None,
+                retryable: false,
             };
         }
 
@@ -2152,6 +2179,7 @@ impl AdminService {
                 action: ImportAction::Skipped,
                 reason: Some("凭据已存在".to_string()),
                 credential_id: None,
+                retryable: false,
             };
         }
 
@@ -2163,6 +2191,7 @@ impl AdminService {
                 action: ImportAction::Added,
                 reason: Some("预览模式".to_string()),
                 credential_id: None,
+                retryable: false,
             };
         }
 
@@ -2212,6 +2241,7 @@ impl AdminService {
                         action: ImportAction::Invalid,
                         reason: Some(format!("内嵌代理加入池失败：{}", e)),
                         credential_id: None,
+                        retryable: false,
                     };
                 }
             }
@@ -2240,6 +2270,8 @@ impl AdminService {
                         .to_string(),
                 ),
                 credential_id: None,
+                // 环境类：补充代理后即可成功，不该把 Key 计进拉黑次数
+                retryable: true,
             };
         }
 
@@ -2282,12 +2314,19 @@ impl AdminService {
         let credential_id = match verify_result {
             Ok(id) => id,
             Err(e) => {
+                // 环境类失败（上游网络/限流/内部错）算可重试，凭据本身无效不算——
+                // 自动上号据此决定要不要把该 Key 计进拉黑次数
+                let retryable = match &e {
+                    AdminServiceError::InvalidCredential(msg) => msg.contains("已被限流"),
+                    _ => true,
+                };
                 return ImportItemResult {
                     index,
                     fingerprint,
                     action: ImportAction::Invalid,
                     reason: Some(e.to_string()),
                     credential_id: None,
+                    retryable,
                 };
             }
         };
@@ -2341,6 +2380,7 @@ impl AdminService {
             action: ImportAction::Added,
             reason,
             credential_id: Some(credential_id),
+            retryable: false,
         }
     }
 

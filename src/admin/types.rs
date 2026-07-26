@@ -536,6 +536,10 @@ pub struct ImportItemResult {
     pub reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credential_id: Option<u64>,
+    /// 失败是否值得重试：环境类原因（无可用代理槽、上游网络/限流）为 true，
+    /// 凭据本身无效为 false。自动上号据此决定是否把该 Key 计入拉黑次数。
+    #[serde(skip)]
+    pub retryable: bool,
 }
 
 /// 导入动作

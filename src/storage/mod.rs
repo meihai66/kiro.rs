@@ -1011,16 +1011,18 @@ impl Store {
 
     /// 记录/更新一个已处理过的 Key。
     ///
-    /// 同一 key_hash 再次出现时：`attempts + 1`、刷新 `last_seen` 与 `outcome`；
-    /// 但 `onboarded` 是终态——已上号过的记录不会被后续结果覆盖回 `invalid`。
+    /// 同一 key_hash 再次出现时刷新 `last_seen` 与 `outcome`；`attempts` 只在
+    /// `rec.count_attempt` 为真时 +1（拉黑计数只统计「凭据本身无效」这类失败，
+    /// 环境类失败不烧预算）。`onboarded` 是终态——不会被后续结果覆盖回失败态。
     pub fn upsert_key_seen(&self, rec: &KeySeenUpsert) -> Result<()> {
         let conn = self.conn()?;
+        let inc: i64 = if rec.count_attempt { 1 } else { 0 };
         conn.execute(
             "INSERT INTO key_poll_seen(key_hash, key_masked, outcome, credential_id, \
              attempts, first_seen, last_seen, note) \
              VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5, ?6) \
              ON CONFLICT(key_hash) DO UPDATE SET \
-                attempts = attempts + 1, \
+                attempts = attempts + ?7, \
                 last_seen = ?5, \
                 outcome = CASE WHEN key_poll_seen.outcome = 'onboarded' \
                           THEN key_poll_seen.outcome ELSE excluded.outcome END, \
@@ -1033,7 +1035,16 @@ impl Store {
                 rec.credential_id.map(|v| v as i64),
                 rec.at.to_rfc3339(),
                 rec.note.as_deref(),
+                inc,
             ],
+        )?;
+        // 表大小兜底：只修剪非终态记录，已上号的永久保留（否则会被重复上号）
+        conn.execute(
+            "DELETE FROM key_poll_seen WHERE outcome != 'onboarded' AND key_hash NOT IN (\
+                SELECT key_hash FROM key_poll_seen WHERE outcome != 'onboarded' \
+                ORDER BY last_seen DESC LIMIT ?1\
+             )",
+            params![KEY_SEEN_MAX_NON_TERMINAL as i64],
         )?;
         Ok(())
     }
@@ -1265,6 +1276,9 @@ pub struct KeyOnboardLogInsert {
     pub note: Option<String>,
 }
 
+/// 去重表里非终态（失败/跳过）记录的保留上限；`onboarded` 不受限制
+pub const KEY_SEEN_MAX_NON_TERMINAL: u64 = 5000;
+
 /// 去重表 upsert 输入
 #[derive(Debug, Clone)]
 pub struct KeySeenUpsert {
@@ -1276,6 +1290,8 @@ pub struct KeySeenUpsert {
     pub credential_id: Option<u64>,
     pub at: DateTime<Utc>,
     pub note: Option<String>,
+    /// 是否把本次计入 `attempts`（拉黑计数）。环境类失败传 false。
+    pub count_attempt: bool,
 }
 
 /// 去重表行
@@ -1772,6 +1788,7 @@ mod tests {
             },
             at: Utc::now(),
             note: None,
+            count_attempt: true,
         }
     }
 
@@ -1801,6 +1818,68 @@ mod tests {
         // onboarded 是终态：后续 invalid 不得把它降级（防止重复上号的关键）
         store.upsert_key_seen(&seen("h1", "invalid")).unwrap();
         assert_eq!(store.get_key_seen("h1").unwrap().unwrap().0, "onboarded");
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_key_seen_attempts_only_counts_when_asked() {
+        let (store, path) = temp_store();
+
+        // 环境类失败（count_attempt=false）：记录状态但不烧拉黑预算
+        for _ in 0..5 {
+            store
+                .upsert_key_seen(&KeySeenUpsert {
+                    count_attempt: false,
+                    ..seen("h1", "retrying")
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            store.get_key_seen("h1").unwrap(),
+            Some(("retrying".into(), 1)),
+            "首次插入记 1 次，之后 count_attempt=false 不再累加"
+        );
+
+        // 真·凭据无效才累加
+        store.upsert_key_seen(&seen("h1", "invalid")).unwrap();
+        assert_eq!(
+            store.get_key_seen("h1").unwrap(),
+            Some(("invalid".into(), 2))
+        );
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_key_seen_trim_keeps_onboarded() {
+        let (store, path) = temp_store();
+
+        store
+            .upsert_key_seen(&seen("keep-me", "onboarded"))
+            .unwrap();
+        // 灌满非终态记录，触发修剪
+        for i in 0..(KEY_SEEN_MAX_NON_TERMINAL + 10) {
+            store
+                .upsert_key_seen(&KeySeenUpsert {
+                    count_attempt: false,
+                    ..seen(&format!("h{}", i), "invalid")
+                })
+                .unwrap();
+        }
+        let (_, total) = store.list_key_seen(1, 0).unwrap();
+        assert_eq!(
+            total,
+            KEY_SEEN_MAX_NON_TERMINAL + 1,
+            "非终态被修剪到上限，onboarded 额外保留"
+        );
+        assert_eq!(
+            store.get_key_seen("keep-me").unwrap().map(|(o, _)| o),
+            Some("onboarded".to_string()),
+            "已上号记录不得被修剪掉，否则会重复上号"
+        );
 
         drop(store);
         let _ = std::fs::remove_file(&path);

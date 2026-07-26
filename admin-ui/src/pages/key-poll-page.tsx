@@ -45,6 +45,13 @@ export function KeyPollPage() {
   const queryClient = useQueryClient()
   const [detailId, setDetailId] = useState<number | null>(null)
   const [showKey, setShowKey] = useState(false)
+  // 三张表各自的分页（后端已支持 limit/offset）
+  const [onboardPage, setOnboardPage] = useState(0)
+  const [onboardSize, setOnboardSize] = useState(20)
+  const [pollPage, setPollPage] = useState(0)
+  const [pollSize, setPollSize] = useState(20)
+  const [seenPage, setSeenPage] = useState(0)
+  const [seenSize, setSeenSize] = useState(20)
   // 表单本地态（跟随后端值初始化，编辑中不被轮询覆盖）
   const [apiUrl, setApiUrl] = useState('')
   const [apiKey, setApiKey] = useState('')
@@ -61,29 +68,37 @@ export function KeyPollPage() {
 
   const {
     data: onboardLogs,
-    isFetching: onboardFetching,
+    isLoading: onboardLoading,
+    isRefetching: onboardFetching,
     refetch: refetchOnboard,
   } = useQuery({
-    queryKey: ['key-onboard-logs'],
-    queryFn: () => listKeyOnboardLogs({ limit: 100 }),
+    queryKey: ['key-onboard-logs', { limit: onboardSize, offset: onboardPage * onboardSize }],
+    queryFn: () =>
+      listKeyOnboardLogs({ limit: onboardSize, offset: onboardPage * onboardSize }),
     placeholderData: keepPreviousData,
     refetchInterval: 15_000,
   })
 
   const {
     data: pollLogs,
-    isFetching: pollFetching,
+    isLoading: pollLoading,
+    isRefetching: pollFetching,
     refetch: refetchPolls,
   } = useQuery({
-    queryKey: ['key-poll-logs'],
-    queryFn: () => listKeyPollLogs({ limit: 50 }),
+    queryKey: ['key-poll-logs', { limit: pollSize, offset: pollPage * pollSize }],
+    queryFn: () => listKeyPollLogs({ limit: pollSize, offset: pollPage * pollSize }),
     placeholderData: keepPreviousData,
     refetchInterval: 15_000,
   })
 
-  const { data: seenList, isFetching: seenFetching, refetch: refetchSeen } = useQuery({
-    queryKey: ['key-poll-seen'],
-    queryFn: () => listKeySeen({ limit: 100 }),
+  const {
+    data: seenList,
+    isLoading: seenLoading,
+    isRefetching: seenFetching,
+    refetch: refetchSeen,
+  } = useQuery({
+    queryKey: ['key-poll-seen', { limit: seenSize, offset: seenPage * seenSize }],
+    queryFn: () => listKeySeen({ limit: seenSize, offset: seenPage * seenSize }),
     placeholderData: keepPreviousData,
     refetchInterval: 30_000,
   })
@@ -99,8 +114,10 @@ export function KeyPollPage() {
 
   const configMut = useMutation({
     mutationFn: updateKeyPollConfig,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['key-poll-config'] })
+    // 直接用返回体刷新缓存：只 invalidate 的话 refetch 回来前表单会闪回旧值，
+    // refetch 万一失败还会长期显示旧值却标着「已保存」
+    onSuccess: (data) => {
+      queryClient.setQueryData(['key-poll-config'], data)
     },
     onError: (e) => toast.error('保存失败：' + extractErrorMessage(e)),
   })
@@ -120,6 +137,7 @@ export function KeyPollPage() {
       }
       queryClient.invalidateQueries({ queryKey: ['key-poll-logs'] })
       queryClient.invalidateQueries({ queryKey: ['key-onboard-logs'] })
+      queryClient.invalidateQueries({ queryKey: ['key-poll-seen'] })
       queryClient.invalidateQueries({ queryKey: ['credentials'] })
     },
     onError: (e) => toast.error('执行失败：' + extractErrorMessage(e)),
@@ -162,8 +180,8 @@ export function KeyPollPage() {
   })
 
   const saveForm = () => {
-    const secs = parseInt(intervalSecs)
-    const prio = parseInt(priority)
+    const secs = parseInt(intervalSecs, 10)
+    const prio = parseInt(priority, 10)
     const min = config?.minIntervalSecs ?? 30
     if (!Number.isFinite(secs) || secs < min) {
       toast.error(`轮询间隔至少 ${min} 秒`)
@@ -173,7 +191,7 @@ export function KeyPollPage() {
       toast.error('优先级需为非负整数')
       return
     }
-    const retry = parseInt(retryInvalidMax)
+    const retry = parseInt(retryInvalidMax, 10)
     if (!Number.isFinite(retry) || retry < 0 || retry > 100) {
       toast.error('失败重试上限需为 0~100 的整数')
       return
@@ -278,7 +296,7 @@ export function KeyPollPage() {
                   setApiUrl(e.target.value)
                   setDirty(true)
                 }}
-                disabled={isPending}
+                disabled={isPending || configLoading}
               />
             </div>
 
@@ -294,7 +312,7 @@ export function KeyPollPage() {
                     setApiKey(e.target.value)
                     setDirty(true)
                   }}
-                  disabled={isPending}
+                  disabled={isPending || configLoading}
                 />
                 <Button type="button" variant="outline" size="sm" onClick={() => setShowKey((v) => !v)}>
                   {showKey ? '隐藏' : '显示'}
@@ -316,7 +334,7 @@ export function KeyPollPage() {
                     setIntervalSecs(e.target.value)
                     setDirty(true)
                   }}
-                  disabled={isPending}
+                  disabled={isPending || configLoading}
                 />
                 <p className="text-xs text-muted-foreground">
                   最小 {config?.minIntervalSecs ?? 30} 秒，推荐 300（5 分钟）
@@ -332,7 +350,7 @@ export function KeyPollPage() {
                     setPriority(e.target.value)
                     setDirty(true)
                   }}
-                  disabled={isPending}
+                  disabled={isPending || configLoading}
                 />
                 <p className="text-xs text-muted-foreground">数字越小越优先被调度</p>
               </div>
@@ -349,7 +367,7 @@ export function KeyPollPage() {
                   setRetryInvalidMax(e.target.value)
                   setDirty(true)
                 }}
-                disabled={isPending}
+                disabled={isPending || configLoading}
               />
               <p className="text-xs text-muted-foreground">
                 验证失败的 Key 最多重试几次后不再尝试（0 = 每轮都重试）。
@@ -386,7 +404,7 @@ export function KeyPollPage() {
             </div>
 
             <div className="flex items-center gap-2 pt-1">
-              <Button size="sm" onClick={saveForm} disabled={isPending || !dirty}>
+              <Button size="sm" onClick={saveForm} disabled={isPending || configLoading || !dirty}>
                 {isPending ? '保存中…' : dirty ? '保存修改' : '已保存'}
               </Button>
               {dirty && (
@@ -400,6 +418,7 @@ export function KeyPollPage() {
                       setApiKey(config.apiKey)
                       setIntervalSecs(String(config.intervalSecs))
                       setPriority(String(config.priority))
+                      setRetryInvalidMax(String(config.retryInvalidMax))
                     }
                   }}
                 >
@@ -494,7 +513,13 @@ export function KeyPollPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {onboardItems.length === 0 ? (
+                  {onboardLoading ? (
+                    <TableRow>
+                      <TableCell colSpan={7} className="h-24 text-center text-muted-foreground">
+                        加载中…
+                      </TableCell>
+                    </TableRow>
+                  ) : onboardItems.length === 0 ? (
                     <TableRow>
                       <TableCell colSpan={7} className="h-24 text-center text-muted-foreground">
                         还没有成功上号的记录
@@ -537,6 +562,13 @@ export function KeyPollPage() {
                 </TableBody>
               </Table>
             </div>
+            <Pager
+              total={onboardLogs?.total ?? 0}
+              page={onboardPage}
+              size={onboardSize}
+              onPage={setOnboardPage}
+              onSize={setOnboardSize}
+            />
           </CardContent>
         </Card>
 
@@ -589,7 +621,13 @@ export function KeyPollPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {pollItems.length === 0 ? (
+                  {pollLoading ? (
+                    <TableRow>
+                      <TableCell colSpan={9} className="h-24 text-center text-muted-foreground">
+                        加载中…
+                      </TableCell>
+                    </TableRow>
+                  ) : pollItems.length === 0 ? (
                     <TableRow>
                       <TableCell colSpan={9} className="h-24 text-center text-muted-foreground">
                         还没有轮询记录
@@ -649,6 +687,13 @@ export function KeyPollPage() {
                 </TableBody>
               </Table>
             </div>
+            <Pager
+              total={pollLogs?.total ?? 0}
+              page={pollPage}
+              size={pollSize}
+              onPage={setPollPage}
+              onSize={setPollSize}
+            />
           </CardContent>
         </Card>
 
@@ -699,7 +744,9 @@ export function KeyPollPage() {
           <CardContent>
             <p className="text-xs text-muted-foreground mb-2">
               上号成功的 Key 永久记在这里，即使之后把凭据删了也不会被重复上号；
-              验证失败的 Key 累计到「失败重试上限」后也不再尝试。移除某条即可让它重新参与上号。
+              验证失败的 Key 累计到「失败重试上限」后不再尝试。
+              环境类失败（如代理池暂时没有空闲代理）记为「待重试」，不计入次数，下轮会自动再试。
+              移除某条即可让它重新参与上号。
             </p>
             <div className="rounded-md border">
               <Table>
@@ -716,7 +763,13 @@ export function KeyPollPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {(seenList?.items ?? []).length === 0 ? (
+                  {seenLoading ? (
+                    <TableRow>
+                      <TableCell colSpan={8} className="h-24 text-center text-muted-foreground">
+                        加载中…
+                      </TableCell>
+                    </TableRow>
+                  ) : (seenList?.items ?? []).length === 0 ? (
                     <TableRow>
                       <TableCell colSpan={8} className="h-24 text-center text-muted-foreground">
                         还没有处理过任何 Key
@@ -734,6 +787,10 @@ export function KeyPollPage() {
                           ) : it.outcome === 'invalid' ? (
                             <Badge variant="destructive" className="text-xs">
                               验证失败
+                            </Badge>
+                          ) : it.outcome === 'retrying' ? (
+                            <Badge variant="warning" className="text-xs" title="环境类失败（如无可用代理），下轮会自动重试，不计入拉黑次数">
+                              待重试
                             </Badge>
                           ) : (
                             <Badge variant="secondary" className="text-xs">
@@ -776,6 +833,13 @@ export function KeyPollPage() {
                 </TableBody>
               </Table>
             </div>
+            <Pager
+              total={seenList?.total ?? 0}
+              page={seenPage}
+              size={seenSize}
+              onPage={setSeenPage}
+              onSize={setSeenSize}
+            />
           </CardContent>
         </Card>
       </div>
@@ -860,6 +924,58 @@ function PollLogDetailDialog({ id, onClose }: { id: number | null; onClose: () =
         </div>
       </DialogContent>
     </Dialog>
+  )
+}
+
+/// 表格底部分页条（三张表共用）
+function Pager({
+  total,
+  page,
+  size,
+  onPage,
+  onSize,
+}: {
+  total: number
+  page: number
+  size: number
+  onPage: (p: number) => void
+  onSize: (s: number) => void
+}) {
+  const totalPages = Math.max(1, Math.ceil(total / size))
+  return (
+    <div className="mt-3 flex items-center justify-between text-sm text-muted-foreground">
+      <div>共 {total} 条</div>
+      <div className="flex items-center gap-2">
+        <span>
+          第 {page + 1} / {totalPages} 页
+        </span>
+        <Button variant="outline" size="sm" disabled={page === 0} onClick={() => onPage(Math.max(0, page - 1))}>
+          上一页
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={page + 1 >= totalPages}
+          onClick={() => onPage(page + 1)}
+        >
+          下一页
+        </Button>
+        <select
+          className="h-8 rounded border bg-background px-2 text-xs"
+          value={size}
+          onChange={(e) => {
+            onSize(Number(e.target.value))
+            onPage(0)
+          }}
+        >
+          {[20, 50, 100, 200].map((n) => (
+            <option key={n} value={n}>
+              每页 {n}
+            </option>
+          ))}
+        </select>
+      </div>
+    </div>
   )
 }
 

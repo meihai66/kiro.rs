@@ -31,6 +31,11 @@ pub const KEY_POLL_LOG_MAX_BODY_BYTES: usize = 32 * 1024;
 /// 拉取超时（秒）
 const FETCH_TIMEOUT_SECS: u64 = 20;
 
+/// 全局轮询互斥：后台定时任务与管理界面「立即上号」可能同时触发，
+/// 而「查去重 → 调上游验证 → 写入凭据」之间隔着数秒 await，
+/// 并发跑会让同一个 Key 通过两次去重检查、被上号两次。
+static POLL_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// 上游返回的单个 Key
 #[derive(Debug, Clone, Deserialize)]
 pub struct RemoteKeyItem {
@@ -124,6 +129,7 @@ fn record_seen(
     outcome: &str,
     credential_id: Option<u64>,
     note: Option<String>,
+    count_attempt: bool,
 ) {
     let Some(store) = service.store() else {
         return;
@@ -135,10 +141,27 @@ fn record_seen(
         credential_id,
         at: chrono::Utc::now(),
         note,
+        count_attempt,
     };
     if let Err(e) = store.upsert_key_seen(&rec) {
         tracing::warn!(error = %e, "写入自动上号去重表失败");
     }
+}
+
+/// 为「已在凭据池里」的 Key 补一条终态记录，仅在尚未记录时写入
+/// （已有记录就别动，避免每轮把 attempts 刷成天文数字）
+fn mark_seen_if_absent(service: &Arc<AdminService>, key: &str) {
+    if lookup_seen(service, key).is_some() {
+        return;
+    }
+    record_seen(
+        service,
+        key,
+        "onboarded",
+        None,
+        Some("已在凭据池中（非本功能导入）".to_string()),
+        false,
+    );
 }
 
 /// 脱敏 Key：`ksk_abcd***mnop`
@@ -190,6 +213,16 @@ pub async fn poll_once(
     let mut outcome = PollOutcome {
         dry_run,
         ..Default::default()
+    };
+
+    // 同一时刻只允许一次轮询在跑（见 POLL_GUARD 注释）
+    let _guard = match POLL_GUARD.try_lock() {
+        Ok(g) => g,
+        Err(_) => {
+            outcome.summary = "已有一次上号正在进行，本次跳过".to_string();
+            tracing::info!(trigger = trigger_kind, "自动上号：已有轮询在跑，跳过本次");
+            return outcome;
+        }
     };
 
     if api_url.is_empty() || api_key.is_empty() {
@@ -281,7 +314,10 @@ pub async fn poll_once(
         }
         if service.token_manager().has_kiro_api_key(&key) {
             outcome.already_in_pool += 1;
-            continue; // 已在池里
+            // 补一条终态记录：手工导入的 Key 也纳入去重，
+            // 这样它对应的凭据日后被删掉也不会被自动重新上号
+            mark_seen_if_absent(service, &key);
+            continue;
         }
         // 持久去重：上过号的永久跳过；失败过的按重试上限跳过
         // （凭据被删掉后再次拉到同一 Key 也不会重复上号）
@@ -290,7 +326,10 @@ pub async fn poll_once(
                 outcome.skipped_seen += 1;
                 continue;
             }
-            Some((_, attempts)) if retry_invalid_max > 0 && attempts >= retry_invalid_max => {
+            // 只有「凭据本身无效」才按次数拉黑；retrying/skipped 永远还有下一次
+            Some((kind, attempts))
+                if kind == "invalid" && retry_invalid_max > 0 && attempts >= retry_invalid_max =>
+            {
                 outcome.skipped_seen += 1;
                 continue;
             }
@@ -370,11 +409,12 @@ pub async fn poll_once(
                         .proxy_pool_ref()
                         .and_then(|p| p.find_binding_for(credential_id))
                 });
+                // 代理 URL 可能含 user:pass，返回给前端前脱敏（与列表接口口径一致）
                 let proxy_url = proxy_id.as_deref().and_then(|id| {
                     service
                         .proxy_pool_ref()
                         .and_then(|p| p.get(id))
-                        .map(|e| e.url)
+                        .map(|e| crate::common::redact::mask_url_userinfo(&e.url))
                 });
                 let enabled = entry.map(|e| !e.disabled).unwrap_or(false);
                 let onboarded = OnboardedItem {
@@ -397,6 +437,7 @@ pub async fn poll_once(
                         "onboarded",
                         Some(credential_id),
                         onboarded.note.clone(),
+                        true,
                     );
                 }
                 outcome.onboarded.push(onboarded);
@@ -406,9 +447,15 @@ pub async fn poll_once(
                     .map(|c| mask_key(&c.key))
                     .unwrap_or_else(|| result.fingerprint.clone());
                 let reason = result.reason.clone();
-                // 记失败（attempts 累加，超过 retryInvalidMax 后不再尝试）
+                // 环境类失败（无可用代理槽、上游网络/限流）记成 retrying 且不计次数，
+                // 避免代理池临时耗尽这类全局故障把一批好 Key 永久拉黑
                 if let Some(c) = candidate {
-                    record_seen(service, &c.key, "invalid", None, reason.clone());
+                    let (kind, count) = if result.retryable {
+                        ("retrying", false)
+                    } else {
+                        ("invalid", true)
+                    };
+                    record_seen(service, &c.key, kind, None, reason.clone(), count);
                 }
                 outcome.errors.push(format!(
                     "{}: {}",
@@ -419,7 +466,14 @@ pub async fn poll_once(
             ImportAction::Skipped => {
                 // 上游管线判定「凭据已存在」——也记一笔，避免下轮再走一遍验证
                 if let Some(c) = candidate {
-                    record_seen(service, &c.key, "skipped", None, result.reason.clone());
+                    record_seen(
+                        service,
+                        &c.key,
+                        "skipped",
+                        None,
+                        result.reason.clone(),
+                        false,
+                    );
                 }
             }
         }
