@@ -1,5 +1,17 @@
 # Changelog
 
+## [v1.1.86] - 2026-07-26
+
+### 修复
+
+- **自动上号并发竞态导致同一 Key 重复上号** — 后台定时任务与「立即上号」可同时进入 `poll_once`，而「查去重 → 上游验证 → 写入凭据」之间隔着数秒 await，两侧都能通过去重检查；新增全局 `POLL_GUARD` 互斥，后到者直接返回「已有一次上号正在进行」 (`src/key_poll.rs`)
+- **环境类故障烧光重试预算把好 Key 永久拉黑** — 代理池暂无空闲槽、上游网络失败/限流原本都记为 `invalid`，默认 3 轮（约 15 分钟）内就把待上号 Key 永久跳过；`ImportItemResult` 新增 `retryable` 标记，环境类失败记为 `retrying` 且不计次数，只有凭据本身无效才累加并最终拉黑（`upsert_key_seen` 增加 `count_attempt` 参数） (`src/key_poll.rs`, `src/admin/service.rs`, `src/storage/mod.rs`)
+- **配置校验失败留下半套内存配置** — `update_key_poll_config` 改为先全部校验再一次性写入，`save()` 失败回滚内存值，避免「界面显示已启用但后台因密钥被清空而静默停轮询」 (`src/admin/service.rs`)
+- **已在池的 Key 不写去重表导致凭据删除后重复上号** — 补 `mark_seen_if_absent`，手工导入的 Key 首次遇到时也落一条终态记录 (`src/storage/mod.rs`)
+- **`key_poll_seen` 无上限** — 新增 `KEY_SEEN_MAX_NON_TERMINAL=5000`，仅修剪非终态记录，已上号记录永久保留 (`src/storage/mod.rs`)
+- **「立即上号」响应代理 URL 未脱敏** — 与列表接口口径统一 (`src/admin/service.rs`)
+- **上号记录页前端问题** — 三张表接上分页（默认每页 20，含页码与每页条数）；配置加载完成前禁用输入框，避免抢先输入让 dirty 永久为真、保存时把空密钥写回后端；保存后用返回体 `setQueryData` 防止表单闪回旧值；「立即上号」后一并刷新去重表，补 loading 分支、`parseInt` radix 与放弃修改漏字段；去重表新增「待重试」状态展示 (`admin-ui/src/pages/key-poll-page.tsx`, `src/admin/types.rs`)
+
 ## [v1.1.85] - 2026-07-26
 
 ### 新增
