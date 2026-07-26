@@ -830,96 +830,99 @@ impl Store {
         Ok(deleted)
     }
 
-    // ============ Webhook logs ============
+    // ============ 自动上号：轮询记录 ============
 
-    /// 写入一条 Webhook 接收日志，并把表修剪到最新 [`WEBHOOK_LOG_MAX_COUNT`] 条。
-    /// 两条语句同一事务，保证插入与修剪一次提交。返回新行 id。
-    pub fn insert_webhook_log(&self, log: &WebhookLogInsert) -> Result<i64> {
+    /// 写入一次轮询记录，并把表修剪到最新 [`KEY_POLL_LOG_MAX_COUNT`] 条（同一事务）
+    pub fn insert_key_poll_log(&self, log: &KeyPollLogInsert) -> Result<i64> {
         let conn = self.conn()?;
         let tx = conn.unchecked_transaction()?;
         tx.execute(
-            "INSERT INTO webhook_logs(at, source_ip, status_code, received, added, skipped, \
-             invalid, summary, request_headers, request_body, response_body) \
+            "INSERT INTO key_poll_logs(at, trigger_kind, ok, http_status, total, active, \
+             added, skipped, invalid, summary, response_body) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 log.at.to_rfc3339(),
-                log.source_ip.as_deref(),
-                log.status_code as i64,
-                log.received as i64,
+                log.trigger_kind.as_str(),
+                log.ok as i64,
+                log.http_status.map(|v| v as i64),
+                log.total as i64,
+                log.active as i64,
                 log.added as i64,
                 log.skipped as i64,
                 log.invalid as i64,
                 log.summary.as_str(),
-                log.request_headers.as_deref(),
-                log.request_body.as_deref(),
                 log.response_body.as_deref(),
             ],
         )?;
         let id = tx.last_insert_rowid();
         tx.execute(
-            "DELETE FROM webhook_logs WHERE id NOT IN (\
-                SELECT id FROM webhook_logs ORDER BY id DESC LIMIT ?1\
+            "DELETE FROM key_poll_logs WHERE id NOT IN (\
+                SELECT id FROM key_poll_logs ORDER BY id DESC LIMIT ?1\
              )",
-            params![WEBHOOK_LOG_MAX_COUNT as i64],
+            params![KEY_POLL_LOG_MAX_COUNT as i64],
         )?;
         tx.commit()?;
         Ok(id)
     }
 
-    /// 列表查询：不取 request_body / response_body 大字段。返回 (条目, 总数)。
-    pub fn list_webhook_logs(
+    /// 轮询记录列表（不取原始响应大字段）。返回 (条目, 总数)
+    pub fn list_key_poll_logs(
         &self,
         limit: u32,
         offset: u32,
-    ) -> Result<(Vec<WebhookLogSummary>, u64)> {
+    ) -> Result<(Vec<KeyPollLogSummary>, u64)> {
         let conn = self.conn()?;
-        let total: i64 = conn.query_row("SELECT COUNT(*) FROM webhook_logs", [], |r| r.get(0))?;
+        let total: i64 = conn.query_row("SELECT COUNT(*) FROM key_poll_logs", [], |r| r.get(0))?;
         let mut stmt = conn.prepare(
-            "SELECT id, at, source_ip, status_code, received, added, skipped, invalid, summary \
-             FROM webhook_logs ORDER BY id DESC LIMIT ?1 OFFSET ?2",
+            "SELECT id, at, trigger_kind, ok, http_status, total, active, added, skipped, \
+             invalid, summary FROM key_poll_logs ORDER BY id DESC LIMIT ?1 OFFSET ?2",
         )?;
         let rows = stmt.query_map(params![limit.min(500) as i64, offset as i64], |r| {
             let at_str: String = r.get(1)?;
-            Ok(WebhookLogSummary {
+            let http_status: Option<i64> = r.get(4)?;
+            Ok(KeyPollLogSummary {
                 id: r.get(0)?,
                 at: parse_dt(&at_str).unwrap_or_else(Utc::now),
-                source_ip: r.get(2)?,
-                status_code: r.get::<_, i64>(3)? as u16,
-                received: r.get::<_, i64>(4)? as u32,
-                added: r.get::<_, i64>(5)? as u32,
-                skipped: r.get::<_, i64>(6)? as u32,
-                invalid: r.get::<_, i64>(7)? as u32,
-                summary: r.get(8)?,
+                trigger_kind: r.get(2)?,
+                ok: r.get::<_, i64>(3)? != 0,
+                http_status: http_status.map(|v| v as u16),
+                total: r.get::<_, i64>(5)? as u32,
+                active: r.get::<_, i64>(6)? as u32,
+                added: r.get::<_, i64>(7)? as u32,
+                skipped: r.get::<_, i64>(8)? as u32,
+                invalid: r.get::<_, i64>(9)? as u32,
+                summary: r.get(10)?,
             })
         })?;
-        let items: Vec<WebhookLogSummary> = rows.collect::<rusqlite::Result<_>>()?;
+        let items: Vec<KeyPollLogSummary> = rows.collect::<rusqlite::Result<_>>()?;
         Ok((items, total as u64))
     }
 
-    /// 详情：含完整原始请求体与响应体
-    pub fn get_webhook_log(&self, id: i64) -> Result<Option<WebhookLogRow>> {
+    /// 轮询记录详情（含原始响应）
+    pub fn get_key_poll_log(&self, id: i64) -> Result<Option<KeyPollLogRow>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, at, source_ip, status_code, received, added, skipped, invalid, summary, \
-             request_headers, request_body, response_body FROM webhook_logs WHERE id = ?1",
+            "SELECT id, at, trigger_kind, ok, http_status, total, active, added, skipped, \
+             invalid, summary, response_body FROM key_poll_logs WHERE id = ?1",
         )?;
         let mut rows = stmt.query(params![id])?;
         if let Some(r) = rows.next()? {
             let at_str: String = r.get(1)?;
-            Ok(Some(WebhookLogRow {
-                summary_fields: WebhookLogSummary {
+            let http_status: Option<i64> = r.get(4)?;
+            Ok(Some(KeyPollLogRow {
+                summary_fields: KeyPollLogSummary {
                     id: r.get(0)?,
                     at: parse_dt(&at_str).unwrap_or_else(Utc::now),
-                    source_ip: r.get(2)?,
-                    status_code: r.get::<_, i64>(3)? as u16,
-                    received: r.get::<_, i64>(4)? as u32,
-                    added: r.get::<_, i64>(5)? as u32,
-                    skipped: r.get::<_, i64>(6)? as u32,
-                    invalid: r.get::<_, i64>(7)? as u32,
-                    summary: r.get(8)?,
+                    trigger_kind: r.get(2)?,
+                    ok: r.get::<_, i64>(3)? != 0,
+                    http_status: http_status.map(|v| v as u16),
+                    total: r.get::<_, i64>(5)? as u32,
+                    active: r.get::<_, i64>(6)? as u32,
+                    added: r.get::<_, i64>(7)? as u32,
+                    skipped: r.get::<_, i64>(8)? as u32,
+                    invalid: r.get::<_, i64>(9)? as u32,
+                    summary: r.get(10)?,
                 },
-                request_headers: r.get(9)?,
-                request_body: r.get(10)?,
                 response_body: r.get(11)?,
             }))
         } else {
@@ -927,15 +930,172 @@ impl Store {
         }
     }
 
-    pub fn delete_webhook_log(&self, id: i64) -> Result<bool> {
+    pub fn clear_key_poll_logs(&self) -> Result<u64> {
         let conn = self.conn()?;
-        let n = conn.execute("DELETE FROM webhook_logs WHERE id = ?1", params![id])?;
+        let n = conn.execute("DELETE FROM key_poll_logs", [])?;
+        Ok(n as u64)
+    }
+
+    // ============ 自动上号：上号成功记录 ============
+
+    /// 写入一条上号成功记录，并修剪到最新 [`KEY_ONBOARD_LOG_MAX_COUNT`] 条
+    pub fn insert_key_onboard_log(&self, log: &KeyOnboardLogInsert) -> Result<i64> {
+        let conn = self.conn()?;
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO key_onboard_logs(at, credential_id, key_masked, order_id, \
+             trigger_kind, proxy_id, proxy_url, enabled, note) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                log.at.to_rfc3339(),
+                log.credential_id as i64,
+                log.key_masked.as_str(),
+                log.order_id.as_deref(),
+                log.trigger_kind.as_str(),
+                log.proxy_id.as_deref(),
+                log.proxy_url.as_deref(),
+                log.enabled as i64,
+                log.note.as_deref(),
+            ],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.execute(
+            "DELETE FROM key_onboard_logs WHERE id NOT IN (\
+                SELECT id FROM key_onboard_logs ORDER BY id DESC LIMIT ?1\
+             )",
+            params![KEY_ONBOARD_LOG_MAX_COUNT as i64],
+        )?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// 上号记录列表。返回 (条目, 总数)
+    pub fn list_key_onboard_logs(
+        &self,
+        limit: u32,
+        offset: u32,
+    ) -> Result<(Vec<KeyOnboardLogRow>, u64)> {
+        let conn = self.conn()?;
+        let total: i64 =
+            conn.query_row("SELECT COUNT(*) FROM key_onboard_logs", [], |r| r.get(0))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, at, credential_id, key_masked, order_id, trigger_kind, proxy_id, \
+             proxy_url, enabled, note FROM key_onboard_logs ORDER BY id DESC LIMIT ?1 OFFSET ?2",
+        )?;
+        let rows = stmt.query_map(params![limit.min(500) as i64, offset as i64], |r| {
+            let at_str: String = r.get(1)?;
+            Ok(KeyOnboardLogRow {
+                id: r.get(0)?,
+                at: parse_dt(&at_str).unwrap_or_else(Utc::now),
+                credential_id: r.get::<_, i64>(2)? as u64,
+                key_masked: r.get(3)?,
+                order_id: r.get(4)?,
+                trigger_kind: r.get(5)?,
+                proxy_id: r.get(6)?,
+                proxy_url: r.get(7)?,
+                enabled: r.get::<_, i64>(8)? != 0,
+                note: r.get(9)?,
+            })
+        })?;
+        let items: Vec<KeyOnboardLogRow> = rows.collect::<rusqlite::Result<_>>()?;
+        Ok((items, total as u64))
+    }
+
+    pub fn clear_key_onboard_logs(&self) -> Result<u64> {
+        let conn = self.conn()?;
+        let n = conn.execute("DELETE FROM key_onboard_logs", [])?;
+        Ok(n as u64)
+    }
+
+    // ============ 自动上号：去重表 ============
+
+    /// 记录/更新一个已处理过的 Key。
+    ///
+    /// 同一 key_hash 再次出现时：`attempts + 1`、刷新 `last_seen` 与 `outcome`；
+    /// 但 `onboarded` 是终态——已上号过的记录不会被后续结果覆盖回 `invalid`。
+    pub fn upsert_key_seen(&self, rec: &KeySeenUpsert) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO key_poll_seen(key_hash, key_masked, outcome, credential_id, \
+             attempts, first_seen, last_seen, note) \
+             VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5, ?6) \
+             ON CONFLICT(key_hash) DO UPDATE SET \
+                attempts = attempts + 1, \
+                last_seen = ?5, \
+                outcome = CASE WHEN key_poll_seen.outcome = 'onboarded' \
+                          THEN key_poll_seen.outcome ELSE excluded.outcome END, \
+                credential_id = COALESCE(excluded.credential_id, key_poll_seen.credential_id), \
+                note = excluded.note",
+            params![
+                rec.key_hash.as_str(),
+                rec.key_masked.as_str(),
+                rec.outcome.as_str(),
+                rec.credential_id.map(|v| v as i64),
+                rec.at.to_rfc3339(),
+                rec.note.as_deref(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 查一个 Key 是否处理过：返回 (outcome, attempts)
+    pub fn get_key_seen(&self, key_hash: &str) -> Result<Option<(String, u32)>> {
+        let conn = self.conn()?;
+        let mut stmt =
+            conn.prepare("SELECT outcome, attempts FROM key_poll_seen WHERE key_hash = ?1")?;
+        let mut rows = stmt.query(params![key_hash])?;
+        if let Some(r) = rows.next()? {
+            Ok(Some((r.get(0)?, r.get::<_, i64>(1)? as u32)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// 去重表列表（按最近处理时间倒序）。返回 (条目, 总数)
+    pub fn list_key_seen(&self, limit: u32, offset: u32) -> Result<(Vec<KeySeenRow>, u64)> {
+        let conn = self.conn()?;
+        let total: i64 = conn.query_row("SELECT COUNT(*) FROM key_poll_seen", [], |r| r.get(0))?;
+        let mut stmt = conn.prepare(
+            "SELECT key_hash, key_masked, outcome, credential_id, attempts, first_seen, \
+             last_seen, note FROM key_poll_seen ORDER BY last_seen DESC LIMIT ?1 OFFSET ?2",
+        )?;
+        let rows = stmt.query_map(params![limit.min(500) as i64, offset as i64], |r| {
+            let first: String = r.get(5)?;
+            let last: String = r.get(6)?;
+            let cred: Option<i64> = r.get(3)?;
+            Ok(KeySeenRow {
+                key_hash: r.get(0)?,
+                key_masked: r.get(1)?,
+                outcome: r.get(2)?,
+                credential_id: cred.map(|v| v as u64),
+                attempts: r.get::<_, i64>(4)? as u32,
+                first_seen: parse_dt(&first).unwrap_or_else(Utc::now),
+                last_seen: parse_dt(&last).unwrap_or_else(Utc::now),
+                note: r.get(7)?,
+            })
+        })?;
+        let items: Vec<KeySeenRow> = rows.collect::<rusqlite::Result<_>>()?;
+        Ok((items, total as u64))
+    }
+
+    /// 删除一条去重记录（允许该 Key 下次重新上号）
+    pub fn delete_key_seen(&self, key_hash: &str) -> Result<bool> {
+        let conn = self.conn()?;
+        let n = conn.execute(
+            "DELETE FROM key_poll_seen WHERE key_hash = ?1",
+            params![key_hash],
+        )?;
         Ok(n > 0)
     }
 
-    pub fn clear_webhook_logs(&self) -> Result<u64> {
+    /// 清空去重记录。`only_failed=true` 时只清失败的（保留已上号的终态）
+    pub fn clear_key_seen(&self, only_failed: bool) -> Result<u64> {
         let conn = self.conn()?;
-        let n = conn.execute("DELETE FROM webhook_logs", [])?;
+        let n = if only_failed {
+            conn.execute("DELETE FROM key_poll_seen WHERE outcome != 'onboarded'", [])?
+        } else {
+            conn.execute("DELETE FROM key_poll_seen", [])?
+        };
         Ok(n as u64)
     }
 }
@@ -1035,51 +1195,116 @@ pub struct ErrorLogRow {
     pub disable_reason: Option<String>,
 }
 
-// ============ Webhook logs ============
+// ============ 自动上号（Key 轮询）日志 ============
 
-/// Webhook 接收日志最多保留的最新条数（表大小封顶，无需后台清理任务）
-pub const WEBHOOK_LOG_MAX_COUNT: u64 = 500;
+/// 轮询记录最多保留条数
+pub const KEY_POLL_LOG_MAX_COUNT: u64 = 300;
+/// 上号成功记录最多保留条数
+pub const KEY_ONBOARD_LOG_MAX_COUNT: u64 = 1000;
 
-/// 写入 Webhook 接收日志的输入结构
+/// 写入一次轮询记录
 #[derive(Debug, Clone)]
-pub struct WebhookLogInsert {
+pub struct KeyPollLogInsert {
     pub at: DateTime<Utc>,
-    /// 来源 IP（取 X-Forwarded-For 首段 / X-Real-IP / 连接对端）
-    pub source_ip: Option<String>,
-    /// 本次返回给推送方的 HTTP 状态码
-    pub status_code: u16,
-    pub received: u32,
+    /// 触发方式：`auto`（后台定时）/ `manual`（管理界面「立即上号」）
+    pub trigger_kind: String,
+    /// 是否成功拉到并解析了响应
+    pub ok: bool,
+    /// 上游 HTTP 状态（网络层失败时为 None）
+    pub http_status: Option<u16>,
+    /// 响应里的 Key 总数 / active 数
+    pub total: u32,
+    pub active: u32,
+    /// 本次导入结果
     pub added: u32,
     pub skipped: u32,
     pub invalid: u32,
     pub summary: String,
-    pub request_headers: Option<String>,
-    /// 原始请求体（按 [`crate::webhook::WEBHOOK_LOG_MAX_BODY_BYTES`] 截断）
-    pub request_body: Option<String>,
+    /// 原始响应（按 [`crate::key_poll::KEY_POLL_LOG_MAX_BODY_BYTES`] 截断）
     pub response_body: Option<String>,
 }
 
-/// 列表项（不含大字段）
+/// 轮询记录列表项（不含原始响应）
 #[derive(Debug, Clone)]
-pub struct WebhookLogSummary {
+pub struct KeyPollLogSummary {
     pub id: i64,
     pub at: DateTime<Utc>,
-    pub source_ip: Option<String>,
-    pub status_code: u16,
-    pub received: u32,
+    pub trigger_kind: String,
+    pub ok: bool,
+    pub http_status: Option<u16>,
+    pub total: u32,
+    pub active: u32,
     pub added: u32,
     pub skipped: u32,
     pub invalid: u32,
     pub summary: String,
 }
 
-/// 详情（含原始请求体与响应体）
+/// 轮询记录详情（含原始响应）
 #[derive(Debug, Clone)]
-pub struct WebhookLogRow {
-    pub summary_fields: WebhookLogSummary,
-    pub request_headers: Option<String>,
-    pub request_body: Option<String>,
+pub struct KeyPollLogRow {
+    pub summary_fields: KeyPollLogSummary,
     pub response_body: Option<String>,
+}
+
+/// 写入一条上号成功记录
+#[derive(Debug, Clone)]
+pub struct KeyOnboardLogInsert {
+    pub at: DateTime<Utc>,
+    pub credential_id: u64,
+    /// 脱敏后的 Key（不落明文，凭据本体已在 credentials 表）
+    pub key_masked: String,
+    /// 发卡站订单号（响应里的 order_id）
+    pub order_id: Option<String>,
+    pub trigger_kind: String,
+    /// 绑定到的代理
+    pub proxy_id: Option<String>,
+    pub proxy_url: Option<String>,
+    /// 上号后是否处于启用状态
+    pub enabled: bool,
+    pub note: Option<String>,
+}
+
+/// 去重表 upsert 输入
+#[derive(Debug, Clone)]
+pub struct KeySeenUpsert {
+    /// Key 的 sha256 十六进制（不存明文）
+    pub key_hash: String,
+    pub key_masked: String,
+    /// `onboarded`（已上号，终态）/ `invalid`（验证失败）/ `skipped`（上游已存在等）
+    pub outcome: String,
+    pub credential_id: Option<u64>,
+    pub at: DateTime<Utc>,
+    pub note: Option<String>,
+}
+
+/// 去重表行
+#[derive(Debug, Clone)]
+pub struct KeySeenRow {
+    pub key_hash: String,
+    pub key_masked: String,
+    pub outcome: String,
+    pub credential_id: Option<u64>,
+    /// 处理过几次（失败重试会累加）
+    pub attempts: u32,
+    pub first_seen: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
+    pub note: Option<String>,
+}
+
+/// 上号记录行
+#[derive(Debug, Clone)]
+pub struct KeyOnboardLogRow {
+    pub id: i64,
+    pub at: DateTime<Utc>,
+    pub credential_id: u64,
+    pub key_masked: String,
+    pub order_id: Option<String>,
+    pub trigger_kind: String,
+    pub proxy_id: Option<String>,
+    pub proxy_url: Option<String>,
+    pub enabled: bool,
+    pub note: Option<String>,
 }
 
 // ============ row mappers ============
@@ -1406,91 +1631,215 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    fn webhook_log(status: u16, body: &str) -> WebhookLogInsert {
-        WebhookLogInsert {
+    fn poll_log(ok: bool, added: u32, body: &str) -> KeyPollLogInsert {
+        KeyPollLogInsert {
             at: Utc::now(),
-            source_ip: Some("203.0.113.9".to_string()),
-            status_code: status,
-            received: 2,
-            added: 1,
-            skipped: 1,
+            trigger_kind: "auto".to_string(),
+            ok,
+            http_status: Some(200),
+            total: 3,
+            active: 2,
+            added,
+            skipped: 0,
             invalid: 0,
-            summary: "收到 2 行".to_string(),
-            request_headers: Some("content-type: application/json".to_string()),
-            request_body: Some(body.to_string()),
-            response_body: Some("{}".to_string()),
+            summary: "上游 3 个".to_string(),
+            response_body: Some(body.to_string()),
+        }
+    }
+
+    fn onboard_log(credential_id: u64, order: &str) -> KeyOnboardLogInsert {
+        KeyOnboardLogInsert {
+            at: Utc::now(),
+            credential_id,
+            key_masked: "ksk_abcd***mnop".to_string(),
+            order_id: Some(order.to_string()),
+            trigger_kind: "auto".to_string(),
+            proxy_id: Some("px-1".to_string()),
+            proxy_url: Some("http://1.2.3.4:8080".to_string()),
+            enabled: true,
+            note: None,
         }
     }
 
     #[test]
-    fn test_webhook_log_crud_and_retention() {
+    fn test_key_poll_log_crud_and_retention() {
         let (store, path) = temp_store();
 
         let id = store
-            .insert_webhook_log(&webhook_log(200, "{\"keys\":[\"ksk_a\"]}"))
+            .insert_key_poll_log(&poll_log(true, 2, r#"{"count":3}"#))
             .unwrap();
-        let detail = store.get_webhook_log(id).unwrap().expect("detail");
-        assert_eq!(
-            detail.request_body.as_deref(),
-            Some("{\"keys\":[\"ksk_a\"]}")
-        );
-        assert_eq!(detail.summary_fields.status_code, 200);
-        assert_eq!(
-            detail.summary_fields.source_ip.as_deref(),
-            Some("203.0.113.9")
-        );
-        assert_eq!(
-            (detail.summary_fields.received, detail.summary_fields.added),
-            (2, 1)
-        );
+        let detail = store.get_key_poll_log(id).unwrap().expect("detail");
+        assert_eq!(detail.response_body.as_deref(), Some(r#"{"count":3}"#));
+        assert!(detail.summary_fields.ok);
+        assert_eq!(detail.summary_fields.http_status, Some(200));
+        assert_eq!(detail.summary_fields.added, 2);
+        assert_eq!(detail.summary_fields.trigger_kind, "auto");
 
-        // 列表倒序 + 总数
+        // 失败记录（无 http_status）也能存取
         store
-            .insert_webhook_log(&webhook_log(400, "bad json"))
+            .insert_key_poll_log(&KeyPollLogInsert {
+                ok: false,
+                http_status: None,
+                ..poll_log(false, 0, "network error")
+            })
             .unwrap();
-        let (items, total) = store.list_webhook_logs(10, 0).unwrap();
+        let (items, total) = store.list_key_poll_logs(10, 0).unwrap();
         assert_eq!(total, 2);
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0].status_code, 400, "应按 id 倒序");
+        assert!(!items[0].ok, "应按 id 倒序，最新是失败那条");
+        assert_eq!(items[0].http_status, None);
 
         // 分页
-        let (page2, _) = store.list_webhook_logs(1, 1).unwrap();
-        assert_eq!(page2.len(), 1);
+        let (page2, _) = store.list_key_poll_logs(1, 1).unwrap();
         assert_eq!(page2[0].id, id);
 
-        // 删除单条 + 不存在返回 false
-        assert!(store.delete_webhook_log(id).unwrap());
-        assert!(!store.delete_webhook_log(id).unwrap());
-        assert_eq!(store.list_webhook_logs(10, 0).unwrap().1, 1);
-
-        // 清空
-        assert_eq!(store.clear_webhook_logs().unwrap(), 1);
-        assert_eq!(store.list_webhook_logs(10, 0).unwrap().1, 0);
+        assert_eq!(store.clear_key_poll_logs().unwrap(), 2);
+        assert_eq!(store.list_key_poll_logs(10, 0).unwrap().1, 0);
 
         drop(store);
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn test_webhook_log_trims_to_max_count() {
+    fn test_key_poll_log_trims_to_max_count() {
         let (store, path) = temp_store();
-        for i in 0..(WEBHOOK_LOG_MAX_COUNT + 5) {
+        for i in 0..(KEY_POLL_LOG_MAX_COUNT + 3) {
             store
-                .insert_webhook_log(&webhook_log(200, &format!("body {}", i)))
+                .insert_key_poll_log(&poll_log(true, 0, &format!("body {}", i)))
                 .unwrap();
         }
-        let (items, total) = store.list_webhook_logs(1, 0).unwrap();
-        assert_eq!(total, WEBHOOK_LOG_MAX_COUNT, "插入时应修剪到上限");
-        // 最新一条保留
+        let (items, total) = store.list_key_poll_logs(1, 0).unwrap();
+        assert_eq!(total, KEY_POLL_LOG_MAX_COUNT, "插入时应修剪到上限");
         assert_eq!(
             store
-                .get_webhook_log(items[0].id)
+                .get_key_poll_log(items[0].id)
                 .unwrap()
                 .unwrap()
-                .request_body
+                .response_body
                 .as_deref(),
-            Some(format!("body {}", WEBHOOK_LOG_MAX_COUNT + 4).as_str())
+            Some(format!("body {}", KEY_POLL_LOG_MAX_COUNT + 2).as_str()),
+            "最新一条应保留"
         );
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_key_onboard_log_crud() {
+        let (store, path) = temp_store();
+
+        store
+            .insert_key_onboard_log(&onboard_log(7, "ORD-1"))
+            .unwrap();
+        store
+            .insert_key_onboard_log(&KeyOnboardLogInsert {
+                enabled: false,
+                note: Some("已添加但未绑定代理".to_string()),
+                proxy_id: None,
+                proxy_url: None,
+                ..onboard_log(8, "ORD-2")
+            })
+            .unwrap();
+
+        let (items, total) = store.list_key_onboard_logs(10, 0).unwrap();
+        assert_eq!(total, 2);
+        // 倒序：最新的 #8 在前
+        assert_eq!(items[0].credential_id, 8);
+        assert!(!items[0].enabled);
+        assert_eq!(items[0].note.as_deref(), Some("已添加但未绑定代理"));
+        assert_eq!(items[0].proxy_id, None);
+        assert_eq!(items[1].credential_id, 7);
+        assert!(items[1].enabled);
+        assert_eq!(items[1].key_masked, "ksk_abcd***mnop");
+        assert_eq!(items[1].order_id.as_deref(), Some("ORD-1"));
+        assert_eq!(items[1].proxy_url.as_deref(), Some("http://1.2.3.4:8080"));
+
+        assert_eq!(store.clear_key_onboard_logs().unwrap(), 2);
+        assert_eq!(store.list_key_onboard_logs(10, 0).unwrap().1, 0);
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn seen(hash: &str, outcome: &str) -> KeySeenUpsert {
+        KeySeenUpsert {
+            key_hash: hash.to_string(),
+            key_masked: "ksk_abcd***mnop".to_string(),
+            outcome: outcome.to_string(),
+            credential_id: if outcome == "onboarded" {
+                Some(5)
+            } else {
+                None
+            },
+            at: Utc::now(),
+            note: None,
+        }
+    }
+
+    #[test]
+    fn test_key_seen_upsert_and_lookup() {
+        let (store, path) = temp_store();
+
+        store.upsert_key_seen(&seen("h1", "invalid")).unwrap();
+        assert_eq!(
+            store.get_key_seen("h1").unwrap(),
+            Some(("invalid".into(), 1))
+        );
+        assert_eq!(store.get_key_seen("nope").unwrap(), None);
+
+        // 再次失败：attempts 累加
+        store.upsert_key_seen(&seen("h1", "invalid")).unwrap();
+        assert_eq!(
+            store.get_key_seen("h1").unwrap(),
+            Some(("invalid".into(), 2))
+        );
+
+        // 失败后成功上号：outcome 升级为 onboarded
+        store.upsert_key_seen(&seen("h1", "onboarded")).unwrap();
+        let (outcome, attempts) = store.get_key_seen("h1").unwrap().unwrap();
+        assert_eq!((outcome.as_str(), attempts), ("onboarded", 3));
+
+        // onboarded 是终态：后续 invalid 不得把它降级（防止重复上号的关键）
+        store.upsert_key_seen(&seen("h1", "invalid")).unwrap();
+        assert_eq!(store.get_key_seen("h1").unwrap().unwrap().0, "onboarded");
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_key_seen_list_delete_and_clear() {
+        let (store, path) = temp_store();
+        store.upsert_key_seen(&seen("h1", "onboarded")).unwrap();
+        store.upsert_key_seen(&seen("h2", "invalid")).unwrap();
+        store.upsert_key_seen(&seen("h3", "skipped")).unwrap();
+
+        let (items, total) = store.list_key_seen(10, 0).unwrap();
+        assert_eq!(total, 3);
+        assert_eq!(items.len(), 3);
+        let onboarded = items.iter().find(|i| i.key_hash == "h1").unwrap();
+        assert_eq!(onboarded.credential_id, Some(5));
+        assert_eq!(onboarded.key_masked, "ksk_abcd***mnop");
+
+        // 删除单条（=允许重上）
+        assert!(store.delete_key_seen("h2").unwrap());
+        assert!(!store.delete_key_seen("h2").unwrap());
+        assert_eq!(store.list_key_seen(10, 0).unwrap().1, 2);
+
+        // 只清失败：保留 onboarded
+        store.upsert_key_seen(&seen("h4", "invalid")).unwrap();
+        assert_eq!(
+            store.clear_key_seen(true).unwrap(),
+            2,
+            "应清掉 skipped + invalid"
+        );
+        let (rest, _) = store.list_key_seen(10, 0).unwrap();
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].outcome, "onboarded");
+
+        // 全清
+        assert_eq!(store.clear_key_seen(false).unwrap(), 1);
+        assert_eq!(store.list_key_seen(10, 0).unwrap().1, 0);
+
         drop(store);
         let _ = std::fs::remove_file(&path);
     }

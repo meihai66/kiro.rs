@@ -1015,91 +1015,173 @@ pub struct ClearErrorLogsResponse {
     pub deleted: u64,
 }
 
-// ============ Webhook 管理 ============
+// ============ 自动上号（Key 轮询）============
 
-/// Webhook 配置响应
+/// 自动上号配置响应
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WebhookConfigResponse {
-    /// 接口开关（关闭时接口返回 403）
+pub struct KeyPollConfigResponse {
     pub enabled: bool,
-    /// 是否记录接收到的原始请求体
-    pub log_enabled: bool,
-    /// 是否已配置密钥
-    pub has_api_key: bool,
-    /// 完整密钥（供管理界面复制；未配置时为空字符串）
+    pub api_url: String,
+    /// 完整密钥（供管理界面复制/编辑）
     pub api_key: String,
-    /// 脱敏密钥（列表展示用）
     pub api_key_masked: String,
-    /// 接口路径（便于前端直接展示调用地址）
-    pub endpoint_path: String,
-    /// 当前留存的接收日志条数上限
-    pub log_max_count: u64,
+    pub has_api_key: bool,
+    pub interval_secs: u64,
+    pub priority: u32,
+    pub only_active: bool,
+    pub log_enabled: bool,
+    /// 验证失败的 Key 重试次数上限（0 = 不限制）
+    pub retry_invalid_max: u32,
+    /// 轮询间隔下限（秒）
+    pub min_interval_secs: u64,
+    /// 记录留存上限
+    pub poll_log_max_count: u64,
+    pub onboard_log_max_count: u64,
 }
 
-/// 更新 Webhook 配置请求（字段省略表示不改）
+/// 更新自动上号配置（字段省略表示不改）
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct UpdateWebhookConfigRequest {
+pub struct UpdateKeyPollConfigRequest {
     #[serde(default)]
     pub enabled: Option<bool>,
     #[serde(default)]
-    pub log_enabled: Option<bool>,
-    /// 新密钥；空字符串表示清除密钥（清除后接口不可用）
+    pub api_url: Option<String>,
+    /// 空字符串表示清除密钥
     #[serde(default)]
     pub api_key: Option<String>,
-    /// 随机生成一个新密钥（与 apiKey 同时给出时以本项为准）
     #[serde(default)]
-    pub regenerate_api_key: Option<bool>,
+    pub interval_secs: Option<u64>,
+    #[serde(default)]
+    pub priority: Option<u32>,
+    #[serde(default)]
+    pub only_active: Option<bool>,
+    #[serde(default)]
+    pub log_enabled: Option<bool>,
+    #[serde(default)]
+    pub retry_invalid_max: Option<u32>,
 }
 
-/// Webhook 接收日志列表项
+/// 手动触发一次上号
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunKeyPollRequest {
+    /// 试运行：只拉取比对，不导入、不写轮询记录
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// 轮询记录列表项
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WebhookLogSummaryItem {
+pub struct KeyPollLogItem {
     pub id: i64,
     pub at: chrono::DateTime<chrono::Utc>,
+    pub trigger_kind: String,
+    pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_ip: Option<String>,
-    pub status_code: u16,
-    pub received: u32,
+    pub http_status: Option<u16>,
+    pub total: u32,
+    pub active: u32,
     pub added: u32,
     pub skipped: u32,
     pub invalid: u32,
     pub summary: String,
 }
 
-/// Webhook 接收日志详情（含原始请求体）
+/// 轮询记录详情（含原始响应）
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WebhookLogDetail {
+pub struct KeyPollLogDetail {
     #[serde(flatten)]
-    pub summary_fields: WebhookLogSummaryItem,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub request_headers: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub request_body: Option<String>,
+    pub summary_fields: KeyPollLogItem,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_body: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WebhookLogListResponse {
+pub struct KeyPollLogListResponse {
     pub total: u64,
     pub limit: u32,
     pub offset: u32,
-    pub items: Vec<WebhookLogSummaryItem>,
+    pub items: Vec<KeyPollLogItem>,
 }
 
-/// 列表查询参数
+/// 上号成功记录
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyOnboardLogItem {
+    pub id: i64,
+    pub at: chrono::DateTime<chrono::Utc>,
+    pub credential_id: u64,
+    pub key_masked: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order_id: Option<String>,
+    pub trigger_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_url: Option<String>,
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyOnboardLogListResponse {
+    pub total: u64,
+    pub limit: u32,
+    pub offset: u32,
+    pub items: Vec<KeyOnboardLogItem>,
+}
+
+/// 记录列表查询参数（轮询记录 / 上号记录 / 去重表共用）
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ListWebhookLogsQuery {
+pub struct ListKeyPollLogsQuery {
     #[serde(default = "default_log_limit")]
     pub limit: u32,
     #[serde(default)]
     pub offset: u32,
+}
+
+/// 去重表条目：已处理过的 Key
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeySeenItem {
+    /// sha256 十六进制（删除单条时作为标识）
+    pub key_hash: String,
+    pub key_masked: String,
+    /// `onboarded` / `invalid` / `skipped`
+    pub outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<u64>,
+    pub attempts: u32,
+    pub first_seen: chrono::DateTime<chrono::Utc>,
+    pub last_seen: chrono::DateTime<chrono::Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeySeenListResponse {
+    pub total: u64,
+    pub limit: u32,
+    pub offset: u32,
+    pub items: Vec<KeySeenItem>,
+}
+
+/// 清空去重表请求
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearKeySeenRequest {
+    /// 只清失败记录，保留已上号的（默认 false = 全清）
+    #[serde(default)]
+    pub only_failed: bool,
 }
 
 // ============ 全局配置 ============

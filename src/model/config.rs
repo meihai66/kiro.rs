@@ -79,21 +79,6 @@ pub struct Config {
     #[serde(default)]
     pub admin_api_key: Option<String>,
 
-    /// Webhook API 密钥（可选，启用 `/api/webhook/import-keys` 接口，
-    /// 供外部系统自动推送 `ksk_*` Key 入池；需同时配置 adminApiKey）
-    #[serde(default)]
-    pub webhook_api_key: Option<String>,
-
-    /// Webhook 接口开关（可在管理界面热切换，无需重启）。
-    /// 关闭时接口返回 403；密钥未配置时同样视为不可用。默认 true
-    #[serde(default = "default_true")]
-    pub webhook_enabled: bool,
-
-    /// 是否记录 Webhook 接收到的原始请求体（管理界面查阅用）。默认 true。
-    /// 注意：原始体含推送方明文 `ksk_*` Key，与 credentials 表同等敏感
-    #[serde(default = "default_true")]
-    pub webhook_log_enabled: bool,
-
     /// 单个凭据的目标请求速率（RPM，每分钟请求数）
     ///
     /// 用于凭据级节流/分流：当某个凭据短时间内请求过密时，优先将流量分配到其他可用凭据，
@@ -296,10 +281,67 @@ pub struct Config {
     #[serde(default)]
     pub push_notification: PushNotificationConfig,
 
+    /// 自动上号配置（定时轮询发卡站接口，拉到新 Key 自动入池）
+    #[serde(default)]
+    pub key_poll: KeyPollConfig,
+
     /// 配置文件路径（运行时元数据，不写入 JSON）
     #[serde(skip)]
     config_path: Option<PathBuf>,
 }
+
+/// 自动上号（Key 轮询）配置
+///
+/// 定时 `GET {apiUrl}` 带 `X-API-Key: {apiKey}`，响应形如
+/// `{"count":5,"active":3,"keys":[{"key":"ksk_...","status":"active",...}]}`。
+/// 拉到本地不存在的 Key 就走批量导入管线：验证 → 绑定代理 → 直接启用。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct KeyPollConfig {
+    /// 总开关（关闭时后台不轮询，但仍可在管理界面手动「立即上号」）
+    pub enabled: bool,
+    /// 接口地址
+    pub api_url: String,
+    /// 接口密钥（`usr-*`，放 `X-API-Key` 头）
+    pub api_key: String,
+    /// 轮询间隔（秒），最小 30
+    pub interval_secs: u64,
+    /// 导入凭据的优先级
+    pub priority: u32,
+    /// 只导入 `status == "active"` 的 Key
+    pub only_active: bool,
+    /// 是否记录每次轮询的原始响应
+    pub log_enabled: bool,
+    /// 验证失败的 Key 最多重试几次后不再尝试（0 = 不限制，每轮都重试）。
+    /// 已成功上号的 Key 永久跳过，不受此项影响。
+    pub retry_invalid_max: u32,
+}
+
+impl Default for KeyPollConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            api_url: default_key_poll_api_url(),
+            api_key: String::new(),
+            interval_secs: default_key_poll_interval_secs(),
+            priority: 10,
+            only_active: true,
+            log_enabled: true,
+            retry_invalid_max: 3,
+        }
+    }
+}
+
+fn default_key_poll_api_url() -> String {
+    "https://key.dnf9999.com/api/my/keys".to_string()
+}
+
+fn default_key_poll_interval_secs() -> u64 {
+    300
+}
+
+/// 轮询间隔下限（秒），避免误配成 1 秒把上游打爆
+pub const KEY_POLL_MIN_INTERVAL_SECS: u64 = 30;
 
 /// 提醒推送配置：可用凭据数 / 预计可用时长 低于阈值时，调用 ogpush 推送接口告警。
 ///
@@ -896,9 +938,6 @@ impl Default for Config {
             proxy_username: None,
             proxy_password: None,
             admin_api_key: None,
-            webhook_api_key: None,
-            webhook_enabled: default_true(),
-            webhook_log_enabled: default_true(),
             credential_rpm: None,
             compression: CompressionConfig::default(),
             prompt_cache_ttl_seconds: default_prompt_cache_ttl_seconds(),
@@ -939,6 +978,7 @@ impl Default for Config {
             model_mapping: ModelMappingConfig::default(),
             models: Vec::new(),
             push_notification: PushNotificationConfig::default(),
+            key_poll: KeyPollConfig::default(),
             config_path: None,
         }
     }

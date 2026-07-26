@@ -12,8 +12,9 @@ pub enum AdminServiceError {
     /// 凭据不存在
     NotFound { id: u64 },
 
-    /// 其他资源不存在（`resource` 用于拼出准确的提示，如「Webhook 日志」）
-    ResourceNotFound { resource: &'static str, id: i64 },
+    /// 其他资源不存在（`resource` 用于拼出准确的提示，如「轮询记录」；
+    /// `id` 是字符串以兼容非数字标识，如去重表的 key hash）
+    ResourceNotFound { resource: &'static str, id: String },
 
     /// 上游服务调用失败（网络、API 错误等）
     UpstreamError(String),

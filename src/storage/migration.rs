@@ -121,22 +121,53 @@ CREATE TABLE IF NOT EXISTS error_log_counters (
     total       INTEGER NOT NULL DEFAULT 0
 );
 
-CREATE TABLE IF NOT EXISTS webhook_logs (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    at                TEXT NOT NULL,
-    source_ip         TEXT,
-    status_code       INTEGER NOT NULL,
-    received          INTEGER NOT NULL DEFAULT 0,
-    added             INTEGER NOT NULL DEFAULT 0,
-    skipped           INTEGER NOT NULL DEFAULT 0,
-    invalid           INTEGER NOT NULL DEFAULT 0,
-    summary           TEXT NOT NULL,
-    request_headers   TEXT,
-    request_body      TEXT,
-    response_body     TEXT
+-- 自动上号：每次轮询发卡站接口一条记录（含原始响应）
+CREATE TABLE IF NOT EXISTS key_poll_logs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    at              TEXT NOT NULL,
+    trigger_kind    TEXT NOT NULL,
+    ok              INTEGER NOT NULL DEFAULT 0,
+    http_status     INTEGER,
+    total           INTEGER NOT NULL DEFAULT 0,
+    active          INTEGER NOT NULL DEFAULT 0,
+    added           INTEGER NOT NULL DEFAULT 0,
+    skipped         INTEGER NOT NULL DEFAULT 0,
+    invalid         INTEGER NOT NULL DEFAULT 0,
+    summary         TEXT NOT NULL,
+    response_body   TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_webhook_logs_at ON webhook_logs(at DESC);
+CREATE INDEX IF NOT EXISTS idx_key_poll_logs_at ON key_poll_logs(at DESC);
+
+-- 自动上号：每个成功上号的 Key 一条记录
+CREATE TABLE IF NOT EXISTS key_onboard_logs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    at              TEXT NOT NULL,
+    credential_id   INTEGER NOT NULL,
+    key_masked      TEXT NOT NULL,
+    order_id        TEXT,
+    trigger_kind    TEXT NOT NULL,
+    proxy_id        TEXT,
+    proxy_url       TEXT,
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    note            TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_key_onboard_logs_at ON key_onboard_logs(at DESC);
+
+-- 自动上号去重：记录处理过的 Key（只存 sha256，不留明文），避免重复上号
+CREATE TABLE IF NOT EXISTS key_poll_seen (
+    key_hash        TEXT PRIMARY KEY,
+    key_masked      TEXT NOT NULL,
+    outcome         TEXT NOT NULL,
+    credential_id   INTEGER,
+    attempts        INTEGER NOT NULL DEFAULT 1,
+    first_seen      TEXT NOT NULL,
+    last_seen       TEXT NOT NULL,
+    note            TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_key_poll_seen_last ON key_poll_seen(last_seen DESC);
 "#;
 
 pub fn ensure_schema(conn: &Connection) -> Result<()> {
@@ -161,6 +192,9 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
         "rl_count",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
+    // v1.1.84 短暂存在过的 Webhook 接收日志表（功能已改为主动轮询），清理掉避免留死表
+    conn.execute("DROP TABLE IF EXISTS webhook_logs", [])
+        .context("清理 webhook_logs 失败")?;
     // 代理"标记不可用"（连续网络失败自动禁用 / 管理员手动禁用）
     add_column_if_missing(conn, "proxies", "disabled", "INTEGER NOT NULL DEFAULT 0")?;
     add_column_if_missing(conn, "proxies", "disabled_category", "TEXT")?;

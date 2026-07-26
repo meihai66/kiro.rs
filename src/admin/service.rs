@@ -79,34 +79,26 @@ fn mask_key(key: &str) -> String {
 }
 
 fn generate_api_key() -> String {
-    generate_key_with_prefix("sk-kiro-")
-}
-
-/// Webhook 密钥用独立前缀，便于在日志/配置里与下游 API Key 区分
-fn generate_webhook_key() -> String {
-    generate_key_with_prefix("sk-webhook-")
-}
-
-fn generate_key_with_prefix(prefix: &str) -> String {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     let mut bytes = [0u8; 30];
     for b in bytes.iter_mut() {
         *b = fastrand::u8(..);
     }
-    format!("{}{}", prefix, URL_SAFE_NO_PAD.encode(bytes))
+    let suffix = URL_SAFE_NO_PAD.encode(bytes);
+    format!("sk-kiro-{}", suffix)
 }
 
-/// storage 行 → API 响应项
-fn webhook_log_summary_item(
-    row: crate::storage::WebhookLogSummary,
-) -> super::types::WebhookLogSummaryItem {
-    super::types::WebhookLogSummaryItem {
+/// storage 行 → 轮询记录 API 项
+fn key_poll_log_item(row: crate::storage::KeyPollLogSummary) -> super::types::KeyPollLogItem {
+    super::types::KeyPollLogItem {
         id: row.id,
         at: row.at,
-        source_ip: row.source_ip,
-        status_code: row.status_code,
-        received: row.received,
+        trigger_kind: row.trigger_kind,
+        ok: row.ok,
+        http_status: row.http_status,
+        total: row.total,
+        active: row.active,
         added: row.added,
         skipped: row.skipped,
         invalid: row.invalid,
@@ -164,6 +156,24 @@ impl AdminService {
     pub fn with_api_key_manager(mut self, mgr: Arc<crate::api_key_manager::ApiKeyManager>) -> Self {
         self.api_key_manager = Some(mgr);
         self
+    }
+
+    // ============ 只读访问器（供 key_poll 等同 crate 模块复用现有依赖）============
+
+    pub fn config(&self) -> &Arc<RwLock<Config>> {
+        &self.config
+    }
+
+    pub fn store(&self) -> Option<&Arc<crate::storage::Store>> {
+        self.store.as_ref()
+    }
+
+    pub fn token_manager(&self) -> &Arc<MultiTokenManager> {
+        &self.token_manager
+    }
+
+    pub fn proxy_pool_ref(&self) -> Option<&Arc<ProxyPool>> {
+        self.proxy_pool.as_ref()
     }
 
     // ============ API Keys CRUD ============
@@ -809,133 +819,235 @@ impl AdminService {
         Ok(super::types::ClearErrorLogsResponse { deleted })
     }
 
-    // ============ Webhook 管理 ============
+    // ============ 自动上号（Key 轮询）============
 
-    /// Webhook 当前配置（开关 / 密钥 / 日志开关）
-    pub fn get_webhook_config(&self) -> super::types::WebhookConfigResponse {
+    pub fn get_key_poll_config(&self) -> super::types::KeyPollConfigResponse {
         let cfg = self.config.read();
-        let key = cfg
-            .webhook_api_key
-            .as_ref()
-            .map(|k| k.trim().to_string())
-            .unwrap_or_default();
-        super::types::WebhookConfigResponse {
-            enabled: cfg.webhook_enabled,
-            log_enabled: cfg.webhook_log_enabled,
-            has_api_key: !key.is_empty(),
+        let key = cfg.key_poll.api_key.trim().to_string();
+        super::types::KeyPollConfigResponse {
+            enabled: cfg.key_poll.enabled,
+            api_url: cfg.key_poll.api_url.clone(),
             api_key_masked: if key.is_empty() {
                 String::new()
             } else {
                 mask_key(&key)
             },
+            has_api_key: !key.is_empty(),
             api_key: key,
-            endpoint_path: "/api/webhook/import-keys".to_string(),
-            log_max_count: crate::storage::WEBHOOK_LOG_MAX_COUNT,
+            interval_secs: cfg.key_poll.interval_secs,
+            priority: cfg.key_poll.priority,
+            only_active: cfg.key_poll.only_active,
+            log_enabled: cfg.key_poll.log_enabled,
+            retry_invalid_max: cfg.key_poll.retry_invalid_max,
+            min_interval_secs: crate::model::config::KEY_POLL_MIN_INTERVAL_SECS,
+            poll_log_max_count: crate::storage::KEY_POLL_LOG_MAX_COUNT,
+            onboard_log_max_count: crate::storage::KEY_ONBOARD_LOG_MAX_COUNT,
         }
     }
 
-    /// 更新 Webhook 配置。持久化成功后即时生效（webhook 中间件请求时读同一份 Config）。
-    pub fn update_webhook_config(
+    /// 更新自动上号配置。持久化后即时生效（后台任务每 tick 重读同一份 Config）。
+    pub fn update_key_poll_config(
         &self,
-        req: &super::types::UpdateWebhookConfigRequest,
-    ) -> Result<super::types::WebhookConfigResponse, AdminServiceError> {
+        req: &super::types::UpdateKeyPollConfigRequest,
+    ) -> Result<super::types::KeyPollConfigResponse, AdminServiceError> {
         {
             let mut cfg = self.config.write();
 
-            // 先算出目标密钥，再判断「启用但无密钥」，避免同一请求里改开关+设密钥被误拒
-            if req.regenerate_api_key.unwrap_or(false) {
-                cfg.webhook_api_key = Some(generate_webhook_key());
-            } else if let Some(key) = &req.api_key {
-                let trimmed = key.trim();
-                cfg.webhook_api_key = if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                };
-            }
-
-            if let Some(enabled) = req.enabled {
-                if enabled
-                    && cfg
-                        .webhook_api_key
-                        .as_ref()
-                        .map(|k| k.trim().is_empty())
-                        .unwrap_or(true)
-                {
+            if let Some(url) = &req.api_url {
+                let trimmed = url.trim();
+                if trimmed.is_empty() {
+                    return Err(AdminServiceError::InvalidRequest("接口地址不能为空".into()));
+                }
+                if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
                     return Err(AdminServiceError::InvalidRequest(
-                        "启用 Webhook 前需先配置密钥".into(),
+                        "接口地址需以 http:// 或 https:// 开头".into(),
                     ));
                 }
-                cfg.webhook_enabled = enabled;
+                cfg.key_poll.api_url = trimmed.to_string();
             }
-
-            if let Some(log_enabled) = req.log_enabled {
-                cfg.webhook_log_enabled = log_enabled;
+            if let Some(key) = &req.api_key {
+                cfg.key_poll.api_key = key.trim().to_string();
+            }
+            if let Some(secs) = req.interval_secs {
+                let min = crate::model::config::KEY_POLL_MIN_INTERVAL_SECS;
+                if secs < min || secs > 86_400 {
+                    return Err(AdminServiceError::InvalidRequest(format!(
+                        "轮询间隔应在 {min}~86400 秒"
+                    )));
+                }
+                cfg.key_poll.interval_secs = secs;
+            }
+            if let Some(p) = req.priority {
+                cfg.key_poll.priority = p;
+            }
+            if let Some(v) = req.only_active {
+                cfg.key_poll.only_active = v;
+            }
+            if let Some(v) = req.log_enabled {
+                cfg.key_poll.log_enabled = v;
+            }
+            if let Some(v) = req.retry_invalid_max {
+                if v > 100 {
+                    return Err(AdminServiceError::InvalidRequest(
+                        "失败重试上限过大（>100）".into(),
+                    ));
+                }
+                cfg.key_poll.retry_invalid_max = v;
+            }
+            // 开关放最后判定，允许「同一请求里填密钥 + 开启」
+            if let Some(enabled) = req.enabled {
+                if enabled && cfg.key_poll.api_key.trim().is_empty() {
+                    return Err(AdminServiceError::InvalidRequest(
+                        "启用自动上号前需先填写接口密钥".into(),
+                    ));
+                }
+                cfg.key_poll.enabled = enabled;
             }
 
             cfg.save()
                 .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
         }
-        Ok(self.get_webhook_config())
+        Ok(self.get_key_poll_config())
     }
 
-    pub fn list_webhook_logs(
+    pub fn list_key_poll_logs(
         &self,
-        query: &super::types::ListWebhookLogsQuery,
-    ) -> Result<super::types::WebhookLogListResponse, AdminServiceError> {
-        let store = self.require_store("Webhook 接收日志")?;
+        query: &super::types::ListKeyPollLogsQuery,
+    ) -> Result<super::types::KeyPollLogListResponse, AdminServiceError> {
+        let store = self.require_store("自动上号记录")?;
         let limit = query.limit.clamp(1, 500);
         let (rows, total) = store
-            .list_webhook_logs(limit, query.offset)
+            .list_key_poll_logs(limit, query.offset)
             .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
-        Ok(super::types::WebhookLogListResponse {
+        Ok(super::types::KeyPollLogListResponse {
             total,
             limit,
             offset: query.offset,
-            items: rows.into_iter().map(webhook_log_summary_item).collect(),
+            items: rows.into_iter().map(key_poll_log_item).collect(),
         })
     }
 
-    pub fn get_webhook_log(
+    pub fn get_key_poll_log(
         &self,
         id: i64,
-    ) -> Result<super::types::WebhookLogDetail, AdminServiceError> {
-        let store = self.require_store("Webhook 接收日志")?;
+    ) -> Result<super::types::KeyPollLogDetail, AdminServiceError> {
+        let store = self.require_store("自动上号记录")?;
         let row = store
-            .get_webhook_log(id)
+            .get_key_poll_log(id)
             .map_err(|e| AdminServiceError::InternalError(e.to_string()))?
-            .ok_or(AdminServiceError::ResourceNotFound {
-                resource: "Webhook 日志",
-                id,
+            .ok_or_else(|| AdminServiceError::ResourceNotFound {
+                resource: "轮询记录",
+                id: id.to_string(),
             })?;
-        Ok(super::types::WebhookLogDetail {
-            summary_fields: webhook_log_summary_item(row.summary_fields),
-            request_headers: row.request_headers,
-            request_body: row.request_body,
+        Ok(super::types::KeyPollLogDetail {
+            summary_fields: key_poll_log_item(row.summary_fields),
             response_body: row.response_body,
         })
     }
 
-    pub fn delete_webhook_log(&self, id: i64) -> Result<(), AdminServiceError> {
-        let store = self.require_store("Webhook 接收日志")?;
+    pub fn clear_key_poll_logs(
+        &self,
+    ) -> Result<super::types::ClearErrorLogsResponse, AdminServiceError> {
+        let store = self.require_store("自动上号记录")?;
+        let deleted = store
+            .clear_key_poll_logs()
+            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        Ok(super::types::ClearErrorLogsResponse { deleted })
+    }
+
+    pub fn list_key_onboard_logs(
+        &self,
+        query: &super::types::ListKeyPollLogsQuery,
+    ) -> Result<super::types::KeyOnboardLogListResponse, AdminServiceError> {
+        let store = self.require_store("上号记录")?;
+        let limit = query.limit.clamp(1, 500);
+        let (rows, total) = store
+            .list_key_onboard_logs(limit, query.offset)
+            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        Ok(super::types::KeyOnboardLogListResponse {
+            total,
+            limit,
+            offset: query.offset,
+            items: rows
+                .into_iter()
+                .map(|r| super::types::KeyOnboardLogItem {
+                    id: r.id,
+                    at: r.at,
+                    credential_id: r.credential_id,
+                    key_masked: r.key_masked,
+                    order_id: r.order_id,
+                    trigger_kind: r.trigger_kind,
+                    proxy_id: r.proxy_id,
+                    proxy_url: r.proxy_url.as_deref().map(mask_url_userinfo),
+                    enabled: r.enabled,
+                    note: r.note,
+                })
+                .collect(),
+        })
+    }
+
+    pub fn clear_key_onboard_logs(
+        &self,
+    ) -> Result<super::types::ClearErrorLogsResponse, AdminServiceError> {
+        let store = self.require_store("上号记录")?;
+        let deleted = store
+            .clear_key_onboard_logs()
+            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        Ok(super::types::ClearErrorLogsResponse { deleted })
+    }
+
+    /// 去重表：已处理过的 Key（上号过 / 失败过）
+    pub fn list_key_seen(
+        &self,
+        query: &super::types::ListKeyPollLogsQuery,
+    ) -> Result<super::types::KeySeenListResponse, AdminServiceError> {
+        let store = self.require_store("去重记录")?;
+        let limit = query.limit.clamp(1, 500);
+        let (rows, total) = store
+            .list_key_seen(limit, query.offset)
+            .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+        Ok(super::types::KeySeenListResponse {
+            total,
+            limit,
+            offset: query.offset,
+            items: rows
+                .into_iter()
+                .map(|r| super::types::KeySeenItem {
+                    key_hash: r.key_hash,
+                    key_masked: r.key_masked,
+                    outcome: r.outcome,
+                    credential_id: r.credential_id,
+                    attempts: r.attempts,
+                    first_seen: r.first_seen,
+                    last_seen: r.last_seen,
+                    note: r.note,
+                })
+                .collect(),
+        })
+    }
+
+    /// 删除一条去重记录（该 Key 下次轮询会重新尝试上号）
+    pub fn delete_key_seen(&self, key_hash: &str) -> Result<(), AdminServiceError> {
+        let store = self.require_store("去重记录")?;
         let removed = store
-            .delete_webhook_log(id)
+            .delete_key_seen(key_hash)
             .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
         if !removed {
             return Err(AdminServiceError::ResourceNotFound {
-                resource: "Webhook 日志",
-                id,
+                resource: "去重记录",
+                id: key_hash.to_string(),
             });
         }
         Ok(())
     }
 
-    pub fn clear_webhook_logs(
+    pub fn clear_key_seen(
         &self,
+        req: &super::types::ClearKeySeenRequest,
     ) -> Result<super::types::ClearErrorLogsResponse, AdminServiceError> {
-        let store = self.require_store("Webhook 接收日志")?;
+        let store = self.require_store("去重记录")?;
         let deleted = store
-            .clear_webhook_logs()
+            .clear_key_seen(req.only_failed)
             .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
         Ok(super::types::ClearErrorLogsResponse { deleted })
     }
@@ -1934,7 +2046,7 @@ impl AdminService {
     }
 
     /// 批量导入 token.json，`force_enable=true` 时忽略「导入默认禁用」配置，
-    /// 新凭据验证通过并绑好代理后直接启用（Webhook 自动推送场景）。
+    /// 新凭据验证通过并绑好代理后直接启用（自动上号场景）。
     /// 绑定代理失败导致的 disabled 不受影响，仍保持禁用。
     pub async fn import_token_json_with_options(
         &self,

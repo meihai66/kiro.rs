@@ -5,12 +5,12 @@ mod api_key_manager;
 mod common;
 mod http_client;
 pub mod image;
+mod key_poll;
 mod kiro;
 mod model;
 mod push;
 mod storage;
 pub mod token;
-mod webhook;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -438,25 +438,6 @@ async fn main() {
         .map(|k| !k.trim().is_empty())
         .unwrap_or(false);
 
-    // Webhook 复用 Admin 服务的导入管线，未启用 Admin 时无法单独启用
-    if !admin_key_valid
-        && config
-            .read()
-            .webhook_api_key
-            .as_ref()
-            .is_some_and(|k| !k.trim().is_empty())
-    {
-        tracing::warn!("webhookApiKey 已配置但 adminApiKey 未启用，Webhook API 未启用");
-    }
-    let webhook_configured = {
-        let cfg = config.read();
-        cfg.webhook_enabled
-            && cfg
-                .webhook_api_key
-                .as_ref()
-                .is_some_and(|k| !k.trim().is_empty())
-    };
-
     let app = {
         let cfg = config.read();
         if let Some(admin_key) = &cfg.admin_api_key {
@@ -557,7 +538,23 @@ async fn main() {
                     });
                 }
 
-                let admin_state = admin::AdminState::from_arc(admin_key, admin_service.clone());
+                // 自动上号：后台轮询发卡站接口，拉到新 Key 自动入池并启用
+                // （开关/间隔在管理界面热更新，任务常驻只是空转 tick）
+                key_poll::spawn_poll_loop(admin_service.clone());
+                {
+                    let cfg = config.read();
+                    if cfg.key_poll.enabled && !cfg.key_poll.api_key.trim().is_empty() {
+                        tracing::info!(
+                            interval_secs = cfg.key_poll.interval_secs,
+                            url = %cfg.key_poll.api_url,
+                            "自动上号已启用"
+                        );
+                    } else {
+                        tracing::info!("自动上号未启用，可在管理界面「自动上号」页开启");
+                    }
+                }
+
+                let admin_state = admin::AdminState::from_arc(admin_key, admin_service);
                 let admin_app = admin::create_admin_router(admin_state);
 
                 // 创建 Admin UI 路由
@@ -565,29 +562,9 @@ async fn main() {
 
                 tracing::info!("Admin API 已启用");
                 tracing::info!("Admin UI 已启用: /admin");
-                let app = anthropic_app
+                anthropic_app
                     .nest("/api/admin", admin_app)
-                    .nest("/admin", admin_ui_app);
-
-                // Webhook API（独立密钥，供外部系统自动推送 Key 入池）
-                // 路由始终挂载：开关与密钥在请求时读共享 Config，
-                // 管理界面改完即时生效，无需重启换路由。
-                let webhook_state = webhook::WebhookState {
-                    config: config.clone(),
-                    service: admin_service.clone(),
-                    store: Some(store.clone()),
-                };
-                if webhook_configured {
-                    tracing::info!("Webhook API 已启用: POST /api/webhook/import-keys");
-                } else {
-                    tracing::info!(
-                        "Webhook API 已挂载但未启用（缺密钥或已关闭），可在管理界面 Webhook 页开启"
-                    );
-                }
-                app.nest(
-                    "/api/webhook",
-                    webhook::create_webhook_router(webhook_state),
-                )
+                    .nest("/admin", admin_ui_app)
             }
         } else {
             anthropic_app

@@ -13,12 +13,12 @@ use super::{
     types::{
         AddCredentialRequest, BatchProxyDeleteRequest, BatchProxyExtendRequest,
         BatchProxyResetDisabledRequest, BatchProxySlotsRequest, BatchProxyUnbindRequest,
-        BindProxyRequest, ClearErrorLogsRequest, CreateApiKeyRequest, ExportCredentialsRequest,
-        ImportProxiesRequest, ImportTokenJsonRequest, ListErrorLogsQuery, ListWebhookLogsQuery,
-        SetAllowOveruseRequest, SetCredentialRpmRequest, SetDisabledRequest, SetEmailRequest,
-        SetEndpointRequest, SetOveragePreferenceRequest, SetPriorityRequest,
-        SetProxyDisabledRequest, SetRegionRequest, SuccessResponse, UpdateApiKeyRequest,
-        UpdateProxyConfigRequest, UpdateWebhookConfigRequest,
+        BindProxyRequest, ClearErrorLogsRequest, ClearKeySeenRequest, CreateApiKeyRequest,
+        ExportCredentialsRequest, ImportProxiesRequest, ImportTokenJsonRequest, ListErrorLogsQuery,
+        ListKeyPollLogsQuery, RunKeyPollRequest, SetAllowOveruseRequest, SetCredentialRpmRequest,
+        SetDisabledRequest, SetEmailRequest, SetEndpointRequest, SetOveragePreferenceRequest,
+        SetPriorityRequest, SetProxyDisabledRequest, SetRegionRequest, SuccessResponse,
+        UpdateApiKeyRequest, UpdateKeyPollConfigRequest, UpdateProxyConfigRequest,
     },
 };
 
@@ -717,61 +717,114 @@ pub async fn clear_error_logs(
     }
 }
 
-// =================== Webhook handlers ===================
+// =================== 自动上号（Key 轮询）handlers ===================
 
-/// GET /api/admin/webhook/config
-pub async fn get_webhook_config(State(state): State<AdminState>) -> impl IntoResponse {
-    Json(state.service.get_webhook_config())
+/// GET /api/admin/key-poll/config
+pub async fn get_key_poll_config(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.service.get_key_poll_config())
 }
 
-/// POST /api/admin/webhook/config
-/// body: `{ "enabled": true, "logEnabled": true, "apiKey": "..." | "", "regenerateApiKey": true }`
-pub async fn update_webhook_config(
+/// POST /api/admin/key-poll/config
+pub async fn update_key_poll_config(
     State(state): State<AdminState>,
-    Json(req): Json<UpdateWebhookConfigRequest>,
+    Json(req): Json<UpdateKeyPollConfigRequest>,
 ) -> impl IntoResponse {
-    match state.service.update_webhook_config(&req) {
+    match state.service.update_key_poll_config(&req) {
         Ok(resp) => Json(resp).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
 }
 
-/// GET /api/admin/webhook/logs?limit=50&offset=0
-pub async fn list_webhook_logs(
+/// POST /api/admin/key-poll/run
+/// body: `{ "dryRun": false }` — 立即执行一次上号（dryRun 只拉取比对）
+pub async fn run_key_poll(
     State(state): State<AdminState>,
-    axum::extract::Query(q): axum::extract::Query<ListWebhookLogsQuery>,
+    Json(req): Json<RunKeyPollRequest>,
 ) -> impl IntoResponse {
-    match state.service.list_webhook_logs(&q) {
+    let outcome = crate::key_poll::poll_once(&state.service, "manual", req.dry_run).await;
+    Json(outcome)
+}
+
+/// GET /api/admin/key-poll/logs?limit=50&offset=0
+pub async fn list_key_poll_logs(
+    State(state): State<AdminState>,
+    axum::extract::Query(q): axum::extract::Query<ListKeyPollLogsQuery>,
+) -> impl IntoResponse {
+    match state.service.list_key_poll_logs(&q) {
         Ok(resp) => Json(resp).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
 }
 
-/// GET /api/admin/webhook/logs/:id
-pub async fn get_webhook_log(
+/// GET /api/admin/key-poll/logs/:id
+pub async fn get_key_poll_log(
     State(state): State<AdminState>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    match state.service.get_webhook_log(id) {
+    match state.service.get_key_poll_log(id) {
         Ok(detail) => Json(detail).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
 }
 
-/// DELETE /api/admin/webhook/logs/:id
-pub async fn delete_webhook_log(
-    State(state): State<AdminState>,
-    Path(id): Path<i64>,
-) -> impl IntoResponse {
-    match state.service.delete_webhook_log(id) {
-        Ok(_) => Json(SuccessResponse::new(format!("Webhook 日志 #{} 已删除", id))).into_response(),
+/// POST /api/admin/key-poll/logs/clear
+pub async fn clear_key_poll_logs(State(state): State<AdminState>) -> impl IntoResponse {
+    match state.service.clear_key_poll_logs() {
+        Ok(resp) => Json(resp).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
 }
 
-/// POST /api/admin/webhook/logs/clear
-pub async fn clear_webhook_logs(State(state): State<AdminState>) -> impl IntoResponse {
-    match state.service.clear_webhook_logs() {
+/// GET /api/admin/key-poll/onboard-logs?limit=50&offset=0
+pub async fn list_key_onboard_logs(
+    State(state): State<AdminState>,
+    axum::extract::Query(q): axum::extract::Query<ListKeyPollLogsQuery>,
+) -> impl IntoResponse {
+    match state.service.list_key_onboard_logs(&q) {
+        Ok(resp) => Json(resp).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/key-poll/onboard-logs/clear
+pub async fn clear_key_onboard_logs(State(state): State<AdminState>) -> impl IntoResponse {
+    match state.service.clear_key_onboard_logs() {
+        Ok(resp) => Json(resp).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// GET /api/admin/key-poll/seen?limit=50&offset=0
+/// 已处理过的 Key（去重表）
+pub async fn list_key_seen(
+    State(state): State<AdminState>,
+    axum::extract::Query(q): axum::extract::Query<ListKeyPollLogsQuery>,
+) -> impl IntoResponse {
+    match state.service.list_key_seen(&q) {
+        Ok(resp) => Json(resp).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// DELETE /api/admin/key-poll/seen/:hash
+/// 删除一条去重记录，该 Key 下次轮询会重新尝试上号
+pub async fn delete_key_seen(
+    State(state): State<AdminState>,
+    Path(hash): Path<String>,
+) -> impl IntoResponse {
+    match state.service.delete_key_seen(&hash) {
+        Ok(_) => Json(SuccessResponse::new("已删除，该 Key 下次轮询将重新尝试")).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/key-poll/seen/clear
+/// body: `{ "onlyFailed": true }` 只清失败记录（保留已上号的）
+pub async fn clear_key_seen(
+    State(state): State<AdminState>,
+    Json(req): Json<ClearKeySeenRequest>,
+) -> impl IntoResponse {
+    match state.service.clear_key_seen(&req) {
         Ok(resp) => Json(resp).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }

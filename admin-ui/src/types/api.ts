@@ -960,59 +960,137 @@ export interface TestChatResponse {
   outputTokens: number
 }
 
-// ===== Webhook 管理 =====
+// ===== 自动上号（Key 轮询）=====
 
-export interface WebhookConfigResponse {
-  /** 接口开关（关闭时接口返回 403） */
+export interface KeyPollConfigResponse {
   enabled: boolean
-  /** 是否记录接收到的原始请求体 */
-  logEnabled: boolean
-  hasApiKey: boolean
+  apiUrl: string
   /** 完整密钥（未配置时为空字符串） */
   apiKey: string
   apiKeyMasked: string
-  /** 接口路径，例如 /api/webhook/import-keys */
-  endpointPath: string
-  /** 接收日志留存条数上限 */
-  logMaxCount: number
+  hasApiKey: boolean
+  intervalSecs: number
+  priority: number
+  onlyActive: boolean
+  logEnabled: boolean
+  /** 验证失败的 Key 重试次数上限（0 = 不限制） */
+  retryInvalidMax: number
+  minIntervalSecs: number
+  pollLogMaxCount: number
+  onboardLogMaxCount: number
 }
 
-export interface UpdateWebhookConfigRequest {
+export interface UpdateKeyPollConfigRequest {
   enabled?: boolean
-  logEnabled?: boolean
+  apiUrl?: string
   /** 空字符串 = 清除密钥 */
   apiKey?: string
-  regenerateApiKey?: boolean
+  intervalSecs?: number
+  priority?: number
+  onlyActive?: boolean
+  logEnabled?: boolean
+  retryInvalidMax?: number
 }
 
-export interface WebhookLogSummaryItem {
+export interface OnboardedItem {
+  credentialId: number
+  keyMasked: string
+  orderId?: string | null
+  proxyId?: string | null
+  proxyUrl?: string | null
+  enabled: boolean
+  note?: string | null
+}
+
+/** 一次上号的结果（手动「立即上号」的返回体） */
+export interface PollOutcome {
+  ok: boolean
+  httpStatus?: number | null
+  total: number
+  active: number
+  /** 过滤去重后待上号数量 */
+  candidates: number
+  /** 因已在凭据池里跳过 */
+  alreadyInPool: number
+  /** 因已处理过（上号过/失败超限）跳过 */
+  skippedSeen: number
+  added: number
+  skipped: number
+  invalid: number
+  dryRun: boolean
+  summary: string
+  onboarded?: OnboardedItem[]
+  errors?: string[]
+}
+
+export interface KeyPollLogItem {
   id: number
   at: string
-  sourceIp?: string | null
-  statusCode: number
-  received: number
+  /** auto = 后台定时；manual = 手动触发 */
+  triggerKind: string
+  ok: boolean
+  httpStatus?: number | null
+  total: number
+  active: number
   added: number
   skipped: number
   invalid: number
   summary: string
 }
 
-export interface WebhookLogDetail extends WebhookLogSummaryItem {
-  requestHeaders?: string | null
-  /** 收到的原始请求体（超长会被截断并标注） */
-  requestBody?: string | null
-  /** 返回给推送方的响应体 */
+export interface KeyPollLogDetail extends KeyPollLogItem {
+  /** 上游原始响应（超长会截断并标注） */
   responseBody?: string | null
 }
 
-export interface WebhookLogListResponse {
+export interface KeyPollLogListResponse {
   total: number
   limit: number
   offset: number
-  items: WebhookLogSummaryItem[]
+  items: KeyPollLogItem[]
 }
 
-export interface ListWebhookLogsParams {
+export interface KeyOnboardLogItem {
+  id: number
+  at: string
+  credentialId: number
+  keyMasked: string
+  orderId?: string | null
+  triggerKind: string
+  proxyId?: string | null
+  proxyUrl?: string | null
+  enabled: boolean
+  note?: string | null
+}
+
+export interface KeyOnboardLogListResponse {
+  total: number
+  limit: number
+  offset: number
+  items: KeyOnboardLogItem[]
+}
+
+export interface ListKeyPollLogsParams {
   limit?: number
   offset?: number
+}
+
+/** 去重表条目：已处理过的 Key */
+export interface KeySeenItem {
+  keyHash: string
+  keyMasked: string
+  /** onboarded = 已上号（永久跳过）；invalid = 验证失败；skipped = 管线判定已存在 */
+  outcome: string
+  credentialId?: number | null
+  attempts: number
+  firstSeen: string
+  lastSeen: string
+  note?: string | null
+}
+
+export interface KeySeenListResponse {
+  total: number
+  limit: number
+  offset: number
+  items: KeySeenItem[]
 }

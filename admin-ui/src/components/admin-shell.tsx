@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Link, Outlet, useLocation } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, BarChart3, BrainCircuit, KeyRound, LogOut, Moon, Settings as SettingsIcon, Shield, Sun, Users, Webhook } from 'lucide-react'
+import { AlertTriangle, BarChart3, BrainCircuit, KeyRound, LogOut, Moon, RefreshCw, Settings as SettingsIcon, Shield, Sun, Users } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { storage } from '@/lib/storage'
 
@@ -15,8 +15,8 @@ const TABS = [
   { to: '/proxies', label: '代理池', icon: Shield },
   { to: '/api-keys', label: '密钥', icon: KeyRound },
   { to: '/model-coverage', label: '模型', icon: BrainCircuit },
+  { to: '/key-poll', label: '自动上号', icon: RefreshCw },
   { to: '/error-logs', label: '错误日志', icon: AlertTriangle },
-  { to: '/webhook', label: 'Webhook', icon: Webhook },
   { to: '/settings', label: '设置', icon: SettingsIcon },
 ]
 

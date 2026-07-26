@@ -104,12 +104,7 @@ AppState {
 
 **Admin API** (需配置 `adminApiKey`):
 - 凭据 CRUD、状态监控、余额查询
-
-**Webhook API** (需另配 `webhookApiKey`，且 Admin 已启用):
-- `POST /api/webhook/import-keys` - 外部系统自动推送 `ksk_*` Key（支持 `ksk_xxx|host:port:user:pass` 行内代理），代理入池强绑、验证去重后直接启用参与调度（`src/webhook.rs`，复用 `import_token_json_with_options` 管线的 `force_enable`）
-- 路由始终挂载（Admin 启用时），`webhookEnabled` / `webhookApiKey` 在请求时从共享 Config 读取，管理界面改完即时生效
-- 用 `Bytes` 而非 `Json<T>` 提取请求体：先原样落 `webhook_logs` 表再解析，畸形 JSON 的推送也能在界面看到原文（单体上限 64KB，认证头只记 `<present>`；表按 `WEBHOOK_LOG_MAX_COUNT`=500 在 insert 时修剪）
-- 管理端点：`GET|POST /api/admin/webhook/config`、`GET /api/admin/webhook/logs`、`GET|DELETE /api/admin/webhook/logs/{id}`、`POST /api/admin/webhook/logs/clear`；前端页面 `admin-ui/src/pages/webhook-page.tsx`
+- 自动上号：`GET|POST /key-poll/config`、`POST /key-poll/run`（`{"dryRun":true}` 试运行）、`GET /key-poll/logs`、`GET /key-poll/logs/{id}`、`POST /key-poll/logs/clear`、`GET /key-poll/onboard-logs`、`POST /key-poll/onboard-logs/clear`、`GET /key-poll/seen`、`DELETE /key-poll/seen/{hash}`、`POST /key-poll/seen/clear`
 
 ## 重要注意事项
 
@@ -125,3 +120,4 @@ AppState {
 10. **图片处理**: GIF 会被抽帧并重编码为 JPEG 静态帧序列（最多 20 帧、最多 5fps），以降低请求体大小并提升内容识别效果。图片缩放规则：长边超过 4000px 或总像素超过 400 万时等比缩放
 11. **输入压缩**: 当请求体接近上游限制（约 5MB）时，自动执行多层压缩（空白压缩 → thinking 截断 → tool_result 截断 → tool_use input 截断 → 历史截断），并自动修复 tool_use/tool_result 配对以避免上游 400 错误
 12. **上游 400 排障**: 若遇到 `Improperly formed request` 错误，参考 `docs/troubleshooting/400-improperly-formed-request.md` 和 `tools/test_400_improperly_formed.py` 进行诊断
+13. **自动上号**: `src/key_poll.rs` 定时轮询发卡站接口（`config.keyPoll`），拉到本地没有的 `ksk_*` 就走 `import_token_json_with_options(force_enable=true)` 管线（验证 → 绑代理 → 直接启用，绕过 `importDisabledByDefault`）。后台任务常驻，每 10s tick 按当前配置判断是否到期，开关/间隔热更新无需重启。落三张表：`key_poll_logs`（每次轮询一条，含原始响应，留存 300）、`key_onboard_logs`（每个成功上号的 Key 一条，留存 1000）、`key_poll_seen`（去重表，只存 key 的 sha256）。去重规则：`onboarded` 是终态永久跳过（凭据被删也不重复上号，SQL upsert 里显式不许降级），`invalid` 按 `retryInvalidMax` 计次跳过；前端页面 `admin-ui/src/pages/key-poll-page.tsx`

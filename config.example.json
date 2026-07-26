@@ -6,13 +6,20 @@
   "defaultEndpoint": "ide",
   "region": "us-east-1",
   "adminApiKey": "sk-admin-your-secret-key",
-  "webhookApiKey": "sk-webhook-your-secret-key",
-  "webhookEnabled": true,
-  "webhookLogEnabled": true,
   "credentialRpm": 5,
   "promptCacheTtlSeconds": 300,
   "promptCacheAccountingEnabled": true,
   "compression": {
     "maxRequestBodyBytes": 4718592
+  },
+  "keyPoll": {
+    "enabled": false,
+    "apiUrl": "https://key.example.com/api/my/keys",
+    "apiKey": "usr-your-key-site-api-key",
+    "intervalSecs": 300,
+    "priority": 10,
+    "onlyActive": true,
+    "logEnabled": true,
+    "retryInvalidMax": 3
   }
 }
