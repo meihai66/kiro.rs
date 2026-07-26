@@ -1,5 +1,17 @@
 # Changelog
 
+## [v1.1.85] - 2026-07-26
+
+### 新增
+
+- **自动上号（定时轮询发卡站拉新 Key 入池）** — 新增 `src/key_poll.rs` 与管理界面「自动上号」页：定时 GET 发卡站接口（`X-API-Key` 认证），解析 `{count, active, keys:[{key, status, order_id}]}`，按 `status` 过滤、批内去重、剔除已在池的，只对新 Key 走 `import_token_json_with_options(force_enable=true)`（逐条验证 → 分配绑定代理 → 直接启用）；后台任务每 10s tick 按当前配置判断是否到期，开关/间隔/密钥热更新无需重启；拉取失败不中断循环，上游非 200、网络不可达、JSON 解析失败均落库为一次结果 (`src/key_poll.rs`, `admin-ui/src/pages/key-poll-page.tsx`, `admin-ui/src/api/key-poll.ts`, `src/model/config.rs`, `src/main.rs`)
+- **重复上号防护（去重表 + 失败重试计次）** — 新增 `key_poll_seen` 去重表，只存 Key 的 sha256 不留明文：`onboarded` 为终态永久跳过（SQL upsert 显式禁止降级回 `invalid`），凭据被删后上游再返回同一 Key 也不会重复上；`invalid` 按 `retryInvalidMax`（默认 3）计次跳过，未超限仍重试，避免代理临时不可用这类偶发失败把好 Key 永久拉黑；管理界面支持单条「允许重上」、一键「重试全部失败」与全部清空 (`src/storage/mod.rs`, `src/storage/migration.rs`, `src/admin/service.rs`)
+- **上号记录留存** — `key_poll_logs` 每次轮询一条（含上游原始响应，留存 300 条）、`key_onboard_logs` 每个成功上号的 Key 一条（凭据 ID、脱敏 Key、订单号、所绑代理，留存 1000 条） (`src/storage/mod.rs`, `src/admin/handlers.rs`, `src/admin/types.rs`)
+
+### 移除
+
+- **Webhook 接收接口** — 改为主动轮询后移除上一版的 `POST /api/webhook/import-keys` 及 Webhook 管理页，并 DROP 掉遗留的 `webhook_logs` 表 (`src/webhook.rs`, `admin-ui/src/pages/webhook-page.tsx`, `src/admin/router.rs`, `src/storage/migration.rs`)
+
 ## [v1.1.84] - 2026-07-26
 
 ### 新增
