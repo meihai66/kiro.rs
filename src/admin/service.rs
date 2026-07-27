@@ -1068,30 +1068,46 @@ impl AdminService {
         }
         let now = Utc::now();
         let mut marked = 0usize;
-        for (log_id, credential_id) in live {
-            // 禁用事件（持久化在 error_logs）比内存里的 disable_reason 可靠：
-            // 后者是运行时状态，服务重启就没了，重启前被封的号靠它永远判不出来
-            let event = store
-                .find_last_disable_event(credential_id)
-                .ok()
-                .flatten()
-                .filter(|(_, r)| r.as_deref().is_some_and(is_fatal_disable_reason));
+        for (log_id, credential_id, onboarded_at) in live {
+            // 本轮（上号之后）第一条致命禁用事件——上号前的事件可能来自被复用的
+            // 凭据 id 或该号上一轮的历史，取最后一条则会被后续重复事件带偏
+            let fatal_event = store
+                .list_disable_events_since(credential_id, onboarded_at)
+                .unwrap_or_default()
+                .into_iter()
+                .find(|(_, r)| r.as_deref().is_some_and(is_fatal_disable_reason));
 
             let (died_at, reason) = match snapshot.entries.iter().find(|e| e.id == credential_id) {
-                None => match event {
+                None => match fatal_event {
                     // 号被删了：能查到禁用事件就用事件时刻，否则用发现时刻
                     Some((at, r)) => (at, r.unwrap_or_else(|| "凭据已删除".to_string())),
                     None => (now, "凭据已删除".to_string()),
                 },
-                Some(entry) if entry.disabled => match event {
-                    Some((at, r)) => (at, r.unwrap_or_else(|| "已禁用".to_string())),
-                    // 事件查不到就退回内存里的原因（仅本次运行期内禁用的号才有）
-                    None => match entry.disable_reason.as_ref() {
-                        Some(r) if death_rank(Some(r)) == 0 => (now, r.as_log_str().to_string()),
-                        // 手动禁用 / 失败计数等还可能恢复，不算废
-                        _ => continue,
-                    },
-                },
+                // 还在池里但被禁用
+                Some(entry) if entry.disabled => {
+                    match entry.disable_reason.as_ref() {
+                        // 本次运行期内确实因致命原因禁用，时刻取本轮第一条事件
+                        Some(r) if death_rank(Some(r)) == 0 => (
+                            fatal_event.map(|(at, _)| at).unwrap_or(now),
+                            r.as_log_str().to_string(),
+                        ),
+                        // 明确可恢复的（失败计数、模型不可用、代理不可用），继续计时
+                        Some(
+                            DisableReason::FailureLimit
+                            | DisableReason::RefreshFailureLimit
+                            | DisableReason::ModelUnavailable
+                            | DisableReason::ProxyUnavailable,
+                        ) => continue,
+                        // Manual 或无原因：这两种分不清「管理员手动禁用」和
+                        // 「重启后加载的禁用态」——DB 只存 disabled 布尔不存原因，
+                        // 重启后所有禁用凭据的原因都会变成 Manual。只能靠上号之后的
+                        // 致命事件兜底：有就是真废了，没有就当作手动禁用继续计时。
+                        _ => match fatal_event {
+                            Some((at, r)) => (at, r.unwrap_or_else(|| "已禁用".to_string())),
+                            None => continue,
+                        },
+                    }
+                }
                 Some(_) => continue,
             };
             match store.mark_onboard_dead(log_id, died_at, &reason) {

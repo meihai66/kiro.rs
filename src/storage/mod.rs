@@ -1010,38 +1010,56 @@ impl Store {
         Ok(n as u64)
     }
 
-    /// 查某凭据最近一次「被自动禁用」事件的时刻与原因。
+    /// 查某凭据在 `since` 之后的「被自动禁用」事件，按时间升序。
     ///
     /// 凭据被自动禁用时会往 error_logs 落一条 `credential_disabled`（见
-    /// token_manager 的禁用路径），这里直接取那个真实时刻——比事后扫描发现的
-    /// 时间准得多（扫描最多滞后一个 tick，服务重启期间死的号更是无从得知）。
+    /// token_manager 的禁用路径），用那个真实时刻算存活时长比事后扫描准得多
+    ///（扫描最多滞后一个 tick，服务重启期间死的号更是无从得知）。
+    ///
+    /// `since` 一般传上号时间，用来挡掉两类脏数据：凭据 id 被复用后翻出的前任事件，
+    /// 以及该号上一轮（被 reset 复活前）的旧事件。调用方取其中**第一条**致命原因的，
+    /// 即本轮真正的死亡时刻——取最后一条会被后续重复事件带偏。
     /// 日志有留存上限，查不到时调用方回退到发现时刻。
-    pub fn find_last_disable_event(
+    pub fn list_disable_events_since(
         &self,
         credential_id: u64,
-    ) -> Result<Option<(DateTime<Utc>, Option<String>)>> {
+        since: DateTime<Utc>,
+    ) -> Result<Vec<(DateTime<Utc>, Option<String>)>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT at, disable_reason FROM error_logs \
-             WHERE credential_id = ?1 AND error_kind = 'credential_disabled' \
-             ORDER BY id DESC LIMIT 1",
+             WHERE credential_id = ?1 AND error_kind = 'credential_disabled' AND at >= ?2 \
+             ORDER BY id ASC LIMIT 50",
         )?;
-        let mut rows = stmt.query(params![credential_id as i64])?;
-        if let Some(r) = rows.next()? {
+        let rows = stmt.query_map(params![credential_id as i64, since.to_rfc3339()], |r| {
             let at: String = r.get(0)?;
-            Ok(parse_dt(&at).map(|dt| (dt, r.get::<_, Option<String>>(1).ok().flatten())))
-        } else {
-            Ok(None)
+            Ok((at, r.get::<_, Option<String>>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (at, reason) = row?;
+            if let Some(dt) = parse_dt(&at) {
+                out.push((dt, reason));
+            }
         }
+        Ok(out)
     }
 
-    /// 仍在存活计时中的上号记录：返回 (记录 id, 凭据 id)
-    pub fn list_live_onboard_credentials(&self) -> Result<Vec<(i64, u64)>> {
+    /// 仍在存活计时中的上号记录：返回 (记录 id, 凭据 id, 上号时间)
+    ///
+    /// 上号时间用于过滤禁用事件——只有上号之后发生的才算数（见
+    /// [`Self::list_disable_events_since`]）。
+    pub fn list_live_onboard_credentials(&self) -> Result<Vec<(i64, u64, DateTime<Utc>)>> {
         let conn = self.conn()?;
-        let mut stmt =
-            conn.prepare("SELECT id, credential_id FROM key_onboard_logs WHERE died_at IS NULL")?;
+        let mut stmt = conn
+            .prepare("SELECT id, credential_id, at FROM key_onboard_logs WHERE died_at IS NULL")?;
         let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as u64))
+            let at: String = r.get(2)?;
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)? as u64,
+                parse_dt(&at).unwrap_or_else(Utc::now),
+            ))
         })?;
         rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
     }
@@ -1884,14 +1902,22 @@ mod tests {
                 disable_reason: Some("额度已用尽".to_string()),
             })
             .unwrap();
+        let since = Utc::now() - chrono::Duration::days(1);
         let found = store
-            .find_last_disable_event(77)
+            .list_disable_events_since(77, since)
             .unwrap()
+            .into_iter()
+            .next()
             .expect("应查到禁用事件");
         assert_eq!(found.1.as_deref(), Some("额度已用尽"));
         assert_eq!(found.0.timestamp(), disabled_at.timestamp());
         // 无事件的凭据查不到
-        assert!(store.find_last_disable_event(999).unwrap().is_none());
+        assert!(
+            store
+                .list_disable_events_since(999, since)
+                .unwrap()
+                .is_empty()
+        );
 
         // 打死亡点后存活时长定格，且不会被二次覆盖
         assert!(store.mark_onboard_dead(id, found.0, "额度已用尽").unwrap());
@@ -1909,6 +1935,53 @@ mod tests {
 
         // 死了的记录不再出现在存活扫描列表里
         assert!(store.list_live_onboard_credentials().unwrap().is_empty());
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_disable_events_filtered_by_since_and_ordered_asc() {
+        let (store, path) = temp_store();
+        let now = Utc::now();
+        let log = |cid: u64, at: chrono::DateTime<Utc>, reason: &str| {
+            store
+                .insert_error_log(&ErrorLogInsert {
+                    at,
+                    credential_id: Some(cid),
+                    endpoint: None,
+                    status_code: 0,
+                    upstream_status: None,
+                    error_kind: "credential_disabled".to_string(),
+                    model: None,
+                    summary: reason.to_string(),
+                    request_method: None,
+                    request_path: None,
+                    request_headers: None,
+                    response_headers: None,
+                    request_body: None,
+                    response_body: None,
+                    user_id: None,
+                    request_id: None,
+                    disable_reason: Some(reason.to_string()),
+                })
+                .unwrap();
+        };
+        // 上号前的历史事件（可能来自被复用的 id / 上一轮），必须被挡掉
+        log(1, now - chrono::Duration::days(10), "余额不足");
+        // 本轮：先真实死亡，之后又重复记了两条
+        log(1, now - chrono::Duration::hours(5), "额度已用尽");
+        log(1, now - chrono::Duration::hours(2), "额度已用尽");
+        log(1, now - chrono::Duration::minutes(10), "余额不足");
+
+        let onboarded_at = now - chrono::Duration::days(1);
+        let events = store.list_disable_events_since(1, onboarded_at).unwrap();
+        assert_eq!(events.len(), 3, "上号前那条应被 since 挡掉");
+        assert_eq!(
+            events[0].0.timestamp(),
+            (now - chrono::Duration::hours(5)).timestamp(),
+            "必须升序返回，第一条才是本轮真正的死亡时刻"
+        );
 
         drop(store);
         let _ = std::fs::remove_file(&path);

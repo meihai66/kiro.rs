@@ -299,19 +299,22 @@ impl KiroProvider {
                     tm.update_balance_cache(id, remaining);
                     tracing::debug!("凭据 #{} 余额缓存已刷新: {:.2}", id, remaining);
                     if remaining < 1.0 {
-                        tm.record_disable_event(
-                            id,
-                            crate::kiro::token_manager::DisableReason::InsufficientBalance,
-                            None,
-                            format!("余额不足 ({:.2} < 1.0)，已主动禁用", remaining),
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                        );
-                        tm.mark_insufficient_balance(id);
-                        tracing::warn!("凭据 #{} 余额不足 ({:.2})，已主动禁用", id, remaining);
+                        // 先禁用再记事件：开了「允许超额」的号并不会被禁用，
+                        // 那种情况下记「禁用事件」既污染错误日志，也会让存活时长判错
+                        if tm.mark_insufficient_balance(id) {
+                            tm.record_disable_event(
+                                id,
+                                crate::kiro::token_manager::DisableReason::InsufficientBalance,
+                                None,
+                                format!("余额不足 ({:.2} < 1.0)，已主动禁用", remaining),
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                            );
+                            tracing::warn!("凭据 #{} 余额不足 ({:.2})，已主动禁用", id, remaining);
+                        }
                     }
                 }
                 Err(e) => {

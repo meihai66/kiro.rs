@@ -3510,18 +3510,22 @@ impl MultiTokenManager {
     ///
     /// 若该凭据开启了「允许超额使用」(`allow_overuse=true`)，则跳过禁用，
     /// 由上游决定是否实际放行（前提是上游账号侧也开启了超额计费）。
-    pub fn mark_insufficient_balance(&self, id: u64) {
+    /// 因余额不足禁用凭据；返回是否真的禁用了
+    ///（开了「允许超额」时保持启用并返回 false，调用方据此决定要不要记禁用事件）
+    pub fn mark_insufficient_balance(&self, id: u64) -> bool {
         let mut entries = self.entries.lock();
         if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
             if entry.credentials.allow_overuse {
                 tracing::info!("凭据 #{} 余额不足但已开启允许超额使用，保持启用状态", id);
-                return;
+                return false;
             }
             entry.disabled = true;
             entry.auto_heal_reason = None; // 清除自愈原因，防止被自愈循环错误恢复
             entry.disable_reason = Some(DisableReason::InsufficientBalance);
             tracing::warn!("凭据 #{} 已标记为余额不足", id);
+            return true;
         }
+        false
     }
 
     /// 设置凭据「允许超额使用」开关（Admin API）
