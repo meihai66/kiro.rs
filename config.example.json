@@ -20,6 +20,7 @@
     "priority": 10,
     "onlyActive": true,
     "logEnabled": true,
-    "retryInvalidMax": 3
+    "retryInvalidMax": 3,
+    "reclaimDisabledProxies": true
   }
 }

@@ -1037,6 +1037,8 @@ pub struct KeyPollConfigResponse {
     pub log_enabled: bool,
     /// 验证失败的 Key 重试次数上限（0 = 不限制）
     pub retry_invalid_max: u32,
+    /// 代理槽不足时自动回收已禁用凭据的代理槽
+    pub reclaim_disabled_proxies: bool,
     /// 轮询间隔下限（秒）
     pub min_interval_secs: u64,
     /// 记录留存上限
@@ -1065,6 +1067,8 @@ pub struct UpdateKeyPollConfigRequest {
     pub log_enabled: Option<bool>,
     #[serde(default)]
     pub retry_invalid_max: Option<u32>,
+    #[serde(default)]
+    pub reclaim_disabled_proxies: Option<bool>,
 }
 
 /// 手动触发一次上号
@@ -1131,6 +1135,16 @@ pub struct KeyOnboardLogItem {
     pub enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// 号废掉的时刻；None = 仍在存活计时
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub died_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// 废掉的原因（取自自动禁用事件）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub death_reason: Option<String>,
+    /// 存活时长（秒）：已废的是上号→废掉，存活中的是上号→现在
+    pub alive_secs: i64,
+    /// 是否仍在存活计时
+    pub alive: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1140,6 +1154,16 @@ pub struct KeyOnboardLogListResponse {
     pub limit: u32,
     pub offset: u32,
     pub items: Vec<KeyOnboardLogItem>,
+}
+
+/// 一次代理槽回收的明细（从已禁用凭据手里腾出的槽）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReclaimedSlot {
+    pub credential_id: u64,
+    pub proxy_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disable_reason: Option<String>,
 }
 
 /// 记录列表查询参数（轮询记录 / 上号记录 / 去重表共用）

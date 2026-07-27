@@ -514,6 +514,38 @@ impl ProxyPool {
         self.save()
     }
 
+    /// 池里当前可分配的空闲槽总数（口径与 [`Self::pick_idle_candidate`] 一致：
+    /// 排除已禁用、剩余有效期不足、处于失败冷却的代理）
+    pub fn idle_slot_count(&self, min_validity_hours: i64) -> u32 {
+        let now = Utc::now();
+        self.entries
+            .read()
+            .iter()
+            .filter(|e| {
+                !e.disabled
+                    && (e.expires_at - now).num_hours() > min_validity_hours
+                    && !self.is_in_failure_cooldown(&e.id)
+            })
+            .map(|e| e.available_slots())
+            .sum()
+    }
+
+    /// 该代理上的槽被释放后是否真能拿来分配新凭据
+    /// （代理本身已禁用/快过期/在冷却时，解绑只是白解）
+    pub fn slot_is_reclaimable(&self, proxy_id: &str, min_validity_hours: i64) -> bool {
+        let now = Utc::now();
+        self.entries
+            .read()
+            .iter()
+            .find(|e| e.id == proxy_id)
+            .map(|e| {
+                !e.disabled
+                    && (e.expires_at - now).num_hours() > min_validity_hours
+                    && !self.is_in_failure_cooldown(&e.id)
+            })
+            .unwrap_or(false)
+    }
+
     /// 解绑某代理上的某凭据；若代理不存在静默忽略
     pub fn unbind(&self, proxy_id: &str, credential_id: u64) -> anyhow::Result<()> {
         let changed = {
@@ -990,6 +1022,37 @@ mod tests {
         // 自动绑定凭据 1：剩余槽位 2 优先（p2、p3），其中到期更远的 p3 胜出
         let chosen = pool.auto_bind(1, 24).unwrap();
         assert_eq!(chosen, "p3");
+    }
+
+    #[test]
+    fn test_idle_slot_count_and_reclaimable() {
+        let pool = ProxyPool::empty();
+        let mut disabled = fresh_entry("p-off", 3, 200);
+        disabled.disabled = true;
+        let expiring = fresh_entry("p-exp", 3, 1); // 剩余有效期不足
+        let mut partly = fresh_entry("p-ok", 3, 200);
+        partly.bound_credential_ids = vec![1, 2]; // 3 槽用掉 2
+        pool.entries
+            .write()
+            .extend([disabled, expiring, partly, fresh_entry("p-free", 2, 200)]);
+
+        // 只数可用代理的空闲槽：p-ok 剩 1 + p-free 剩 2
+        assert_eq!(pool.idle_slot_count(24), 3);
+
+        // 冷却中的代理不计入
+        pool.mark_recent_failure("p-free");
+        assert_eq!(pool.idle_slot_count(24), 1);
+        pool.clear_recent_failure("p-free");
+
+        // 回收判定：坏代理上的槽解了也没用
+        assert!(pool.slot_is_reclaimable("p-ok", 24));
+        assert!(!pool.slot_is_reclaimable("p-off", 24));
+        assert!(!pool.slot_is_reclaimable("p-exp", 24));
+        assert!(!pool.slot_is_reclaimable("不存在", 24));
+
+        // 解绑后空闲槽增加
+        pool.unbind("p-ok", 1).unwrap();
+        assert_eq!(pool.idle_slot_count(24), 4);
     }
 
     #[test]

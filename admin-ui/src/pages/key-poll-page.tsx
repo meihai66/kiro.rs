@@ -37,6 +37,17 @@ function fmtTime(t: string): string {
   return new Date(t).toLocaleString('zh-CN', { hour12: false })
 }
 
+/** 存活时长：秒 → "3天2小时" / "5小时12分" / "42分钟" / "38秒" */
+function fmtDuration(secs: number): string {
+  if (secs < 60) return `${Math.max(0, Math.floor(secs))}秒`
+  const m = Math.floor(secs / 60)
+  if (m < 60) return `${m}分钟`
+  const h = Math.floor(m / 60)
+  if (h < 24) return m % 60 > 0 ? `${h}小时${m % 60}分` : `${h}小时`
+  const d = Math.floor(h / 24)
+  return h % 24 > 0 ? `${d}天${h % 24}小时` : `${d}天`
+}
+
 function triggerLabel(kind: string): string {
   return kind === 'manual' ? '手动' : '自动'
 }
@@ -391,6 +402,26 @@ export function KeyPollPage() {
 
             <div className="flex items-center justify-between">
               <div>
+                <label className="text-sm font-medium">代理槽不足时回收</label>
+                <p className="text-xs text-muted-foreground">
+                  空闲代理不够时，自动收回<strong>已禁用</strong>凭据占用的代理槽给新号
+                  （被收回的凭据保持禁用，只是不再占槽；启用中的号一律不动）
+                </p>
+              </div>
+              <Switch
+                checked={config?.reclaimDisabledProxies ?? true}
+                disabled={configLoading || isPending}
+                onCheckedChange={(v) =>
+                  configMut.mutate(
+                    { reclaimDisabledProxies: v },
+                    { onSuccess: () => toast.success(v ? '已开启自动回收' : '已关闭自动回收') }
+                  )
+                }
+              />
+            </div>
+
+            <div className="flex items-center justify-between">
+              <div>
                 <label className="text-sm font-medium">记录原始响应</label>
                 <p className="text-xs text-muted-foreground">
                   轮询记录里保存上游返回的原始 JSON（最多留存 {config?.pollLogMaxCount ?? 300} 条）
@@ -455,8 +486,21 @@ export function KeyPollPage() {
                 {lastRun.invalid > 0 && (
                   <Badge variant="destructive">失败 {lastRun.invalid}</Badge>
                 )}
+                {lastRun.reclaimedSlots > 0 && (
+                  <Badge variant="warning" title="从已禁用凭据回收的代理槽">
+                    回收代理槽 {lastRun.reclaimedSlots}
+                  </Badge>
+                )}
               </div>
               <p className="text-xs text-muted-foreground">{lastRun.summary}</p>
+              {lastRun.reclaimed && lastRun.reclaimed.length > 0 && (
+                <div className="text-xs text-muted-foreground">
+                  回收自：
+                  {lastRun.reclaimed
+                    .map((r) => `#${r.credentialId}${r.disableReason ? `（${r.disableReason}）` : ''}`)
+                    .join('、')}
+                </div>
+              )}
               {lastRun.errors && lastRun.errors.length > 0 && (
                 <pre className="rounded bg-muted/40 p-2 text-xs whitespace-pre-wrap break-all max-h-40 overflow-y-auto">
                   {lastRun.errors.join('\n')}
@@ -472,7 +516,8 @@ export function KeyPollPage() {
             <CardTitle className="text-base">
               上号记录
               <span className="ml-2 text-xs font-normal text-muted-foreground">
-                每个成功上号的 Key 一条，共 {onboardLogs?.total ?? 0} 条
+                每个成功上号的 Key 一条，共 {onboardLogs?.total ?? 0} 条；存活时长按「上号 → 废掉」计
+                （号被删除或因封号/额度耗尽等不可恢复原因禁用即算废，取自动禁用事件的真实时刻）
               </span>
             </CardTitle>
             <div className="flex items-center gap-2">
@@ -508,6 +553,7 @@ export function KeyPollPage() {
                     <TableHead>Key</TableHead>
                     <TableHead>订单号</TableHead>
                     <TableHead>绑定代理</TableHead>
+                    <TableHead>存活时长</TableHead>
                     <TableHead>状态</TableHead>
                     <TableHead>来源</TableHead>
                   </TableRow>
@@ -515,13 +561,13 @@ export function KeyPollPage() {
                 <TableBody>
                   {onboardLoading ? (
                     <TableRow>
-                      <TableCell colSpan={7} className="h-24 text-center text-muted-foreground">
+                      <TableCell colSpan={8} className="h-24 text-center text-muted-foreground">
                         加载中…
                       </TableCell>
                     </TableRow>
                   ) : onboardItems.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={7} className="h-24 text-center text-muted-foreground">
+                      <TableCell colSpan={8} className="h-24 text-center text-muted-foreground">
                         还没有成功上号的记录
                       </TableCell>
                     </TableRow>
@@ -544,10 +590,36 @@ export function KeyPollPage() {
                             <span className="text-muted-foreground">未绑定</span>
                           )}
                         </TableCell>
+                        <TableCell
+                          className="font-mono text-xs whitespace-nowrap"
+                          title={
+                            it.alive
+                              ? `上号于 ${fmtTime(it.at)}，仍在使用中`
+                              : `上号于 ${fmtTime(it.at)}，废于 ${it.diedAt ? fmtTime(it.diedAt) : '未知'}${
+                                  it.deathReason ? `（${it.deathReason}）` : ''
+                                }`
+                          }
+                        >
+                          {it.alive ? (
+                            <span className="text-emerald-600 dark:text-emerald-400">
+                              {fmtDuration(it.aliveSecs)}
+                            </span>
+                          ) : (
+                            <span className="text-muted-foreground">{fmtDuration(it.aliveSecs)}</span>
+                          )}
+                        </TableCell>
                         <TableCell>
-                          {it.enabled ? (
+                          {!it.alive ? (
+                            <Badge
+                              variant="destructive"
+                              className="text-xs"
+                              title={it.deathReason ?? ''}
+                            >
+                              已废
+                            </Badge>
+                          ) : it.enabled ? (
                             <Badge className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 text-xs">
-                              已启用
+                              使用中
                             </Badge>
                           ) : (
                             <Badge variant="warning" className="text-xs" title={it.note ?? ''}>

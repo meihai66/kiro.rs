@@ -315,6 +315,9 @@ pub struct KeyPollConfig {
     /// 验证失败的 Key 最多重试几次后不再尝试（0 = 不限制，每轮都重试）。
     /// 已成功上号的 Key 永久跳过，不受此项影响。
     pub retry_invalid_max: u32,
+    /// 代理槽不够时，自动回收**已禁用**凭据占用的代理槽给新号用。
+    /// 被回收的凭据保持禁用，只是不再占槽。默认 true
+    pub reclaim_disabled_proxies: bool,
 }
 
 impl Default for KeyPollConfig {
@@ -328,6 +331,7 @@ impl Default for KeyPollConfig {
             only_active: true,
             log_enabled: true,
             retry_invalid_max: 3,
+            reclaim_disabled_proxies: true,
         }
     }
 }

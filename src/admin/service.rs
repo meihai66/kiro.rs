@@ -19,7 +19,7 @@ use crate::kiro::proxy_pool::{
     parse_host_port_user_pass_line, test_proxy,
 };
 use crate::kiro::proxy_rotation;
-use crate::kiro::token_manager::{CachedBalanceInfo, MultiTokenManager};
+use crate::kiro::token_manager::{CachedBalanceInfo, DisableReason, MultiTokenManager};
 use crate::model::config::{CompressionConfig, Config};
 use parking_lot::RwLock;
 
@@ -32,8 +32,9 @@ use super::types::{
     ExportCredentialsRequest, ExportCredentialsResponse, ExportSkippedItem, ImportAction,
     ImportItemResult, ImportProxiesRequest, ImportProxiesResponse, ImportProxyItemResult,
     ImportSummary, ImportTokenJsonRequest, ImportTokenJsonResponse, ProxyAlertItem,
-    ProxyAlertsResponse, ProxyConfigResponse, ProxyEntryItem, ProxyListResponse, RpmAnalysisBucket,
-    RpmAnalysisEntry, TokenJsonItem, TokenJsonProxyItem, UpdateProxyConfigRequest,
+    ProxyAlertsResponse, ProxyConfigResponse, ProxyEntryItem, ProxyListResponse, ReclaimedSlot,
+    RpmAnalysisBucket, RpmAnalysisEntry, TokenJsonItem, TokenJsonProxyItem,
+    UpdateProxyConfigRequest,
 };
 
 /// 余额缓存过期时间（秒），5 分钟
@@ -87,6 +88,39 @@ fn generate_api_key() -> String {
     }
     let suffix = URL_SAFE_NO_PAD.encode(bytes);
     format!("sk-kiro-{}", suffix)
+}
+
+/// 禁用原因（error_logs 里持久化的中文串）是否意味着号已经废了。
+///
+/// 与 [`death_rank`] 的 0 档一致——那一档是不会自愈的；对应
+/// `DisableReason::as_log_str()` 的输出，改那边的文案时这里要跟着改。
+fn is_fatal_disable_reason(reason: &str) -> bool {
+    matches!(
+        reason,
+        "账户暂停" | "认证失败" | "凭据配置无效" | "额度已用尽" | "余额不足"
+    )
+}
+
+/// 回收代理槽时的优先级：越"死"的号越先被回收（0 最先）
+///
+/// 0 档是不会自愈的（封号 / 认证失败 / 额度耗尽 / 配置无效 / 余额不足），
+/// 1 档是可能恢复的失败计数类，2 档是手动禁用等——管理员的临时操作放最后。
+fn death_rank(reason: Option<&DisableReason>) -> u8 {
+    match reason {
+        Some(
+            DisableReason::AccountSuspended
+            | DisableReason::AuthenticationFailed
+            | DisableReason::InvalidConfig
+            | DisableReason::QuotaExceeded
+            | DisableReason::InsufficientBalance,
+        ) => 0,
+        Some(
+            DisableReason::FailureLimit
+            | DisableReason::RefreshFailureLimit
+            | DisableReason::ModelUnavailable,
+        ) => 1,
+        _ => 2,
+    }
 }
 
 /// storage 行 → 轮询记录 API 项
@@ -839,6 +873,7 @@ impl AdminService {
             only_active: cfg.key_poll.only_active,
             log_enabled: cfg.key_poll.log_enabled,
             retry_invalid_max: cfg.key_poll.retry_invalid_max,
+            reclaim_disabled_proxies: cfg.key_poll.reclaim_disabled_proxies,
             min_interval_secs: crate::model::config::KEY_POLL_MIN_INTERVAL_SECS,
             poll_log_max_count: crate::storage::KEY_POLL_LOG_MAX_COUNT,
             onboard_log_max_count: crate::storage::KEY_ONBOARD_LOG_MAX_COUNT,
@@ -921,6 +956,9 @@ impl AdminService {
             if let Some(v) = req.retry_invalid_max {
                 cfg.key_poll.retry_invalid_max = v;
             }
+            if let Some(v) = req.reclaim_disabled_proxies {
+                cfg.key_poll.reclaim_disabled_proxies = v;
+            }
             if let Some(enabled) = req.enabled {
                 cfg.key_poll.enabled = enabled;
             }
@@ -932,6 +970,152 @@ impl AdminService {
             }
         }
         Ok(self.get_key_poll_config())
+    }
+
+    /// 代理槽不够时，从**已禁用**的凭据手里回收代理槽，返回回收明细。
+    ///
+    /// 只动 `disabled == true` 的凭据——启用中的号一律不碰。排序按「死透程度」：
+    /// 封号 / 认证失败 / 额度耗尽这类不会自愈的排最前，手动禁用排最后；
+    /// 同档内最久没用过的先回收。绑在已禁用/快过期/冷却中代理上的槽会跳过——
+    /// 解了也变不出可用槽。
+    ///
+    /// 被回收的凭据保持禁用状态，只是不再占槽；重新启用时需要再分配代理。
+    pub fn reclaim_proxy_slots_from_disabled(&self, need: u32) -> Vec<ReclaimedSlot> {
+        if need == 0 {
+            return Vec::new();
+        }
+        let Some(pool) = self.proxy_pool.as_ref() else {
+            return Vec::new();
+        };
+        let warning_hours = self.config.read().proxy_expiry_warning_hours;
+
+        let snapshot = self.token_manager.snapshot();
+        let mut candidates: Vec<_> = snapshot
+            .entries
+            .iter()
+            .filter(|e| e.disabled)
+            .filter_map(|e| e.proxy_slot_id.clone().map(|slot| (e, slot)))
+            .filter(|(_, slot)| pool.slot_is_reclaimable(slot, warning_hours))
+            .collect();
+        candidates.sort_by(|(a, _), (b, _)| {
+            death_rank(a.disable_reason.as_ref())
+                .cmp(&death_rank(b.disable_reason.as_ref()))
+                // last_used_at 是 RFC3339，字典序即时间序；从未用过的（None）最先回收
+                .then_with(|| a.last_used_at.cmp(&b.last_used_at))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+
+        let mut reclaimed = Vec::new();
+        for (entry, slot) in candidates.into_iter().take(need as usize) {
+            if let Err(e) = pool.unbind(&slot, entry.id) {
+                tracing::warn!(credential_id = entry.id, slot, "回收代理槽失败: {}", e);
+                continue;
+            }
+            let _ = self.token_manager.set_proxy_slot(entry.id, None);
+            tracing::info!(
+                credential_id = entry.id,
+                slot,
+                reason = ?entry.disable_reason,
+                "自动上号：从已禁用凭据回收代理槽"
+            );
+            reclaimed.push(ReclaimedSlot {
+                credential_id: entry.id,
+                proxy_id: slot,
+                disable_reason: entry
+                    .disable_reason
+                    .as_ref()
+                    .map(|r| r.as_log_str().to_string()),
+            });
+        }
+        if !reclaimed.is_empty() {
+            pool.push_alert(
+                AlertLevel::Info,
+                format!(
+                    "自动上号：代理槽不足，已从 {} 个已禁用凭据回收代理槽（凭据仍保持禁用）",
+                    reclaimed.len()
+                ),
+            );
+        }
+        reclaimed
+    }
+
+    /// 扫描上号记录的存活状态，给已经废掉的号打死亡点（存活时长自此定格）。
+    ///
+    /// 判定「废了」只认两种，避免把还能救回来的号提前定格：
+    /// - 凭据已被删除
+    /// - 凭据被禁用且原因不会自愈（封号 / 认证失败 / 额度耗尽 / 余额不足 / 配置无效）
+    ///
+    /// 手动禁用、失败计数这类还能恢复的，继续计时。返回本次新打点的条数。
+    pub fn sweep_onboard_liveness(&self) -> usize {
+        let Some(store) = self.store.as_ref() else {
+            return 0;
+        };
+        let live = match store.list_live_onboard_credentials() {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "扫描上号记录存活状态失败");
+                return 0;
+            }
+        };
+        if live.is_empty() {
+            return 0;
+        }
+        let snapshot = self.token_manager.snapshot();
+        // 凭据池为空时无法区分「号真的被删光了」和「还没加载好」，
+        // 宁可晚判也不要把一池子号误标成已删除（死亡时刻一旦写入就不再改）
+        if snapshot.entries.is_empty() {
+            return 0;
+        }
+        let now = Utc::now();
+        let mut marked = 0usize;
+        for (log_id, credential_id) in live {
+            // 禁用事件（持久化在 error_logs）比内存里的 disable_reason 可靠：
+            // 后者是运行时状态，服务重启就没了，重启前被封的号靠它永远判不出来
+            let event = store
+                .find_last_disable_event(credential_id)
+                .ok()
+                .flatten()
+                .filter(|(_, r)| r.as_deref().is_some_and(is_fatal_disable_reason));
+
+            let (died_at, reason) = match snapshot.entries.iter().find(|e| e.id == credential_id) {
+                None => match event {
+                    // 号被删了：能查到禁用事件就用事件时刻，否则用发现时刻
+                    Some((at, r)) => (at, r.unwrap_or_else(|| "凭据已删除".to_string())),
+                    None => (now, "凭据已删除".to_string()),
+                },
+                Some(entry) if entry.disabled => match event {
+                    Some((at, r)) => (at, r.unwrap_or_else(|| "已禁用".to_string())),
+                    // 事件查不到就退回内存里的原因（仅本次运行期内禁用的号才有）
+                    None => match entry.disable_reason.as_ref() {
+                        Some(r) if death_rank(Some(r)) == 0 => (now, r.as_log_str().to_string()),
+                        // 手动禁用 / 失败计数等还可能恢复，不算废
+                        _ => continue,
+                    },
+                },
+                Some(_) => continue,
+            };
+            match store.mark_onboard_dead(log_id, died_at, &reason) {
+                Ok(true) => {
+                    tracing::info!(
+                        credential_id,
+                        reason,
+                        died_at = %died_at.to_rfc3339(),
+                        "上号记录：号已废，存活时长定格"
+                    );
+                    marked += 1;
+                }
+                Ok(false) => {}
+                Err(e) => tracing::warn!(error = %e, "写入上号记录死亡时间失败"),
+            }
+        }
+        marked
+    }
+
+    /// 池中当前可分配的空闲槽数；代理池未启用时返回 None（表示不限制）
+    pub fn idle_proxy_slot_count(&self) -> Option<u32> {
+        let pool = self.proxy_pool.as_ref()?;
+        let warning_hours = self.config.read().proxy_expiry_warning_hours;
+        Some(pool.idle_slot_count(warning_hours))
     }
 
     pub fn list_key_poll_logs(
@@ -983,7 +1167,10 @@ impl AdminService {
         &self,
         query: &super::types::ListKeyPollLogsQuery,
     ) -> Result<super::types::KeyOnboardLogListResponse, AdminServiceError> {
+        // 打开页面即先扫一遍，避免刚废掉的号还显示"存活中"
+        self.sweep_onboard_liveness();
         let store = self.require_store("上号记录")?;
+        let now = Utc::now();
         let limit = query.limit.clamp(1, 500);
         let (rows, total) = store
             .list_key_onboard_logs(limit, query.offset)
@@ -994,17 +1181,25 @@ impl AdminService {
             offset: query.offset,
             items: rows
                 .into_iter()
-                .map(|r| super::types::KeyOnboardLogItem {
-                    id: r.id,
-                    at: r.at,
-                    credential_id: r.credential_id,
-                    key_masked: r.key_masked,
-                    order_id: r.order_id,
-                    trigger_kind: r.trigger_kind,
-                    proxy_id: r.proxy_id,
-                    proxy_url: r.proxy_url.as_deref().map(mask_url_userinfo),
-                    enabled: r.enabled,
-                    note: r.note,
+                .map(|r| {
+                    // 存活时长：废了的算到死亡时刻，还活着的算到现在
+                    let end = r.died_at.unwrap_or(now);
+                    super::types::KeyOnboardLogItem {
+                        id: r.id,
+                        at: r.at,
+                        credential_id: r.credential_id,
+                        key_masked: r.key_masked,
+                        order_id: r.order_id,
+                        trigger_kind: r.trigger_kind,
+                        proxy_id: r.proxy_id,
+                        proxy_url: r.proxy_url.as_deref().map(mask_url_userinfo),
+                        enabled: r.enabled,
+                        note: r.note,
+                        alive: r.died_at.is_none(),
+                        alive_secs: (end - r.at).num_seconds().max(0),
+                        died_at: r.died_at,
+                        death_reason: r.death_reason,
+                    }
                 })
                 .collect(),
         })
@@ -3725,6 +3920,60 @@ mod tests {
     use std::collections::HashSet;
     use std::env;
     use std::fs;
+
+    #[test]
+    fn test_death_rank_orders_dead_accounts_first() {
+        // 不会自愈的排最前
+        for r in [
+            DisableReason::AccountSuspended,
+            DisableReason::AuthenticationFailed,
+            DisableReason::InvalidConfig,
+            DisableReason::QuotaExceeded,
+            DisableReason::InsufficientBalance,
+        ] {
+            assert_eq!(death_rank(Some(&r)), 0, "{:?} 应最优先被回收", r);
+        }
+        // 可能恢复的次之
+        for r in [
+            DisableReason::FailureLimit,
+            DisableReason::RefreshFailureLimit,
+            DisableReason::ModelUnavailable,
+        ] {
+            assert_eq!(death_rank(Some(&r)), 1, "{:?} 应次优先", r);
+        }
+        // 管理员手动操作和无原因放最后
+        assert_eq!(death_rank(Some(&DisableReason::Manual)), 2);
+        assert_eq!(death_rank(Some(&DisableReason::ProxyUnavailable)), 2);
+        assert_eq!(death_rank(None), 2);
+    }
+
+    #[test]
+    fn test_fatal_reason_strings_stay_in_sync_with_death_rank() {
+        // 两处分类必须一致：一处按枚举（内存态），一处按中文串（error_logs 持久化态）。
+        // 任何一边加了新原因或改了文案，这个断言就会挂。
+        for r in [
+            DisableReason::FailureLimit,
+            DisableReason::RefreshFailureLimit,
+            DisableReason::AuthenticationFailed,
+            DisableReason::AccountSuspended,
+            DisableReason::InsufficientBalance,
+            DisableReason::ModelUnavailable,
+            DisableReason::Manual,
+            DisableReason::QuotaExceeded,
+            DisableReason::InvalidConfig,
+            DisableReason::ProxyUnavailable,
+        ] {
+            assert_eq!(
+                is_fatal_disable_reason(r.as_log_str()),
+                death_rank(Some(&r)) == 0,
+                "{:?}（{}）在两处分类里不一致",
+                r,
+                r.as_log_str()
+            );
+        }
+        assert!(!is_fatal_disable_reason("凭据已删除"));
+        assert!(!is_fatal_disable_reason(""));
+    }
 
     #[test]
     fn test_mask_key_multibyte_no_panic() {

@@ -94,6 +94,11 @@ pub struct PollOutcome {
     pub added: u32,
     pub skipped: u32,
     pub invalid: u32,
+    /// 本次为腾槽而从已禁用凭据回收的代理槽数
+    pub reclaimed_slots: u32,
+    /// 回收明细
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reclaimed: Vec<crate::admin::types::ReclaimedSlot>,
     /// 试运行：只拉取和比对，不实际导入
     pub dry_run: bool,
     pub summary: String,
@@ -197,7 +202,16 @@ pub async fn poll_once(
     trigger_kind: &str,
     dry_run: bool,
 ) -> PollOutcome {
-    let (api_url, api_key, priority, only_active, log_enabled, retry_invalid_max, tls_backend) = {
+    let (
+        api_url,
+        api_key,
+        priority,
+        only_active,
+        log_enabled,
+        retry_invalid_max,
+        reclaim_disabled,
+        tls_backend,
+    ) = {
         let cfg = service.config().read();
         (
             cfg.key_poll.api_url.trim().to_string(),
@@ -206,6 +220,7 @@ pub async fn poll_once(
             cfg.key_poll.only_active,
             cfg.key_poll.log_enabled,
             cfg.key_poll.retry_invalid_max,
+            cfg.key_poll.reclaim_disabled_proxies,
             cfg.tls_backend,
         )
     };
@@ -360,6 +375,26 @@ pub async fn poll_once(
         "自动上号：发现新 Key，开始导入"
     );
 
+    // 代理槽不够就从已禁用的凭据手里回收（启用中的号不动）。
+    // 放在导入前做：导入管线拿不到槽会直接判失败，事后再回收就晚了。
+    if reclaim_disabled && let Some(idle) = service.idle_proxy_slot_count() {
+        let need = outcome.candidates.saturating_sub(idle);
+        if need > 0 {
+            let reclaimed = service.reclaim_proxy_slots_from_disabled(need);
+            outcome.reclaimed_slots = reclaimed.len() as u32;
+            if !reclaimed.is_empty() {
+                tracing::info!(
+                    trigger = trigger_kind,
+                    idle,
+                    need,
+                    reclaimed = reclaimed.len(),
+                    "自动上号：代理槽不足，已从已禁用凭据回收"
+                );
+            }
+            outcome.reclaimed = reclaimed;
+        }
+    }
+
     // 走批量导入管线：逐条验证 → 代理入池/自动分配 → force_enable 直接启用
     let items: Vec<TokenJsonItem> = candidates
         .iter()
@@ -495,6 +530,12 @@ pub async fn poll_once(
             String::new()
         }
     );
+    if outcome.reclaimed_slots > 0 {
+        outcome.summary = format!(
+            "{}；回收 {} 个已禁用凭据的代理槽",
+            outcome.summary, outcome.reclaimed_slots
+        );
+    }
     tracing::info!(
         trigger = trigger_kind,
         added = outcome.added,
@@ -579,6 +620,9 @@ pub fn spawn_poll_loop(service: Arc<AdminService>) {
         let mut last_poll: Option<tokio::time::Instant> = None;
         loop {
             ticker.tick().await;
+            // 顺带维护上号记录的存活状态：号废掉时定格存活时长。
+            // 与轮询开关无关——号是不是废了跟要不要拉新号是两回事。
+            service.sweep_onboard_liveness();
             let (enabled, interval_secs, has_key) = {
                 let cfg = service.config().read();
                 (

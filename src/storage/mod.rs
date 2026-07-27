@@ -980,7 +980,8 @@ impl Store {
             conn.query_row("SELECT COUNT(*) FROM key_onboard_logs", [], |r| r.get(0))?;
         let mut stmt = conn.prepare(
             "SELECT id, at, credential_id, key_masked, order_id, trigger_kind, proxy_id, \
-             proxy_url, enabled, note FROM key_onboard_logs ORDER BY id DESC LIMIT ?1 OFFSET ?2",
+             proxy_url, enabled, note, died_at, death_reason \
+             FROM key_onboard_logs ORDER BY id DESC LIMIT ?1 OFFSET ?2",
         )?;
         let rows = stmt.query_map(params![limit.min(500) as i64, offset as i64], |r| {
             let at_str: String = r.get(1)?;
@@ -995,6 +996,8 @@ impl Store {
                 proxy_url: r.get(7)?,
                 enabled: r.get::<_, i64>(8)? != 0,
                 note: r.get(9)?,
+                died_at: r.get::<_, Option<String>>(10)?.and_then(|s| parse_dt(&s)),
+                death_reason: r.get(11)?,
             })
         })?;
         let items: Vec<KeyOnboardLogRow> = rows.collect::<rusqlite::Result<_>>()?;
@@ -1005,6 +1008,58 @@ impl Store {
         let conn = self.conn()?;
         let n = conn.execute("DELETE FROM key_onboard_logs", [])?;
         Ok(n as u64)
+    }
+
+    /// 查某凭据最近一次「被自动禁用」事件的时刻与原因。
+    ///
+    /// 凭据被自动禁用时会往 error_logs 落一条 `credential_disabled`（见
+    /// token_manager 的禁用路径），这里直接取那个真实时刻——比事后扫描发现的
+    /// 时间准得多（扫描最多滞后一个 tick，服务重启期间死的号更是无从得知）。
+    /// 日志有留存上限，查不到时调用方回退到发现时刻。
+    pub fn find_last_disable_event(
+        &self,
+        credential_id: u64,
+    ) -> Result<Option<(DateTime<Utc>, Option<String>)>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT at, disable_reason FROM error_logs \
+             WHERE credential_id = ?1 AND error_kind = 'credential_disabled' \
+             ORDER BY id DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![credential_id as i64])?;
+        if let Some(r) = rows.next()? {
+            let at: String = r.get(0)?;
+            Ok(parse_dt(&at).map(|dt| (dt, r.get::<_, Option<String>>(1).ok().flatten())))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// 仍在存活计时中的上号记录：返回 (记录 id, 凭据 id)
+    pub fn list_live_onboard_credentials(&self) -> Result<Vec<(i64, u64)>> {
+        let conn = self.conn()?;
+        let mut stmt =
+            conn.prepare("SELECT id, credential_id FROM key_onboard_logs WHERE died_at IS NULL")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as u64))
+        })?;
+        rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
+    }
+
+    /// 给上号记录打死亡点（存活时长自此定格）。已打过的不再覆盖。
+    pub fn mark_onboard_dead(
+        &self,
+        log_id: i64,
+        died_at: DateTime<Utc>,
+        reason: &str,
+    ) -> Result<bool> {
+        let conn = self.conn()?;
+        let n = conn.execute(
+            "UPDATE key_onboard_logs SET died_at = ?2, death_reason = ?3, enabled = 0 \
+             WHERE id = ?1 AND died_at IS NULL",
+            params![log_id, died_at.to_rfc3339(), reason],
+        )?;
+        Ok(n > 0)
     }
 
     // ============ 自动上号：去重表 ============
@@ -1321,6 +1376,10 @@ pub struct KeyOnboardLogRow {
     pub proxy_url: Option<String>,
     pub enabled: bool,
     pub note: Option<String>,
+    /// 号废掉的时刻（凭据被删除或不可恢复地禁用）；None = 仍存活
+    pub died_at: Option<DateTime<Utc>>,
+    /// 废掉的原因
+    pub death_reason: Option<String>,
 }
 
 // ============ row mappers ============
@@ -1790,6 +1849,69 @@ mod tests {
             note: None,
             count_attempt: true,
         }
+    }
+
+    #[test]
+    fn test_onboard_death_marking_and_disable_event_lookup() {
+        let (store, path) = temp_store();
+
+        let id = store
+            .insert_key_onboard_log(&onboard_log(77, "ORD-X"))
+            .unwrap();
+        let (items, _) = store.list_key_onboard_logs(10, 0).unwrap();
+        assert!(items[0].died_at.is_none(), "刚上号应处于存活计时中");
+
+        // 自动禁用事件：存活时长应能取到这个真实时刻，而不是事后发现的时间
+        let disabled_at = Utc::now() - chrono::Duration::hours(3);
+        store
+            .insert_error_log(&ErrorLogInsert {
+                at: disabled_at,
+                credential_id: Some(77),
+                endpoint: None,
+                status_code: 0,
+                upstream_status: None,
+                error_kind: "credential_disabled".to_string(),
+                model: None,
+                summary: "额度已用尽".to_string(),
+                request_method: None,
+                request_path: None,
+                request_headers: None,
+                response_headers: None,
+                request_body: None,
+                response_body: None,
+                user_id: None,
+                request_id: None,
+                disable_reason: Some("额度已用尽".to_string()),
+            })
+            .unwrap();
+        let found = store
+            .find_last_disable_event(77)
+            .unwrap()
+            .expect("应查到禁用事件");
+        assert_eq!(found.1.as_deref(), Some("额度已用尽"));
+        assert_eq!(found.0.timestamp(), disabled_at.timestamp());
+        // 无事件的凭据查不到
+        assert!(store.find_last_disable_event(999).unwrap().is_none());
+
+        // 打死亡点后存活时长定格，且不会被二次覆盖
+        assert!(store.mark_onboard_dead(id, found.0, "额度已用尽").unwrap());
+        assert!(
+            !store.mark_onboard_dead(id, Utc::now(), "别的原因").unwrap(),
+            "已定格的记录不该被再次改写"
+        );
+        let (items, _) = store.list_key_onboard_logs(10, 0).unwrap();
+        assert_eq!(items[0].death_reason.as_deref(), Some("额度已用尽"));
+        assert_eq!(
+            items[0].died_at.map(|d| d.timestamp()),
+            Some(disabled_at.timestamp())
+        );
+        assert!(!items[0].enabled, "已废的记录同时置为未启用");
+
+        // 死了的记录不再出现在存活扫描列表里
+        assert!(store.list_live_onboard_credentials().unwrap().is_empty());
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

@@ -150,7 +150,9 @@ CREATE TABLE IF NOT EXISTS key_onboard_logs (
     proxy_id        TEXT,
     proxy_url       TEXT,
     enabled         INTEGER NOT NULL DEFAULT 1,
-    note            TEXT
+    note            TEXT,
+    died_at         TEXT,
+    death_reason    TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_key_onboard_logs_at ON key_onboard_logs(at DESC);
@@ -192,6 +194,9 @@ pub fn ensure_schema(conn: &Connection) -> Result<()> {
         "rl_count",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
+    // 上号记录的「存活时间」：号废掉时打点，之后存活时长即定格
+    add_column_if_missing(conn, "key_onboard_logs", "died_at", "TEXT")?;
+    add_column_if_missing(conn, "key_onboard_logs", "death_reason", "TEXT")?;
     // v1.1.84 短暂存在过的 Webhook 接收日志表（功能已改为主动轮询），清理掉避免留死表
     conn.execute("DROP TABLE IF EXISTS webhook_logs", [])
         .context("清理 webhook_logs 失败")?;

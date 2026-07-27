@@ -975,6 +975,8 @@ export interface KeyPollConfigResponse {
   logEnabled: boolean
   /** 验证失败的 Key 重试次数上限（0 = 不限制） */
   retryInvalidMax: number
+  /** 代理槽不足时自动回收已禁用凭据的代理槽 */
+  reclaimDisabledProxies: boolean
   minIntervalSecs: number
   pollLogMaxCount: number
   onboardLogMaxCount: number
@@ -990,6 +992,7 @@ export interface UpdateKeyPollConfigRequest {
   onlyActive?: boolean
   logEnabled?: boolean
   retryInvalidMax?: number
+  reclaimDisabledProxies?: boolean
 }
 
 export interface OnboardedItem {
@@ -1000,6 +1003,13 @@ export interface OnboardedItem {
   proxyUrl?: string | null
   enabled: boolean
   note?: string | null
+}
+
+/** 一次代理槽回收明细 */
+export interface ReclaimedSlot {
+  credentialId: number
+  proxyId: string
+  disableReason?: string | null
 }
 
 /** 一次上号的结果（手动「立即上号」的返回体） */
@@ -1017,6 +1027,9 @@ export interface PollOutcome {
   added: number
   skipped: number
   invalid: number
+  /** 本次为腾槽而从已禁用凭据回收的代理槽数 */
+  reclaimedSlots: number
+  reclaimed?: ReclaimedSlot[]
   dryRun: boolean
   summary: string
   onboarded?: OnboardedItem[]
@@ -1061,6 +1074,13 @@ export interface KeyOnboardLogItem {
   proxyUrl?: string | null
   enabled: boolean
   note?: string | null
+  /** 号废掉的时刻；不存在 = 仍在存活计时 */
+  diedAt?: string | null
+  /** 废掉的原因（取自自动禁用事件） */
+  deathReason?: string | null
+  /** 存活时长（秒）：已废的是上号→废掉，存活中的是上号→现在 */
+  aliveSecs: number
+  alive: boolean
 }
 
 export interface KeyOnboardLogListResponse {
