@@ -1,5 +1,16 @@
 # Changelog
 
+## [v1.1.87] - 2026-07-27
+
+### 新增
+
+- **代理槽不足时自动回收** — 空闲代理不够新号使用时，从**已禁用**凭据回收代理槽（`reclaimDisabledProxies`，默认开启）；回收顺序按「死透程度」排序（封号/认证失败/额度耗尽/余额不足/配置无效最先，失败计数类次之，管理员手动禁用最后，同档内最久未使用的先回收）；启用中的凭据一律不动，绑在已禁用/快过期/失败冷却代理上的槽跳过；被回收的凭据保持禁用状态，回收在导入前执行 (`src/admin/service.rs`, `src/kiro/proxy_pool.rs`, `src/model/config.rs`, `src/key_poll.rs`)
+- **上号记录新增存活时长统计** — `key_onboard_logs` 增加 `died_at` / `death_reason`，号废掉即定格，之后不再依赖 `error_logs`；死亡时刻优先取 `error_logs` 中持久化的 `credential_disabled` 事件时间（内存里的 `disable_reason` 服务重启即丢失，重启前被封的号将永远判不出来）；仅凭据被删除、或因封号/认证失败/额度耗尽/余额不足/配置无效被禁用才判定为「废了」，手动禁用与连续失败这类可恢复情形继续计时；快照为空时跳过判定，避免不可逆的误标；前端上号记录新增「存活时长」列，使用中绿色计时、已废灰色定格并展示死因 (`src/storage/migration.rs`, `src/admin/service.rs`, `src/admin/types.rs`, `admin-ui/src/pages/key-poll-page.tsx`, `admin-ui/src/types/api.ts`)
+
+### 其他
+
+- **死亡分类一致性测试** — `is_fatal_disable_reason`（按中文串）与 `death_rank`（按枚举）是两处并行分类，新增测试遍历所有 `DisableReason` 断言两边结论一致，防止改文案时漂移 (`src/admin/service.rs`)
+
 ## [v1.1.86] - 2026-07-26
 
 ### 修复
