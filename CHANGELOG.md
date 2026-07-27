@@ -1,5 +1,11 @@
 # Changelog
 
+## [v1.1.88] - 2026-07-27
+
+### 修复
+
+- **存活时长算错——重复禁用事件、旧事件误匹配、重启后原因失真** — 三个问题一起修：① 开启「允许超额」的号每次请求成功后都会记一条假 `credential_disabled` 事件（先记事件再禁用，而 `mark_insufficient_balance` 遇 `allow_overuse` 直接返回不禁用），改为先禁用、确认真禁用了才记事件；② 死亡时刻改取**上号之后第一条**致命事件（`list_disable_events_since`，按 id 升序）并加 since 过滤，挡掉重复事件把死亡时刻不断后移、凭据 id 复用翻出前任事件、reset 复活前的旧事件（实测 6h 真死被算成 45h，现正确定格 6.0h）；③ 重启后 DB 只存 disabled 布尔，内存禁用原因一律变 Manual，导致额度耗尽废掉的号重启后永远判不出死——现分三档：运行期内致命原因直接判死、明确可恢复的继续计时、Manual/无原因靠「上号后是否有致命事件」兜底 (`src/kiro/provider.rs`, `src/kiro/token_manager.rs`, `src/admin/service.rs`, `src/storage/mod.rs`)
+
 ## [v1.1.87] - 2026-07-27
 
 ### 新增
