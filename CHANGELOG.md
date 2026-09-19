@@ -1,5 +1,11 @@
 # Changelog
 
+## [v1.1.90] - 2026-09-19
+
+### 新增
+
+- **管理面左上角显示后端运行版本** — 新增 `GET /api/admin/version`，返回编译期 `CARGO_PKG_VERSION`（受 Admin Key 保护）；前端页头「Kiro」旁显示 `v{version}`，取自后端接口而非前端构建期常量，显示的是实际运行的二进制版本，可据此确认容器是否已更新到新镜像 (`src/admin/handlers.rs`, `src/admin/router.rs`, `admin-ui/src/components/admin-shell.tsx`)
+
 ## [v1.1.89] - 2026-09-19
 
 ### 修复
