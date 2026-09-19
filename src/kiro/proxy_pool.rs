@@ -11,17 +11,15 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use parking_lot::{Mutex, RwLock};
-use reqwest::Client;
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::http_client::ProxyConfig;
-use crate::model::config::TlsBackend;
 
 /// 代理条目
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -824,37 +822,56 @@ pub struct ProxyTestResult {
     pub error: Option<String>,
 }
 
-/// 代理测试用的 HTTP Client 缓存。
-///
-/// 代理测试只需「能否连通 + 延迟」，每次都重建 reqwest::Client（含 TLS 初始化）在
-/// 高并发时会同步占用 worker 线程。按 (代理配置, TLS 后端) 缓存复用 Client，既省去
-/// 重建开销，也复用连接池让重复测试更快。
-static PROXY_TEST_CLIENTS: OnceLock<Mutex<HashMap<(ProxyConfig, TlsBackend), Client>>> =
-    OnceLock::new();
+/// 代理测试的真实目标：Kiro 认证上游。能到 ipify 不代表能到这里。
+const PROXY_TEST_UPSTREAM_URL: &str = "https://prod.us-east-1.auth.desktop.kiro.dev/";
+/// 出口 IP 查询（仅 HTTPS，尽力而为，不参与可用性判定）
+const PROXY_TEST_IP_URL: &str = "https://api.ipify.org?format=json";
 
-fn proxy_test_client(proxy: &ProxyConfig, tls_backend: TlsBackend) -> anyhow::Result<Client> {
-    let cache = PROXY_TEST_CLIENTS.get_or_init(|| Mutex::new(HashMap::new()));
-    let key = (proxy.clone(), tls_backend);
-    {
-        if let Some(client) = cache.lock().get(&key) {
-            return Ok(client.clone());
-        }
+/// 展开错误链。reqwest 的 Display 只有 "error sending request for url (...)"，
+/// 真实原因（407 代理认证失败 / 连接被拒 / DNS / TLS）都在 source 里。
+fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut msg = err.to_string();
+    let mut source = err.source();
+    while let Some(e) = source {
+        msg.push_str(": ");
+        msg.push_str(&e.to_string());
+        source = e.source();
     }
-    let client = crate::http_client::build_client(Some(proxy), 10, tls_backend)?;
-    cache.lock().insert(key, client.clone());
-    Ok(client)
+    msg
 }
 
-/// 通过给定代理测出口 IP + 延迟。
+/// 识别代理认证失败（407），给出可操作的提示
+fn describe_proxy_test_error(chain: String) -> String {
+    let lower = chain.to_ascii_lowercase();
+    // hyper 对 CONNECT 407 的措辞是 "proxy authorization required"；状态行则是 "Proxy Authentication Required"
+    if lower.contains("407")
+        || lower.contains("proxy authorization required")
+        || lower.contains("proxy authentication required")
+    {
+        format!(
+            "代理认证失败（407）：用户名/密码错误、套餐过期或本机 IP 未加白名单: {}",
+            chain
+        )
+    } else {
+        chain
+    }
+}
+
+/// 通过给定代理测连通性 + 出口 IP + 延迟。
 ///
-/// 试 https / http 两个 ipify 端点；任一成功即返回。
+/// 判定口径与真实流量一致：必须能经代理建立 **HTTPS（CONNECT 隧道）** 到 Kiro 上游，
+/// 收到任意 HTTP 响应（407 除外）才算可用。
+/// - 不做明文 HTTP 兜底：不少代理对明文转发放行、对 CONNECT 返回 407，
+///   明文成功会把一条实际完全不可用的代理误判为可用。
+/// - 每次新建 Client、不复用连接：复用连接池里已建好的旧隧道不会重新走代理认证，
+///   代理账号失效后仍会测出「可用」。
 pub async fn test_proxy(
     entry: &ProxyEntry,
     tls_backend: crate::model::config::TlsBackend,
 ) -> ProxyTestResult {
     use std::time::Instant;
     let proxy = entry.to_proxy_config();
-    let client = match proxy_test_client(&proxy, tls_backend) {
+    let client = match crate::http_client::build_client(Some(&proxy), 10, tls_backend) {
         Ok(c) => c,
         Err(e) => {
             return ProxyTestResult {
@@ -867,39 +884,40 @@ pub async fn test_proxy(
         }
     };
 
-    let urls = [
-        "https://api.ipify.org?format=json",
-        "http://api.ipify.org?format=json",
-    ];
     let start = Instant::now();
-    let mut last_err = String::from("未知错误");
-    for url in urls {
-        match client.get(url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                let elapsed = start.elapsed().as_millis() as u64;
-                let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
-                let ip = body
-                    .get("ip")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                return ProxyTestResult {
-                    id: entry.id.clone(),
-                    ok: true,
-                    elapsed_ms: elapsed,
-                    ip,
-                    error: None,
-                };
-            }
-            Ok(resp) => last_err = format!("HTTP {} from {}", resp.status(), url),
-            Err(e) => last_err = format!("{}: {}", url, e),
+    let upstream_probe = async {
+        let result = client.get(PROXY_TEST_UPSTREAM_URL).send().await;
+        (result, start.elapsed().as_millis() as u64)
+    };
+    let ip_probe = async {
+        let resp = client.get(PROXY_TEST_IP_URL).send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
         }
-    }
+        let body: serde_json::Value = resp.json().await.ok()?;
+        body.get("ip")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    };
+    let ((upstream, elapsed_ms), ip) = tokio::join!(upstream_probe, ip_probe);
+
+    let error = match upstream {
+        // 隧道已通：上游返回什么状态码都说明代理可用（根路径本来就不是有效接口）
+        Ok(resp) if resp.status() != reqwest::StatusCode::PROXY_AUTHENTICATION_REQUIRED => None,
+        Ok(resp) => Some(describe_proxy_test_error(format!(
+            "HTTP {} from {}",
+            resp.status(),
+            PROXY_TEST_UPSTREAM_URL
+        ))),
+        Err(e) => Some(describe_proxy_test_error(error_chain(&e))),
+    };
+
     ProxyTestResult {
         id: entry.id.clone(),
-        ok: false,
-        elapsed_ms: start.elapsed().as_millis() as u64,
-        ip: None,
-        error: Some(last_err),
+        ok: error.is_none(),
+        elapsed_ms,
+        ip,
+        error,
     }
 }
 
@@ -1300,6 +1318,59 @@ mod tests {
             disabled_category: None,
             disabled_reason: None,
         }
+    }
+
+    /// 假代理：明文 HTTP 转发一律 200，CONNECT 隧道一律 407。
+    /// 模拟「对明文放行、对 HTTPS 隧道要求认证」的代理——真实流量全是 HTTPS，这种代理完全不可用。
+    async fn spawn_proxy_407_on_connect() -> std::net::SocketAddr {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let resp: &[u8] = if buf[..n].starts_with(b"CONNECT ") {
+                        b"HTTP/1.1 407 Proxy Authentication Required\r\n\
+                          Proxy-Authenticate: Basic realm=\"proxy\"\r\n\
+                          Content-Length: 0\r\nConnection: close\r\n\r\n"
+                    } else {
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                          Content-Length: 16\r\nConnection: close\r\n\r\n{\"ip\":\"1.2.3.4\"}"
+                    };
+                    let _ = sock.write_all(resp).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn test_proxy_407_on_connect_is_not_ok() {
+        let addr = spawn_proxy_407_on_connect().await;
+        let entry = make_entry(&format!("http://{}", addr));
+
+        let result = test_proxy(&entry, crate::model::config::TlsBackend::Rustls).await;
+
+        assert!(
+            !result.ok,
+            "CONNECT 返回 407 的代理不能判为可用: {:?}",
+            result
+        );
+        assert!(result.ip.is_none(), "不应通过明文 HTTP 兜底拿到出口 IP");
+        let err = result.error.expect("失败必须带原因");
+        assert!(err.contains("407"), "错误信息应指明 407: {}", err);
+    }
+
+    #[test]
+    fn test_describe_proxy_test_error_flags_407() {
+        let msg = describe_proxy_test_error(
+            "client error (Connect): tunnel error: proxy authorization required".to_string(),
+        );
+        assert!(msg.starts_with("代理认证失败（407）"), "{}", msg);
+        assert_eq!(describe_proxy_test_error("dns error".into()), "dns error");
     }
 
     #[test]

@@ -2038,7 +2038,9 @@ impl AdminService {
 
     /// 分类添加凭据错误
     fn classify_add_error(&self, e: anyhow::Error) -> AdminServiceError {
-        let msg = e.to_string();
+        // `{:#}` 带出完整错误链：reqwest 的真实原因（连接被拒/代理认证/DNS/TLS）在 source 里，
+        // 只取最外层会得到毫无信息量的 "error sending request for url (...)"
+        let msg = format!("{:#}", e);
 
         // 凭据验证失败（refreshToken 无效、格式错误等）
         let is_invalid_credential = msg.contains("缺少 refreshToken")
@@ -2056,10 +2058,7 @@ impl AdminService {
 
         if is_invalid_credential {
             AdminServiceError::InvalidCredential(msg)
-        } else if msg.contains("error trying to connect")
-            || msg.contains("connection")
-            || msg.contains("timeout")
-        {
+        } else if looks_like_proxy_network_failure(&msg) {
             AdminServiceError::UpstreamError(msg)
         } else {
             AdminServiceError::InternalError(msg)
@@ -2098,7 +2097,7 @@ impl AdminService {
                     return (Ok(id), current_slot);
                 }
                 Err(e) => {
-                    let msg = e.to_string();
+                    let msg = format!("{:#}", e);
                     if !looks_like_proxy_network_failure(&msg) {
                         // 非网络错：凭据无效 / AWS 限流 / 4xx5xx 等，重试无意义
                         return (Err(self.classify_add_error(e)), current_slot);
