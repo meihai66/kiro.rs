@@ -416,6 +416,13 @@ pub async fn export_credentials(
     Json(response)
 }
 
+/// GET /version - 当前运行的后端版本
+///
+/// 前端左上角展示用：取的是**正在运行**的二进制版本，可据此确认容器是否已更新到新镜像。
+pub async fn get_version() -> impl IntoResponse {
+    Json(serde_json::json!({ "version": env!("CARGO_PKG_VERSION") }))
+}
+
 /// GET /proxy - 获取全局代理配置
 pub async fn get_proxy_config(State(state): State<AdminState>) -> impl IntoResponse {
     Json(state.service.get_proxy_config())

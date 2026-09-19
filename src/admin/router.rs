@@ -15,7 +15,7 @@ use super::{
         get_all_credentials, get_cached_balances, get_credential_balance, get_error_log,
         get_error_log_kind_stats, get_global_config, get_key_poll_config, get_key_poll_log,
         get_proxy_config, get_rpm_analysis, get_rpm_history, get_rpm_history_aggregate,
-        get_stats_summary, import_proxies, import_token_json, list_api_keys,
+        get_stats_summary, get_version, import_proxies, import_token_json, list_api_keys,
         list_credential_models, list_error_logs, list_key_onboard_logs, list_key_poll_logs,
         list_key_seen, list_proxies, list_proxy_alerts, reset_all_stats, reset_failure_count,
         reset_rate_limit_stats, rotate_proxies_now, run_key_poll, set_credential_allow_overuse,
@@ -39,6 +39,7 @@ use super::{
 /// - `POST /credentials/:id/reset` - 重置失败计数
 /// - `GET /credentials/:id/balance` - 获取凭据余额
 /// - `GET /credentials/balances/cached` - 获取所有凭据的缓存余额
+/// - `GET /version` - 当前运行的后端版本
 ///
 /// # 认证
 /// 需要 Admin API Key 认证，支持：
@@ -46,6 +47,7 @@ use super::{
 /// - `Authorization: Bearer <token>` header
 pub fn create_admin_router(state: AdminState) -> Router {
     Router::new()
+        .route("/version", get(get_version))
         .route(
             "/credentials",
             get(get_all_credentials).post(add_credential),

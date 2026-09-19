@@ -1,8 +1,9 @@
 import { useState } from 'react'
 import { Link, Outlet, useLocation } from 'react-router-dom'
-import { useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, BarChart3, BrainCircuit, KeyRound, LogOut, Moon, RefreshCw, Settings as SettingsIcon, Shield, Sun, Users } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { adminApi } from '@/lib/admin-axios'
 import { storage } from '@/lib/storage'
 
 interface AdminShellProps {
@@ -23,6 +24,12 @@ const TABS = [
 export function AdminShell({ onLogout }: AdminShellProps) {
   const location = useLocation()
   const queryClient = useQueryClient()
+  // 后端实际运行的版本（不是前端构建时的版本）：用来确认容器是否已更新
+  const { data: version } = useQuery({
+    queryKey: ['version'],
+    queryFn: async () => (await adminApi.get<{ version: string }>('/version')).data.version,
+    staleTime: Infinity,
+  })
   const [darkMode, setDarkMode] = useState(() => {
     if (typeof window !== 'undefined') {
       return document.documentElement.classList.contains('dark')
@@ -46,8 +53,13 @@ export function AdminShell({ onLogout }: AdminShellProps) {
       <header className="shrink-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
         <div className="container flex h-14 items-center justify-between px-4 md:px-8">
           <div className="flex items-center gap-6">
-            <div className="flex items-center">
+            <div className="flex items-baseline gap-1.5">
               <span className="font-semibold">Kiro</span>
+              {version && (
+                <span className="text-xs text-muted-foreground tabular-nums" title="后端运行版本">
+                  v{version}
+                </span>
+              )}
             </div>
             <nav className="flex items-center gap-1">
               {TABS.map((t) => {
